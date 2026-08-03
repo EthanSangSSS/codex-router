@@ -306,7 +306,7 @@ class RouterCliTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout.strip(), "ROUTER_MVP_OK")
-            runs = list(Path(tmp).iterdir())
+            runs = list(Path(tmp).glob("run-*"))
             self.assertEqual(len(runs), 1)
             result = json.loads((runs[0] / "result.json").read_text())
             self.assertEqual(result["result"], "ROUTER_MVP_OK")

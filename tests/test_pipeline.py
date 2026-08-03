@@ -58,6 +58,19 @@ class RouterPipelineTests(unittest.TestCase):
             self.assertEqual(calls[1][2]["handoff"]["stage"], "local_sol")
             self.assertEqual(calls[2][2]["handoff"]["stage"], "web_sol")
 
+    def test_fake_pipeline_persists_canonical_revision_three_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            router, calls, _ = self.build_router(Path(tmp))
+            outcome = router.run("Return exactly ROUTER_MVP_OK")
+            state = json.loads((outcome.run_dir / "state.json").read_text(encoding="utf-8"))
+
+            self.assertEqual([call[0] for call in calls], ["local_sol", "web_sol", "luna"])
+            self.assertEqual(
+                (state["status"], state["revision"], state["final_result"]),
+                ("completed", 3, "luna:Return exactly ROUTER_MVP_OK"),
+            )
+            self.assertEqual(set(state["submissions"]), {"local_sol", "web_sol", "luna"})
+
     def test_local_failure_stops_web_and_luna(self):
         with tempfile.TemporaryDirectory() as tmp:
             router, calls, error_type = self.build_router(Path(tmp), failure_stage="local_sol")
@@ -92,14 +105,29 @@ class RouterPipelineTests(unittest.TestCase):
 
             self.assertEqual([call[0] for call in calls], ["local_sol"])
 
+    def test_system_exit_propagates_without_running_downstream_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            router, calls, _ = self.build_router(Path(tmp))
+            _, _, StageResult = load_pipeline_api(self)
+            router.adapters["local_sol"] = RecordingAdapter(
+                "local_sol", calls, StageResult, failure=SystemExit(7)
+            )
+
+            with self.assertRaises(SystemExit) as raised:
+                router.run("exit locally")
+
+            self.assertEqual(raised.exception.code, 7)
+            self.assertEqual([call[0] for call in calls], ["local_sol"])
+
     def test_run_directory_and_final_result_are_persisted(self):
         with tempfile.TemporaryDirectory() as tmp:
             router, _, _ = self.build_router(Path(tmp))
             outcome = router.run("persist me")
 
-            self.assertEqual(outcome.run_dir.parent, Path(tmp))
+            self.assertEqual(outcome.run_dir.parent, Path(tmp).resolve())
             self.assertEqual(outcome.final_result, "luna:persist me")
             for name in (
+                "state.json",
                 "request.json",
                 "local-sol.json",
                 "web-sol.json",
@@ -118,8 +146,23 @@ class RouterPipelineTests(unittest.TestCase):
             self.assertTrue(events)
             for event in events:
                 self.assertIn("stage", event)
-                self.assertIn("status", event)
-                self.assertIn("duration_ms", event)
+                self.assertIn("event", event)
+                self.assertIn("revision", event)
+
+    def test_missing_result_projection_is_recreated_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            from codex_router.state import get_status
+
+            router, _, _ = self.build_router(Path(tmp))
+            outcome = router.run("repair me")
+            result_path = outcome.run_dir / "result.json"
+            expected = result_path.read_bytes()
+            result_path.unlink()
+
+            status = get_status(state_root=Path(tmp), run_id=outcome.run_id)
+
+            self.assertEqual((status.status, status.revision), ("completed", 3))
+            self.assertEqual(result_path.read_bytes(), expected)
 
     def test_stage_timeout_is_structured_and_stops_downstream(self):
         with tempfile.TemporaryDirectory() as tmp:
