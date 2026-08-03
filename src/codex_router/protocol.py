@@ -22,7 +22,10 @@ def normalize_content(value: str) -> str:
     normalized = unicodedata.normalize(
         "NFC", value.replace("\r\n", "\n").replace("\r", "\n")
     )
-    normalized.encode("utf-8", errors="strict")
+    try:
+        normalized.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ProtocolError("content must be valid UTF-8 text") from error
     return normalized
 
 

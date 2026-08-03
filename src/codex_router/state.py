@@ -15,10 +15,13 @@ import uuid
 
 from .protocol import (
     RUN_PROTOCOL,
+    WEB_RESPONSE_PREFIX,
     ProtocolError,
     build_stage_packet,
     canonical_json_bytes,
     normalize_content,
+    submission_digest,
+    validate_web_response,
 )
 from .types import TransitionResult
 
@@ -43,6 +46,45 @@ _RUN_ID_PATTERN = re.compile(r"run-[A-Za-z0-9][A-Za-z0-9._-]*")
 _DRIVER_TYPES = frozenset(("codex_app", "offline_pipeline"))
 _PROFILE_PROTOCOL = "codex-router/profile/v1"
 _LOCAL_STAGES = ("local_sol", "luna")
+_STAGE_FILE_NAMES = {
+    "local_sol": "local-sol.json",
+    "web_sol": "web-sol.json",
+    "luna": "luna.json",
+}
+_LOCAL_EXECUTION_FIELDS = (
+    "requested_model",
+    "requested_reasoning",
+    "reported_model",
+    "reported_reasoning",
+    "verification",
+    "thread_id",
+    "driver_context_id",
+    "packet_digest",
+    "profile_id",
+    "codex_home",
+    "codex_sqlite_home",
+    "codex_binary_realpath",
+    "codex_binary_sha256",
+    "app_server_version",
+    "workspace_access",
+)
+_WEB_EXECUTION_FIELDS = (
+    "driver_context_id",
+    "web_context_ref",
+    "context_mode",
+    "context_scope",
+    "context_isolation",
+    "model_claimed",
+    "reasoning_claimed",
+    "verification",
+    "packet_digest",
+)
+_OFFLINE_EXECUTION_FIELDS = (
+    "driver_context_id",
+    "packet_digest",
+    "verification",
+    "network_used",
+)
 
 
 class RouterStateError(RuntimeError):
@@ -273,11 +315,45 @@ def _projection_payloads(state: Mapping[str, Any]) -> dict[Path, bytes]:
         Path("request.json"): canonical_json_bytes(request) + b"\n",
         Path("events.jsonl"): event_bytes,
     }
+    packets = [
+        record["packet"]
+        for record in state["submissions"].values()
+        if isinstance(record, Mapping) and isinstance(record.get("packet"), Mapping)
+    ]
     packet = state.get("next_packet")
-    if packet is not None:
+    if isinstance(packet, Mapping):
+        packets.append(packet)
+    for packet in packets:
         payloads[Path("packets") / f"{packet['packet_id']}.json"] = (
             canonical_json_bytes(packet) + b"\n"
         )
+    for stage, record in state["submissions"].items():
+        projection = {
+            "protocol": RUN_PROTOCOL,
+            "run_id": state["run_id"],
+            "stage": stage,
+            "status": "submitted",
+            "submission": record,
+        }
+        payloads[Path(_STAGE_FILE_NAMES[stage])] = canonical_json_bytes(projection) + b"\n"
+    for stage, record in state["failures"].items():
+        projection = {
+            "protocol": RUN_PROTOCOL,
+            "run_id": state["run_id"],
+            "stage": stage,
+            "status": "failed",
+            "failure": record,
+        }
+        payloads[Path(_STAGE_FILE_NAMES[stage])] = canonical_json_bytes(projection) + b"\n"
+    if state["status"] == "completed":
+        result = {
+            "protocol": RUN_PROTOCOL,
+            "run_id": state["run_id"],
+            "revision": state["revision"],
+            "status": "completed",
+            "result": state["final_result"],
+        }
+        payloads[Path("result.json")] = canonical_json_bytes(result) + b"\n"
     return payloads
 
 
@@ -331,7 +407,13 @@ def _load_state(run_dir: Path, run_id: str) -> dict[str, Any]:
     return state
 
 
-def _result(run_dir: Path, state: Mapping[str, Any]) -> TransitionResult:
+def _result(
+    run_dir: Path,
+    state: Mapping[str, Any],
+    *,
+    idempotent: bool = False,
+    projection_warnings: tuple[str, ...] = (),
+) -> TransitionResult:
     packet = state.get("next_packet")
     packet_path = None
     if packet is not None:
@@ -343,7 +425,157 @@ def _result(run_dir: Path, state: Mapping[str, Any]) -> TransitionResult:
         status=state["status"],
         next_stage=state["next_stage"],
         stage_packet_path=packet_path,
+        idempotent=idempotent,
+        projection_warnings=projection_warnings,
     )
+
+
+def _normalize_execution(
+    *,
+    state: Mapping[str, Any],
+    stage: str,
+    execution: Mapping[str, Any],
+    driver_context_id: str,
+    packet_digest_value: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(execution, Mapping):
+        _raise_invalid("execution must be an object")
+    driver_type = state["driver"]["driver_type"]
+    if driver_type == "offline_pipeline":
+        fields = _OFFLINE_EXECUTION_FIELDS
+        stable = {name: deepcopy(execution[name]) for name in fields if name in execution}
+        required = {
+            "driver_context_id": driver_context_id,
+            "packet_digest": packet_digest_value,
+            "verification": "fake_offline",
+            "network_used": False,
+        }
+        if any(stable.get(name) != value for name, value in required.items()):
+            raise RouterStateError(
+                "profile-mismatch", "offline execution evidence does not match the run"
+            )
+    elif stage in _LOCAL_STAGES:
+        fields = _LOCAL_EXECUTION_FIELDS
+        stable = {name: deepcopy(execution[name]) for name in fields if name in execution}
+        profile = state["profiles"][stage]
+        required = {
+            "verification": "app_server_reported",
+            "driver_context_id": driver_context_id,
+            "packet_digest": packet_digest_value,
+            "profile_id": profile["profile_id"],
+            "codex_home": profile["codex_home"],
+            "codex_sqlite_home": profile["codex_sqlite_home"],
+            "codex_binary_realpath": profile["codex_binary_realpath"],
+            "codex_binary_sha256": profile["codex_binary_sha256"],
+            "workspace_access": "read_only",
+        }
+        role = state["role_config"][stage]
+        for role_field in ("requested_model", "requested_reasoning"):
+            if role_field in role:
+                required[role_field] = role[role_field]
+        if any(stable.get(name) != value for name, value in required.items()):
+            raise RouterStateError(
+                "profile-mismatch", "App Server execution evidence does not match the profile"
+            )
+        for required_text in ("thread_id", "app_server_version"):
+            if not isinstance(stable.get(required_text), str) or not stable[required_text]:
+                raise RouterStateError(
+                    "profile-mismatch", "App Server execution evidence is incomplete"
+                )
+    elif stage == "web_sol":
+        fields = _WEB_EXECUTION_FIELDS
+        stable = {name: deepcopy(execution[name]) for name in fields if name in execution}
+        required = {
+            "driver_context_id": driver_context_id,
+            "packet_digest": packet_digest_value,
+            "context_mode": "continuous",
+            "context_scope": "driver_context_id",
+            "context_isolation": "operator_managed",
+            "verification": "operator_attested",
+        }
+        role = state["role_config"][stage]
+        for role_field in ("model_claimed", "reasoning_claimed"):
+            if role_field in role:
+                required[role_field] = role[role_field]
+        if any(stable.get(name) != value for name, value in required.items()):
+            raise RouterStateError(
+                "profile-mismatch", "Web execution attestation does not match the run"
+            )
+        if not isinstance(stable.get("web_context_ref"), str) or not stable["web_context_ref"]:
+            raise RouterStateError("profile-mismatch", "Web execution attestation is incomplete")
+    else:
+        raise RouterStateError("invalid-transition", "unknown stage", stage=stage)
+
+    telemetry: dict[str, Any] = {}
+    if "duration_ms" in execution:
+        duration = execution["duration_ms"]
+        if (
+            not isinstance(duration, (int, float))
+            or isinstance(duration, bool)
+            or duration < 0
+            or duration != duration
+            or duration in (float("inf"), float("-inf"))
+        ):
+            _raise_invalid("duration_ms must be a finite non-negative number")
+        telemetry["duration_ms"] = duration
+    try:
+        canonical_json_bytes(stable)
+        canonical_json_bytes(telemetry)
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise RouterStateError("invalid-input", "execution evidence is not canonical JSON") from error
+    return stable, telemetry
+
+
+def _build_next_packet(state: Mapping[str, Any], completed_stage: str) -> dict[str, Any] | None:
+    driver_context_id = state["driver"]["driver_context_id"]
+    run_id = state["run_id"]
+    task = state["request"]["task"]
+    if completed_stage == "local_sol":
+        local_output = state["submissions"]["local_sol"]["content"]
+        return build_stage_packet(
+            driver_context_id=driver_context_id,
+            run_id=run_id,
+            packet_id=_new_packet_id(),
+            target_stage="web_sol",
+            source_revision=1,
+            payload={
+                "task": task,
+                "local_sol_output": local_output,
+                "role": deepcopy(state["role_config"]["web_sol"]),
+                "permission": "no_local_filesystem",
+                "response_marker_contract": {
+                    "prefix": WEB_RESPONSE_PREFIX,
+                    "placement": "first_nonempty_line",
+                    "occurrences": 1,
+                    "required_fields": [
+                        "driver_context_id",
+                        "run_id",
+                        "stage",
+                        "revision",
+                        "packet_id",
+                        "packet_digest",
+                    ],
+                },
+                "output_contract": {"type": "text"},
+            },
+        )
+    if completed_stage == "web_sol":
+        return build_stage_packet(
+            driver_context_id=driver_context_id,
+            run_id=run_id,
+            packet_id=_new_packet_id(),
+            target_stage="luna",
+            source_revision=2,
+            payload={
+                "task": task,
+                "local_sol_output": state["submissions"]["local_sol"]["content"],
+                "web_sol_output": state["submissions"]["web_sol"]["content"],
+                "role": deepcopy(state["role_config"]["luna"]),
+                "permission": "no_repository_writes",
+                "output_contract": {"type": "text"},
+            },
+        )
+    return None
 
 
 def start_run(
@@ -445,3 +677,178 @@ def get_status(*, state_root: Path | str, run_id: str) -> TransitionResult:
         state = _load_state(run_dir, run_id)
         _rebuild_projections(run_dir, state)
         return _result(run_dir, state)
+
+
+def submit_stage(
+    *,
+    state_root: Path | str,
+    run_id: str,
+    driver_context_id: str,
+    stage: str,
+    expected_revision: int,
+    packet_digest_value: str,
+    content: str,
+    execution: Mapping[str, Any],
+) -> TransitionResult:
+    _validate_run_id(run_id)
+    _validate_driver_context_id(driver_context_id)
+    if stage not in ("local_sol", "web_sol", "luna"):
+        raise RouterStateError("invalid-transition", "unknown stage", run_id=run_id, stage=stage)
+    try:
+        normalized = normalize_content(content)
+    except ProtocolError as error:
+        raise RouterStateError(
+            "invalid-input", str(error), run_id=run_id, stage=stage
+        ) from error
+    resolved_root = _resolve_state_root(state_root)
+    run_dir = resolved_root / run_id
+    if not run_dir.is_dir():
+        raise RouterStateError("run-not-found", "run does not exist", run_id=run_id)
+
+    with _exclusive_run_lock(run_dir):
+        state = _load_state(run_dir, run_id)
+        revision = state["revision"]
+        if state["driver"].get("driver_context_id") != driver_context_id:
+            raise RouterStateError(
+                "conflict",
+                "driver context does not own this run",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        existing = state["submissions"].get(stage)
+        if existing is not None:
+            stable_execution, _ = _normalize_execution(
+                state=state,
+                stage=stage,
+                execution=execution,
+                driver_context_id=driver_context_id,
+                packet_digest_value=packet_digest_value,
+            )
+            incoming_digest = submission_digest(
+                driver_context_id,
+                run_id,
+                stage,
+                packet_digest_value,
+                normalized,
+                stable_execution,
+            )
+            if existing["submission_digest"] == incoming_digest:
+                return _result(run_dir, state, idempotent=True)
+            raise RouterStateError(
+                "conflict",
+                "stage already has different content",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        if state["failures"].get(stage) is not None or state["status"] in {
+            "completed",
+            "failed",
+        }:
+            raise RouterStateError(
+                "conflict",
+                "run is terminal or stage already failed",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        if state["next_stage"] != stage:
+            raise RouterStateError(
+                "invalid-transition",
+                "stage is not the current next stage",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        if (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision != revision
+        ):
+            raise RouterStateError(
+                "revision-mismatch",
+                "expected revision does not match canonical state",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        packet = state["next_packet"]
+        if not isinstance(packet, Mapping) or packet.get("packet_digest") != packet_digest_value:
+            raise RouterStateError(
+                "packet-mismatch",
+                "packet digest does not match the current stage packet",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        stable_execution, telemetry = _normalize_execution(
+            state=state,
+            stage=stage,
+            execution=execution,
+            driver_context_id=driver_context_id,
+            packet_digest_value=packet_digest_value,
+        )
+        incoming_digest = submission_digest(
+            driver_context_id,
+            run_id,
+            stage,
+            packet_digest_value,
+            normalized,
+            stable_execution,
+        )
+        if stage == "web_sol":
+            try:
+                validate_web_response(normalized, packet)
+            except ProtocolError as error:
+                raise RouterStateError(
+                    "marker-mismatch",
+                    str(error),
+                    run_id=run_id,
+                    stage=stage,
+                    revision=revision,
+                ) from error
+
+        next_state = deepcopy(state)
+        next_revision = revision + 1
+        next_state["submissions"][stage] = {
+            "stage": stage,
+            "source_revision": revision,
+            "packet_digest": packet_digest_value,
+            "submission_digest": incoming_digest,
+            "packet": deepcopy(dict(packet)),
+            "content": normalized,
+            "execution": stable_execution,
+            "telemetry": telemetry,
+        }
+        next_state["revision"] = next_revision
+        next_state["history"].append(
+            {
+                "revision": next_revision,
+                "event": "stage_submitted",
+                "stage": stage,
+                "submission_digest": incoming_digest,
+                "telemetry": telemetry,
+            }
+        )
+        if stage == "local_sol":
+            next_state["status"] = "awaiting_web_sol"
+            next_state["next_stage"] = "web_sol"
+            next_state["next_packet"] = _build_next_packet(next_state, stage)
+        elif stage == "web_sol":
+            next_state["status"] = "awaiting_luna"
+            next_state["next_stage"] = "luna"
+            next_state["next_packet"] = _build_next_packet(next_state, stage)
+        else:
+            next_state["status"] = "completed"
+            next_state["next_stage"] = None
+            next_state["next_packet"] = None
+            next_state["final_result"] = normalized
+
+        _commit_state(run_dir, next_state)
+        warnings: tuple[str, ...] = ()
+        try:
+            _rebuild_projections(run_dir, next_state)
+        except OSError:
+            warnings = ("projection-rebuild-failed",)
+        return _result(run_dir, next_state, projection_warnings=warnings)

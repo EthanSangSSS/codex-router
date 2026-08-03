@@ -1,10 +1,12 @@
 import json
-import os
+import multiprocessing
 from pathlib import Path
 import stat
 import tempfile
 import unittest
 from unittest.mock import patch
+
+from codex_router.protocol import web_response_marker
 
 
 DRIVER_CONTEXT_ID = "ctx-550e8400-e29b-41d4-a716-446655440000"
@@ -31,6 +33,24 @@ def load_state_api(testcase):
     except ImportError:
         testcase.fail("codex_router canonical state API is not implemented")
     return RouterStateError, get_status, start_run
+
+
+def load_transition_api(testcase):
+    try:
+        from codex_router.state import RouterStateError, get_status, start_run, submit_stage
+    except ImportError:
+        testcase.fail("codex_router submit-stage API is not implemented")
+    return RouterStateError, get_status, start_run, submit_stage
+
+
+def concurrent_submit_worker(queue, arguments):
+    try:
+        from codex_router.state import submit_stage
+
+        result = submit_stage(**arguments)
+        queue.put(("ok", result.revision))
+    except Exception as error:
+        queue.put((getattr(error, "code", type(error).__name__), None))
 
 
 class RunCreationTests(unittest.TestCase):
@@ -194,6 +214,336 @@ class RunCreationTests(unittest.TestCase):
             get_status(state_root=self.state_root, run_id="run-incomplete")
 
         self.assertEqual(raised.exception.code, "state-corrupt")
+
+
+class RouterStateTestCase(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.state_root = self.root / "runs"
+        self.binary = self.root / "codex"
+        self.binary.write_text("test binary", encoding="utf-8")
+        self.binary.chmod(0o700)
+        self.started = None
+
+    def start(self):
+        _, _, start_run, _ = load_transition_api(self)
+        self.started = start_run(
+            state_root=self.state_root,
+            task="review",
+            driver_context_id=DRIVER_CONTEXT_ID,
+            role_config=ROLE_CONFIG,
+            codex_binary=self.binary,
+        )
+        return self.started
+
+    def read_state(self):
+        return json.loads((self.started.run_dir / "state.json").read_text(encoding="utf-8"))
+
+    def local_execution(self, stage="local_sol"):
+        state = self.read_state()
+        packet = state["next_packet"]
+        profile = state["profiles"][stage]
+        role = state["role_config"][stage]
+        return {
+            "requested_model": role["requested_model"],
+            "requested_reasoning": role["requested_reasoning"],
+            "reported_model": role["requested_model"],
+            "reported_reasoning": role["requested_reasoning"],
+            "verification": "app_server_reported",
+            "thread_id": "thread-test",
+            "driver_context_id": DRIVER_CONTEXT_ID,
+            "packet_digest": packet["packet_digest"],
+            "profile_id": profile["profile_id"],
+            "codex_home": profile["codex_home"],
+            "codex_sqlite_home": profile["codex_sqlite_home"],
+            "codex_binary_realpath": profile["codex_binary_realpath"],
+            "codex_binary_sha256": profile["codex_binary_sha256"],
+            "app_server_version": "test-version",
+            "workspace_access": "read_only",
+            "duration_ms": 10,
+            "ignored_environment": "must-not-persist",
+        }
+
+    def web_execution(self):
+        packet = self.read_state()["next_packet"]
+        return {
+            "driver_context_id": DRIVER_CONTEXT_ID,
+            "web_context_ref": "web-context-test",
+            "context_mode": "continuous",
+            "context_scope": "driver_context_id",
+            "context_isolation": "operator_managed",
+            "model_claimed": "sol",
+            "reasoning_claimed": "xhigh",
+            "verification": "operator_attested",
+            "packet_digest": packet["packet_digest"],
+        }
+
+    def luna_execution(self):
+        return self.local_execution(stage="luna")
+
+    def submit(self, transition, stage, content, execution, **overrides):
+        _, _, _, submit_stage = load_transition_api(self)
+        packet = self.read_state()["next_packet"]
+        arguments = {
+            "state_root": self.state_root,
+            "run_id": transition.run_id,
+            "driver_context_id": DRIVER_CONTEXT_ID,
+            "stage": stage,
+            "expected_revision": transition.revision,
+            "packet_digest_value": packet["packet_digest"],
+            "content": content,
+            "execution": execution,
+        }
+        arguments.update(overrides)
+        return submit_stage(**arguments)
+
+    def submit_local(self):
+        _, _, _, submit_stage = load_transition_api(self)
+        started = self.start()
+        packet = self.read_state()["next_packet"]
+        arguments = {
+            "state_root": self.state_root,
+            "run_id": started.run_id,
+            "driver_context_id": DRIVER_CONTEXT_ID,
+            "stage": "local_sol",
+            "expected_revision": 0,
+            "packet_digest_value": packet["packet_digest"],
+            "content": "local result",
+            "execution": self.local_execution(),
+        }
+        return submit_stage(**arguments), arguments
+
+    def complete_run(self):
+        _, _, _, submit_stage = load_transition_api(self)
+        local, _ = self.submit_local()
+        web_packet = self.read_state()["next_packet"]
+        web = self.submit(
+            local,
+            "web_sol",
+            web_response_marker(web_packet) + "\nweb result",
+            self.web_execution(),
+        )
+        luna_packet = self.read_state()["next_packet"]
+        arguments = {
+            "state_root": self.state_root,
+            "run_id": web.run_id,
+            "driver_context_id": DRIVER_CONTEXT_ID,
+            "stage": "luna",
+            "expected_revision": 2,
+            "packet_digest_value": luna_packet["packet_digest"],
+            "content": "final result",
+            "execution": self.luna_execution(),
+        }
+        return submit_stage(**arguments), arguments
+
+
+class SuccessfulTransitionTests(RouterStateTestCase):
+    def test_success_path_advances_zero_to_three_with_cumulative_packets(self):
+        started = self.start()
+        local = self.submit(started, "local_sol", "local result", self.local_execution())
+        self.assertEqual(
+            (local.status, local.revision, local.next_stage),
+            ("awaiting_web_sol", 1, "web_sol"),
+        )
+        state = self.read_state()
+        self.assertEqual(state["next_packet"]["payload"]["local_sol_output"], "local result")
+        self.assertEqual(
+            state["submissions"]["local_sol"]["execution"]["reported_model"],
+            ROLE_CONFIG["local_sol"]["requested_model"],
+        )
+
+        web_packet = state["next_packet"]
+        web_content = web_response_marker(web_packet) + "\nweb result"
+        web = self.submit(local, "web_sol", web_content, self.web_execution())
+        self.assertEqual(
+            (web.status, web.revision, web.next_stage),
+            ("awaiting_luna", 2, "luna"),
+        )
+        state = self.read_state()
+        self.assertEqual(state["next_packet"]["payload"]["local_sol_output"], "local result")
+        self.assertEqual(state["next_packet"]["payload"]["web_sol_output"], web_content)
+
+        luna = self.submit(web, "luna", "final result", self.luna_execution())
+        self.assertEqual((luna.status, luna.revision, luna.next_stage), ("completed", 3, None))
+        state = self.read_state()
+        self.assertEqual(state["final_result"], "final result")
+        self.assertEqual(
+            json.loads((luna.run_dir / "result.json").read_text(encoding="utf-8"))["result"],
+            "final result",
+        )
+        self.assertNotIn("ignored_environment", (luna.run_dir / "state.json").read_text())
+
+    def test_identical_terminal_luna_retry_is_idempotent_without_rewrite(self):
+        RouterStateError, _, _, submit_stage = load_transition_api(self)
+        completed, arguments = self.complete_run()
+        before = (completed.run_dir / "state.json").read_bytes()
+        arguments["execution"] = {**arguments["execution"], "duration_ms": 99}
+
+        with patch("codex_router.state._commit_state") as commit:
+            repeated = submit_stage(**arguments)
+
+        commit.assert_not_called()
+        self.assertTrue(repeated.idempotent)
+        self.assertEqual(repeated.revision, 3)
+        self.assertEqual(before, (completed.run_dir / "state.json").read_bytes())
+
+        arguments.update(content="different final result", expected_revision=0)
+        with self.assertRaises(RouterStateError) as raised:
+            submit_stage(**arguments)
+        self.assertEqual(raised.exception.code, "conflict")
+
+    def test_different_duplicate_conflicts_before_revision_check(self):
+        RouterStateError, _, _, submit_stage = load_transition_api(self)
+        _, arguments = self.submit_local()
+        arguments.update(content="different", expected_revision=99)
+
+        with self.assertRaises(RouterStateError) as raised:
+            submit_stage(**arguments)
+
+        self.assertEqual(raised.exception.code, "conflict")
+
+    def test_invalid_transition_revision_driver_packet_and_marker_are_classified(self):
+        RouterStateError, _, _, submit_stage = load_transition_api(self)
+        started = self.start()
+        packet = self.read_state()["next_packet"]
+        base = {
+            "state_root": self.state_root,
+            "run_id": started.run_id,
+            "driver_context_id": DRIVER_CONTEXT_ID,
+            "stage": "local_sol",
+            "expected_revision": 0,
+            "packet_digest_value": packet["packet_digest"],
+            "content": "local result",
+            "execution": self.local_execution(),
+        }
+        cases = (
+            ({"stage": "web_sol"}, "invalid-transition"),
+            ({"expected_revision": 1}, "revision-mismatch"),
+            ({"driver_context_id": "ctx-00000000-0000-4000-8000-000000000000"}, "conflict"),
+            ({"packet_digest_value": "sha256:" + "0" * 64}, "packet-mismatch"),
+        )
+        for changes, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                arguments = {**base, **changes}
+                with self.assertRaises(RouterStateError) as raised:
+                    submit_stage(**arguments)
+                self.assertEqual(raised.exception.code, expected_code)
+
+        local = submit_stage(**base)
+        web_packet = self.read_state()["next_packet"]
+        wrong_marker = web_response_marker(
+            {**web_packet, "packet_id": "packet-wrong"}
+        ) + "\nweb result"
+        with self.assertRaises(RouterStateError) as raised:
+            self.submit(local, "web_sol", wrong_marker, self.web_execution())
+        self.assertEqual(raised.exception.code, "marker-mismatch")
+
+    def test_profile_mismatch_is_rejected(self):
+        RouterStateError, _, _, _ = load_transition_api(self)
+        started = self.start()
+        execution = self.local_execution()
+        execution["codex_home"] = str(self.root / "wrong-home")
+
+        with self.assertRaises(RouterStateError) as raised:
+            self.submit(started, "local_sol", "local result", execution)
+
+        self.assertEqual(raised.exception.code, "profile-mismatch")
+
+    def test_reverse_duplicate_conflicts_before_current_stage_validation(self):
+        RouterStateError, _, _, submit_stage = load_transition_api(self)
+        local, arguments = self.submit_local()
+        arguments.update(content="changed local result", expected_revision=local.revision)
+
+        with self.assertRaises(RouterStateError) as raised:
+            submit_stage(**arguments)
+
+        self.assertEqual(raised.exception.code, "conflict")
+
+
+class ConcurrencyAndDurabilityTests(RouterStateTestCase):
+    def test_completed_projections_are_rebuilt_without_changing_state(self):
+        _, get_status, _, _ = load_transition_api(self)
+        completed, _ = self.complete_run()
+        before = (completed.run_dir / "state.json").read_bytes()
+        state = self.read_state()
+        paths = [
+            completed.run_dir / "local-sol.json",
+            completed.run_dir / "web-sol.json",
+            completed.run_dir / "luna.json",
+            completed.run_dir / "result.json",
+            completed.run_dir
+            / "packets"
+            / f"{state['submissions']['web_sol']['packet']['packet_id']}.json",
+        ]
+        for path in paths:
+            path.unlink()
+
+        status = get_status(state_root=self.state_root, run_id=completed.run_id)
+
+        self.assertEqual((status.status, status.revision), ("completed", 3))
+        self.assertEqual((completed.run_dir / "state.json").read_bytes(), before)
+        for path in paths:
+            self.assertTrue(path.is_file(), path)
+
+    def test_projection_failure_after_commit_is_degraded_success_and_repairable(self):
+        _, get_status, _, _ = load_transition_api(self)
+        started = self.start()
+        with patch("codex_router.state._rebuild_projections", side_effect=OSError("disk")):
+            result = self.submit(started, "local_sol", "local result", self.local_execution())
+
+        self.assertEqual(result.revision, 1)
+        self.assertEqual(result.projection_warnings, ("projection-rebuild-failed",))
+        self.assertEqual(self.read_state()["revision"], 1)
+        repaired = get_status(state_root=self.state_root, run_id=started.run_id)
+        self.assertEqual(repaired.revision, 1)
+        self.assertTrue((started.run_dir / "local-sol.json").is_file())
+
+    def test_commit_failure_preserves_previous_state(self):
+        _, _, _, _ = load_transition_api(self)
+        started = self.start()
+        before = (started.run_dir / "state.json").read_bytes()
+
+        with patch("codex_router.state._commit_state", side_effect=OSError("disk")):
+            with self.assertRaises(OSError):
+                self.submit(started, "local_sol", "local result", self.local_execution())
+
+        self.assertEqual((started.run_dir / "state.json").read_bytes(), before)
+
+    def test_two_processes_produce_one_success_and_one_conflict(self):
+        started = self.start()
+        packet = self.read_state()["next_packet"]
+        execution = self.local_execution()
+        base = {
+            "state_root": self.state_root,
+            "run_id": started.run_id,
+            "driver_context_id": DRIVER_CONTEXT_ID,
+            "stage": "local_sol",
+            "expected_revision": 0,
+            "packet_digest_value": packet["packet_digest"],
+            "execution": execution,
+        }
+        context = multiprocessing.get_context("spawn")
+        queue = context.Queue()
+        workers = [
+            context.Process(
+                target=concurrent_submit_worker,
+                args=(queue, {**base, "content": content}),
+            )
+            for content in ("result one", "result two")
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+            self.assertEqual(worker.exitcode, 0)
+        outcomes = sorted(queue.get(timeout=2)[0] for _ in workers)
+
+        self.assertEqual(outcomes, ["conflict", "ok"])
+        state = self.read_state()
+        self.assertEqual(state["revision"], 1)
+        self.assertEqual(len(state["submissions"]), 1)
 
 
 if __name__ == "__main__":

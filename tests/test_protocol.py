@@ -94,6 +94,12 @@ class CanonicalProtocolTests(unittest.TestCase):
             "  café\nline\n",
         )
 
+    def test_content_normalization_rejects_invalid_utf8_scalar_values(self):
+        ProtocolError, *_, normalize_content, _, _, _ = load_stage_protocol_api(self)
+
+        with self.assertRaises(ProtocolError):
+            normalize_content("\ud800")
+
     def test_canonical_json_is_stable_utf8_and_rejects_nan(self):
         _, _, canonical_json_bytes, *_ = load_stage_protocol_api(self)
 
