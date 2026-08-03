@@ -17,5 +17,17 @@ class RunOutcome:
     final_result: str
 
 
+@dataclass(frozen=True)
+class TransitionResult:
+    run_id: str
+    run_dir: Path
+    revision: int
+    status: str
+    next_stage: str | None
+    stage_packet_path: Path | None
+    idempotent: bool = False
+    projection_warnings: tuple[str, ...] = ()
+
+
 class StageAdapter(Protocol):
     def run(self, task: str, context: Mapping[str, Any]) -> StageResult: ...
