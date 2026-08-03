@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - feat/local-sol-web-sol-luna-router-v1
+      - feat/app-orchestrated-real-router-v1
 
 permissions:
   contents: read
