@@ -1,6 +1,14 @@
 # Phase 0 Capability Report
 
-Status: BLOCKED
+> **Historical snapshot — 2026-08-02**
+>
+> The `BLOCKED` status below describes the Browser-backed Web Sol, real Luna,
+> and cleanup design evaluated by this historical probe. On 2026-08-03, an
+> independent fake-adapter Router MVP was authorized. This report no longer
+> blocks the orchestration MVP in PR #2. Real providers, Browser-backed Web
+> Sol, and the complete lifecycle remain unverified.
+
+Status: BLOCKED (historical real-provider plan)
 
 This report records the bounded Phase 0 probe only. It intentionally omits
 account identifiers, browser URLs, prompts, transcripts, target-project source,
@@ -43,15 +51,16 @@ and credentials.
 
 ## Fail-Closed Outcome
 
-Product implementation has not started. No browser automation code, background
-Web Sol controller, target-repository checkout, GitHub Issue, PR, push, or
-target-project modification was created by this probe.
+Product implementation had not started when this historical probe ran. No
+browser automation code, background Web Sol controller, target-repository
+checkout, GitHub Issue, PR, push, or target-project modification was created by
+this probe.
 
 The temporary external worktree is intentionally retained under the protected
 probe directory because it is dirty. It was not force-removed, reset, cleaned,
 or deleted.
 
-## Required Before Resuming
+## Required Before Resuming The Historical Real-Provider Plan
 
 1. Restore normal in-app Browser navigation to the signed-in ChatGPT surface
    without using hidden APIs, browser data, CDP, AppleScript, or coordinate
@@ -59,4 +68,6 @@ or deleted.
 2. Rerun the Browser nonce round-trip and the safe GitHub Issue test.
 3. Establish and verify a supported thread-delete path, then rerun the full
    Luna lifecycle probe from a clean temporary worktree.
-4. Only after every mandatory gate is VERIFIED may the V1 implementation begin.
+4. Only after every mandatory gate is VERIFIED may the historical
+   Browser-backed real-provider V1 plan resume. This requirement does not gate
+   the independently authorized fake-adapter orchestration MVP.

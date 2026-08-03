@@ -142,7 +142,7 @@ class Router:
                     raise ValueError(f"adapter returned stage {stage_result.stage!r}, expected {stage!r}")
                 if not isinstance(stage_result.content, str):
                     raise TypeError("stage content must be text")
-            except BaseException as error:
+            except Exception as error:
                 duration = round((time.perf_counter() - started) * 1000, 3)
                 code = "stage-timeout" if isinstance(error, StageTimedOut) else "adapter-error"
                 summary = _safe_error(error)

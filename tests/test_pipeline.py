@@ -79,6 +79,19 @@ class RouterPipelineTests(unittest.TestCase):
             self.assertEqual([call[0] for call in calls], ["local_sol", "web_sol"])
             self.assertFalse((raised.exception.run_dir / "luna.json").exists())
 
+    def test_keyboard_interrupt_propagates_without_running_downstream_stages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            router, calls, _ = self.build_router(Path(tmp))
+            _, _, StageResult = load_pipeline_api(self)
+            router.adapters["local_sol"] = RecordingAdapter(
+                "local_sol", calls, StageResult, failure=KeyboardInterrupt()
+            )
+
+            with self.assertRaises(KeyboardInterrupt):
+                router.run("interrupt locally")
+
+            self.assertEqual([call[0] for call in calls], ["local_sol"])
+
     def test_run_directory_and_final_result_are_persisted(self):
         with tempfile.TemporaryDirectory() as tmp:
             router, _, _ = self.build_router(Path(tmp))

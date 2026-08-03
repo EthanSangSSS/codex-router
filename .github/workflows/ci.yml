@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feat/local-sol-web-sol-luna-router-v1
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: [self-hosted, Linux, ARM64, codex-router-ci]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e .
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Compile
+        run: python -m compileall -q src tests
+      - name: Fake adapter smoke test
+        shell: bash
+        run: |
+          state_dir="$(mktemp -d)"
+          output="$(router run \
+            --task "Return exactly ROUTER_MVP_OK" \
+            --adapter-mode fake \
+            --state-dir "$state_dir")"
+          test "$output" = "ROUTER_MVP_OK"
