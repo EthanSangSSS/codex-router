@@ -19,6 +19,7 @@ from .protocol import (
     ProtocolError,
     build_stage_packet,
     canonical_json_bytes,
+    failure_digest as compute_failure_digest,
     normalize_content,
     submission_digest,
     validate_web_response,
@@ -84,6 +85,13 @@ _OFFLINE_EXECUTION_FIELDS = (
     "packet_digest",
     "verification",
     "network_used",
+)
+_SECRET_PATTERNS = (
+    re.compile(r"(?i)bearer\s+\S+"),
+    re.compile(
+        r"(?i)(authorization|cookie|password|secret|token|api[_-]?key)"
+        r"\s*[:=]\s*\S+"
+    ),
 )
 
 
@@ -317,7 +325,7 @@ def _projection_payloads(state: Mapping[str, Any]) -> dict[Path, bytes]:
     }
     packets = [
         record["packet"]
-        for record in state["submissions"].values()
+        for record in (*state["submissions"].values(), *state["failures"].values())
         if isinstance(record, Mapping) and isinstance(record.get("packet"), Mapping)
     ]
     packet = state.get("next_packet")
@@ -576,6 +584,22 @@ def _build_next_packet(state: Mapping[str, Any], completed_stage: str) -> dict[s
             },
         )
     return None
+
+
+def _sanitize_failure(value: Mapping[str, Any]) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        _raise_invalid("failure must be an object")
+    code = " ".join(str(value.get("code", "stage-failed")).splitlines())[:64]
+    code = re.sub(r"[^A-Za-z0-9._-]+", "-", code).strip("-._") or "stage-failed"
+    summary = " ".join(str(value.get("summary", "stage failed")).splitlines())[:500]
+    for pattern in _SECRET_PATTERNS:
+        summary = pattern.sub(
+            lambda match: (
+                f"{match.group(1)}=<redacted>" if match.lastindex else "<redacted>"
+            ),
+            summary,
+        )
+    return {"code": code, "summary": summary or "stage failed"}
 
 
 def start_run(
@@ -844,6 +868,161 @@ def submit_stage(
             next_state["next_stage"] = None
             next_state["next_packet"] = None
             next_state["final_result"] = normalized
+
+        _commit_state(run_dir, next_state)
+        warnings: tuple[str, ...] = ()
+        try:
+            _rebuild_projections(run_dir, next_state)
+        except OSError:
+            warnings = ("projection-rebuild-failed",)
+        return _result(run_dir, next_state, projection_warnings=warnings)
+
+
+def fail_stage(
+    *,
+    state_root: Path | str,
+    run_id: str,
+    driver_context_id: str,
+    stage: str,
+    expected_revision: int,
+    packet_digest_value: str,
+    failure: Mapping[str, Any],
+    execution: Mapping[str, Any],
+) -> TransitionResult:
+    _validate_run_id(run_id)
+    _validate_driver_context_id(driver_context_id)
+    if stage not in ("local_sol", "web_sol", "luna"):
+        raise RouterStateError("invalid-transition", "unknown stage", run_id=run_id, stage=stage)
+    sanitized_failure = _sanitize_failure(failure)
+    resolved_root = _resolve_state_root(state_root)
+    run_dir = resolved_root / run_id
+    if not run_dir.is_dir():
+        raise RouterStateError("run-not-found", "run does not exist", run_id=run_id)
+
+    with _exclusive_run_lock(run_dir):
+        state = _load_state(run_dir, run_id)
+        revision = state["revision"]
+        if state["driver"].get("driver_context_id") != driver_context_id:
+            raise RouterStateError(
+                "conflict",
+                "driver context does not own this run",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        existing_failure = state["failures"].get(stage)
+        if existing_failure is not None:
+            stable_execution, _ = _normalize_execution(
+                state=state,
+                stage=stage,
+                execution=execution,
+                driver_context_id=driver_context_id,
+                packet_digest_value=packet_digest_value,
+            )
+            incoming_digest = compute_failure_digest(
+                driver_context_id,
+                run_id,
+                stage,
+                packet_digest_value,
+                sanitized_failure,
+                stable_execution,
+            )
+            if existing_failure["failure_digest"] == incoming_digest:
+                return _result(run_dir, state, idempotent=True)
+            raise RouterStateError(
+                "conflict",
+                "stage already has a different failure",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        if state["submissions"].get(stage) is not None:
+            raise RouterStateError(
+                "conflict",
+                "stage already completed successfully",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        if state["status"] in {"completed", "failed"}:
+            raise RouterStateError(
+                "conflict",
+                "run is terminal",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        if state["next_stage"] != stage:
+            raise RouterStateError(
+                "invalid-transition",
+                "stage is not the current next stage",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        if (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision != revision
+        ):
+            raise RouterStateError(
+                "revision-mismatch",
+                "expected revision does not match canonical state",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        packet = state["next_packet"]
+        if not isinstance(packet, Mapping) or packet.get("packet_digest") != packet_digest_value:
+            raise RouterStateError(
+                "packet-mismatch",
+                "packet digest does not match the current stage packet",
+                run_id=run_id,
+                stage=stage,
+                revision=revision,
+            )
+        stable_execution, telemetry = _normalize_execution(
+            state=state,
+            stage=stage,
+            execution=execution,
+            driver_context_id=driver_context_id,
+            packet_digest_value=packet_digest_value,
+        )
+        incoming_digest = compute_failure_digest(
+            driver_context_id,
+            run_id,
+            stage,
+            packet_digest_value,
+            sanitized_failure,
+            stable_execution,
+        )
+
+        next_state = deepcopy(state)
+        next_revision = revision + 1
+        next_state["failures"][stage] = {
+            "stage": stage,
+            "source_revision": revision,
+            "packet_digest": packet_digest_value,
+            "failure_digest": incoming_digest,
+            "packet": deepcopy(dict(packet)),
+            "failure": sanitized_failure,
+            "execution": stable_execution,
+            "telemetry": telemetry,
+        }
+        next_state["status"] = "failed"
+        next_state["revision"] = next_revision
+        next_state["next_stage"] = None
+        next_state["next_packet"] = None
+        next_state["failed_stage"] = stage
+        next_state["history"].append(
+            {
+                "revision": next_revision,
+                "event": "stage_failed",
+                "stage": stage,
+                "failure_digest": incoming_digest,
+                "telemetry": telemetry,
+            }
+        )
 
         _commit_state(run_dir, next_state)
         warnings: tuple[str, ...] = ()

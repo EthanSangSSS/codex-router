@@ -43,6 +43,14 @@ def load_transition_api(testcase):
     return RouterStateError, get_status, start_run, submit_stage
 
 
+def load_failure_api(testcase):
+    try:
+        from codex_router.state import RouterStateError, fail_stage, submit_stage
+    except ImportError:
+        testcase.fail("codex_router fail-stage API is not implemented")
+    return RouterStateError, fail_stage, submit_stage
+
+
 def concurrent_submit_worker(queue, arguments):
     try:
         from codex_router.state import submit_stage
@@ -544,6 +552,151 @@ class ConcurrencyAndDurabilityTests(RouterStateTestCase):
         state = self.read_state()
         self.assertEqual(state["revision"], 1)
         self.assertEqual(len(state["submissions"]), 1)
+
+
+class FailureTransitionTests(RouterStateTestCase):
+    def fail_local(self):
+        _, fail_stage, _ = load_failure_api(self)
+        started = self.start()
+        packet = self.read_state()["next_packet"]
+        arguments = {
+            "state_root": self.state_root,
+            "run_id": started.run_id,
+            "driver_context_id": DRIVER_CONTEXT_ID,
+            "stage": "local_sol",
+            "expected_revision": 0,
+            "packet_digest_value": packet["packet_digest"],
+            "failure": {"code": "app-server-error", "summary": "local stage failed"},
+            "execution": self.local_execution(),
+        }
+        return fail_stage(**arguments), arguments
+
+    def test_current_stage_can_fail_and_becomes_terminal(self):
+        failed, _ = self.fail_local()
+
+        self.assertEqual((failed.status, failed.revision, failed.next_stage), ("failed", 1, None))
+        state = self.read_state()
+        self.assertEqual(state["failed_stage"], "local_sol")
+        self.assertIsNone(state["next_packet"])
+        self.assertTrue((failed.run_dir / "local-sol.json").is_file())
+        self.assertFalse((failed.run_dir / "web-sol.json").exists())
+
+    def test_identical_failure_retry_is_idempotent_but_changed_failure_conflicts(self):
+        RouterStateError, fail_stage, _ = load_failure_api(self)
+        failed, arguments = self.fail_local()
+        before = (failed.run_dir / "state.json").read_bytes()
+        arguments["execution"] = {**arguments["execution"], "duration_ms": 999}
+
+        with patch("codex_router.state._commit_state") as commit:
+            repeated = fail_stage(**arguments)
+
+        commit.assert_not_called()
+        self.assertTrue(repeated.idempotent)
+        self.assertEqual((repeated.status, repeated.revision), ("failed", 1))
+        self.assertEqual((failed.run_dir / "state.json").read_bytes(), before)
+
+        arguments.update(
+            failure={"code": "changed", "summary": "different"},
+            expected_revision=99,
+        )
+        with self.assertRaises(RouterStateError) as raised:
+            fail_stage(**arguments)
+        self.assertEqual(raised.exception.code, "conflict")
+
+    def test_failure_rejects_wrong_stage_driver_revision_packet_and_prior_success(self):
+        RouterStateError, fail_stage, _ = load_failure_api(self)
+        started = self.start()
+        packet = self.read_state()["next_packet"]
+        base = {
+            "state_root": self.state_root,
+            "run_id": started.run_id,
+            "driver_context_id": DRIVER_CONTEXT_ID,
+            "stage": "local_sol",
+            "expected_revision": 0,
+            "packet_digest_value": packet["packet_digest"],
+            "failure": {"code": "failed", "summary": "stage failed"},
+            "execution": self.local_execution(),
+        }
+        cases = (
+            ({"stage": "web_sol"}, "invalid-transition"),
+            ({"driver_context_id": "ctx-00000000-0000-4000-8000-000000000000"}, "conflict"),
+            ({"expected_revision": 1}, "revision-mismatch"),
+            ({"packet_digest_value": "sha256:" + "0" * 64}, "packet-mismatch"),
+        )
+        for changes, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                with self.assertRaises(RouterStateError) as raised:
+                    fail_stage(**{**base, **changes})
+                self.assertEqual(raised.exception.code, expected_code)
+
+        local, local_arguments = self.submit_local()
+        with self.assertRaises(RouterStateError) as raised:
+            fail_stage(
+                state_root=self.state_root,
+                run_id=local.run_id,
+                driver_context_id=DRIVER_CONTEXT_ID,
+                stage="local_sol",
+                expected_revision=local.revision,
+                packet_digest_value=local_arguments["packet_digest_value"],
+                failure=base["failure"],
+                execution=local_arguments["execution"],
+            )
+        self.assertEqual(raised.exception.code, "conflict")
+
+    def test_success_after_failure_conflicts(self):
+        RouterStateError, _, submit_stage = load_failure_api(self)
+        _, arguments = self.fail_local()
+
+        with self.assertRaises(RouterStateError) as raised:
+            submit_stage(
+                state_root=self.state_root,
+                run_id=arguments["run_id"],
+                driver_context_id=DRIVER_CONTEXT_ID,
+                stage="local_sol",
+                expected_revision=1,
+                packet_digest_value=arguments["packet_digest_value"],
+                content="late success",
+                execution=arguments["execution"],
+            )
+
+        self.assertEqual(raised.exception.code, "conflict")
+
+    def test_failure_evidence_is_bounded_and_secret_values_are_not_persisted(self):
+        _, fail_stage, _ = load_failure_api(self)
+        started = self.start()
+        packet = self.read_state()["next_packet"]
+        failure = {
+            "code": "provider-error",
+            "summary": "Authorization: Bearer router-secret-123\npassword=hunter2",
+            "environment": {"API_KEY": "must-never-persist"},
+            "stack_trace": "private traceback",
+        }
+
+        fail_stage(
+            state_root=self.state_root,
+            run_id=started.run_id,
+            driver_context_id=DRIVER_CONTEXT_ID,
+            stage="local_sol",
+            expected_revision=0,
+            packet_digest_value=packet["packet_digest"],
+            failure=failure,
+            execution=self.local_execution(),
+        )
+
+        evidence = b"\n".join(
+            path.read_bytes() for path in started.run_dir.rglob("*") if path.is_file()
+        ).decode("utf-8", errors="replace")
+        for forbidden in (
+            "router-secret-123",
+            "hunter2",
+            "must-never-persist",
+            "API_KEY",
+            "environment",
+            "private traceback",
+            "stack_trace",
+        ):
+            self.assertNotIn(forbidden, evidence)
+        self.assertIn("<redacted>", evidence)
 
 
 if __name__ == "__main__":
