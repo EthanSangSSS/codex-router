@@ -55,13 +55,18 @@ class GlobalSelfTestTests(unittest.TestCase):
         }
 
     def test_offline_self_test_is_ephemeral_private_and_has_no_external_actions(self):
-        from codex_router.global_install import global_self_test
+        import codex_router.global_install as global_install_module
 
         before = self.snapshot()
         with patch.object(socket, "socket", side_effect=AssertionError("network forbidden")), patch(
             "webbrowser.open", side_effect=AssertionError("browser forbidden")
+        ), patch.object(
+            global_install_module,
+            "handle_user_prompt",
+            side_effect=AssertionError("self-test must use the configured subprocess"),
+            create=True,
         ):
-            result = global_self_test(self.codex_home)
+            result = global_install_module.global_self_test(self.codex_home)
 
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["protocol"], "codex-router/global-self-test/v1")
@@ -70,6 +75,7 @@ class GlobalSelfTestTests(unittest.TestCase):
         self.assertFalse(result["browser_used"])
         self.assertFalse(result["installation_activated"])
         self.assertEqual(result["hook_trust"], "unknown")
+        self.assertTrue(result["checks"]["hook_command_subprocess"])
         self.assertEqual(self.snapshot(), before)
         self.assertFalse(self.state_root.exists())
         serialized = json.dumps(result, ensure_ascii=False, sort_keys=True)

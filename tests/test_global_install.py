@@ -1,11 +1,13 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROLE_CONFIG = {
@@ -57,6 +59,36 @@ class GlobalInstallTests(unittest.TestCase):
         from codex_router.global_install import global_status
 
         return global_status(self.codex_home)
+
+    def reset_case(self, name):
+        case_root = self.root / name
+        self.codex_home = case_root / "codex-home"
+        self.codex_home.mkdir(parents=True, mode=0o700)
+        self.state_root = case_root / "router-runs"
+        self.binary = case_root / "codex"
+        self.binary.write_text("synthetic binary", encoding="utf-8")
+        self.binary.chmod(0o700)
+
+    def crash_install_after_managed_write(self, write_number):
+        import codex_router.global_install as global_install_module
+
+        original_replace = global_install_module._replace_expected
+        writes = 0
+
+        def replace_then_crash(*args, **kwargs):
+            nonlocal writes
+            original_replace(*args, **kwargs)
+            writes += 1
+            if writes == write_number:
+                raise KeyboardInterrupt("synthetic install interruption")
+
+        with patch.object(
+            global_install_module,
+            "_replace_expected",
+            side_effect=replace_then_crash,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                self.install()
 
     def test_install_preserves_semantics_modes_and_exact_uninstall_bytes(self):
         hooks_path = self.codex_home / "hooks.json"
@@ -118,6 +150,121 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(hooks_path.stat().st_mode), 0o640)
         self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), 0o644)
         self.assertTrue(install_dir.is_dir())
+
+    def test_hook_command_is_isolated_and_preflighted_before_managed_writes(self):
+        from codex_router.state import RouterStateError
+
+        hooks_path = self.codex_home / "hooks.json"
+        agents_path = self.codex_home / "AGENTS.md"
+        hooks_path.write_bytes(b'{"keep":true}\n')
+        agents_path.write_bytes(b"keep agents\n")
+        hooks_path.chmod(0o640)
+        agents_path.chmod(0o644)
+        hooks_before = hooks_path.read_bytes()
+        agents_before = agents_path.read_bytes()
+        broken_python = self.root / "broken-python"
+        broken_python.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+        broken_python.chmod(0o700)
+
+        with patch("codex_router.global_install.sys.executable", str(broken_python)):
+            with self.assertRaises(RouterStateError) as raised:
+                self.install()
+
+        self.assertEqual(raised.exception.code, "conflict")
+        self.assertNotIn(str(broken_python), str(raised.exception))
+        self.assertEqual(hooks_path.read_bytes(), hooks_before)
+        self.assertEqual(agents_path.read_bytes(), agents_before)
+        self.assertEqual(stat.S_IMODE(hooks_path.stat().st_mode), 0o640)
+        self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), 0o644)
+        self.assertEqual(self.status().state, "partial")
+
+    def test_installed_hook_uses_exact_absolute_isolated_python_command(self):
+        self.install()
+
+        hooks = json.loads(
+            (self.codex_home / "hooks.json").read_text(encoding="utf-8")
+        )
+        handler = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        arguments = shlex.split(handler["command"])
+        self.assertEqual(arguments[0], str(Path(sys.executable)))
+        self.assertEqual(arguments[1:3], ["-E", "-P"])
+        self.assertEqual(arguments[3:6], ["-m", "codex_router", "hook-user-prompt"])
+        self.assertEqual(arguments[6], "--installation-dir")
+        self.assertEqual(
+            arguments[7],
+            str(self.codex_home / ".codex-router-policy-v1"),
+        )
+
+    def test_interrupted_install_resumes_after_each_managed_write(self):
+        for write_number in (1, 2):
+            with self.subTest(write_number=write_number):
+                self.reset_case(f"resume-after-{write_number}")
+                hooks_path = self.codex_home / "hooks.json"
+                agents_path = self.codex_home / "AGENTS.md"
+                hooks_original = b'{"keep":"hooks"}\n'
+                agents_original = b"keep agents\n"
+                hooks_path.write_bytes(hooks_original)
+                agents_path.write_bytes(agents_original)
+                hooks_path.chmod(0o640)
+                agents_path.chmod(0o644)
+
+                self.crash_install_after_managed_write(write_number)
+
+                self.assertEqual(self.status().state, "partial")
+                resumed = self.install()
+                self.assertEqual(resumed.state, "installed")
+                self.assertNotEqual(hooks_path.read_bytes(), hooks_original)
+                self.assertNotEqual(agents_path.read_bytes(), agents_original)
+                self.assertEqual(self.uninstall().state, "uninstalled")
+                self.assertEqual(hooks_path.read_bytes(), hooks_original)
+                self.assertEqual(agents_path.read_bytes(), agents_original)
+                self.assertEqual(stat.S_IMODE(hooks_path.stat().st_mode), 0o640)
+                self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), 0o644)
+
+    def test_interrupted_install_can_roll_back_without_completing(self):
+        for write_number in (1, 2):
+            with self.subTest(write_number=write_number):
+                self.reset_case(f"rollback-after-{write_number}")
+                hooks_path = self.codex_home / "hooks.json"
+                agents_path = self.codex_home / "AGENTS.md"
+                hooks_original = b'{"keep":"hooks"}\n'
+                agents_original = b"keep agents\n"
+                hooks_path.write_bytes(hooks_original)
+                agents_path.write_bytes(agents_original)
+                hooks_path.chmod(0o640)
+                agents_path.chmod(0o644)
+
+                self.crash_install_after_managed_write(write_number)
+
+                self.assertEqual(self.status().state, "partial")
+                self.assertEqual(self.uninstall().state, "uninstalled")
+                self.assertEqual(hooks_path.read_bytes(), hooks_original)
+                self.assertEqual(agents_path.read_bytes(), agents_original)
+                self.assertEqual(stat.S_IMODE(hooks_path.stat().st_mode), 0o640)
+                self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), 0o644)
+
+    def test_interrupted_install_recovery_refuses_concurrent_user_edit(self):
+        hooks_path = self.codex_home / "hooks.json"
+        agents_path = self.codex_home / "AGENTS.md"
+        hooks_path.write_bytes(b'{"keep":"hooks"}\n')
+        agents_path.write_bytes(b"keep agents\n")
+        self.crash_install_after_managed_write(1)
+        hooks_after_crash = hooks_path.read_bytes()
+        agents_path.write_bytes(b"user edit after interruption\n")
+
+        from codex_router.state import RouterStateError
+
+        with self.assertRaises(RouterStateError) as install_error:
+            self.install()
+        self.assertEqual(install_error.exception.code, "conflict")
+        self.assertEqual(hooks_path.read_bytes(), hooks_after_crash)
+        self.assertEqual(agents_path.read_bytes(), b"user edit after interruption\n")
+
+        with self.assertRaises(RouterStateError) as uninstall_error:
+            self.uninstall()
+        self.assertEqual(uninstall_error.exception.code, "conflict")
+        self.assertEqual(hooks_path.read_bytes(), hooks_after_crash)
+        self.assertEqual(agents_path.read_bytes(), b"user edit after interruption\n")
 
     def test_absent_user_files_are_removed_on_uninstall_and_evidence_remains(self):
         self.install()

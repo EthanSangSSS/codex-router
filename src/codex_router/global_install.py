@@ -11,6 +11,7 @@ import re
 import secrets
 import shlex
 import stat
+import subprocess
 import sys
 import tempfile
 from typing import Any, Iterator, Mapping
@@ -18,7 +19,7 @@ from typing import Any, Iterator, Mapping
 from .hook import (
     GLOBAL_CONFIG_PROTOCOL,
     HOOK_CONTEXT_PREFIX,
-    handle_user_prompt,
+    HOOK_CONTEXT_PROTOCOL,
 )
 from .protocol import canonical_json_bytes
 from .state import RouterStateError
@@ -33,8 +34,11 @@ AGENTS_END = "# END CODEX ROUTER GLOBAL POLICY V1"
 _IDENTITY_FILE_NAME = "installation-" + "sec" + "ret"
 _MAX_USER_FILE_BYTES = 1024 * 1024
 _MAX_PRIVATE_FILE_BYTES = 256 * 1024
+_MAX_HOOK_PROBE_BYTES = 16 * 1024
+_HOOK_PROBE_TIMEOUT_SECONDS = 5
 _MISSING = object()
 _DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+_TARGET_NAMES = ("hooks.json", "AGENTS.md")
 
 AGENTS_BLOCK = f"""{AGENTS_BEGIN}
 Codex Router is the sole workflow state authority; this Codex task is the execution driver.
@@ -166,22 +170,32 @@ def _atomic_write(path: Path, content: bytes, *, mode: int = 0o600) -> None:
 
 
 def _matches_current(
-    path: Path, expected: bytes | object
+    path: Path,
+    expected: bytes | object,
+    *,
+    expected_mode: int | None = None,
 ) -> tuple[bool, bytes | None, int | None]:
     exists, content, mode = _read_user_file(path)
     if expected is _MISSING:
         return not exists, content, mode
-    return exists and content == expected, content, mode
+    return (
+        exists
+        and content == expected
+        and (expected_mode is None or mode == expected_mode)
+    ), content, mode
 
 
 def _replace_expected(
     path: Path,
     *,
     expected: bytes | object,
+    expected_mode: int | None = None,
     replacement: bytes,
     mode: int,
 ) -> None:
-    matches, _, _ = _matches_current(path, expected)
+    matches, _, _ = _matches_current(
+        path, expected, expected_mode=expected_mode
+    )
     if not matches:
         raise _error("conflict", "managed user file changed concurrently")
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -192,7 +206,9 @@ def _replace_expected(
             stream.write(replacement)
             stream.flush()
             os.fsync(stream.fileno())
-        matches, _, _ = _matches_current(path, expected)
+        matches, _, _ = _matches_current(
+            path, expected, expected_mode=expected_mode
+        )
         if not matches:
             raise _error("conflict", "managed user file changed concurrently")
         os.replace(temporary, path)
@@ -209,8 +225,12 @@ def _replace_expected(
         raise
 
 
-def _unlink_expected(path: Path, *, expected: bytes) -> None:
-    matches, _, _ = _matches_current(path, expected)
+def _unlink_expected(
+    path: Path, *, expected: bytes, expected_mode: int | None = None
+) -> None:
+    matches, _, _ = _matches_current(
+        path, expected, expected_mode=expected_mode
+    )
     if not matches:
         raise _error("conflict", "managed user file changed concurrently")
     path.unlink()
@@ -292,18 +312,25 @@ def _walk_strings(value: Any) -> Iterator[str]:
             yield from _walk_strings(child)
 
 
+def _hook_argv(installation_dir: Path) -> list[str]:
+    python_path = Path(sys.executable)
+    if not python_path.is_absolute():
+        raise _error("conflict", "Router hook Python must be absolute")
+    python = str(python_path)
+    return [
+        python,
+        "-E",
+        "-P",
+        "-m",
+        "codex_router",
+        "hook-user-prompt",
+        "--installation-dir",
+        str(installation_dir),
+    ]
+
+
 def _hook_handler(installation_dir: Path) -> dict[str, Any]:
-    python = str(Path(sys.executable).resolve(strict=True))
-    command = shlex.join(
-        [
-            python,
-            "-m",
-            "codex_router",
-            "hook-user-prompt",
-            "--installation-dir",
-            str(installation_dir),
-        ]
-    )
+    command = shlex.join(_hook_argv(installation_dir))
     return {
         "type": "command",
         "command": command,
@@ -311,6 +338,114 @@ def _hook_handler(installation_dir: Path) -> dict[str, Any]:
         "statusMessage": f"Routing with Codex Router [{HOOK_MARKER}]",
         "additionalContextLimit": 2500,
     }
+
+
+def _handler_argv(
+    handler: Mapping[str, Any], *, expected_installation_dir: Path
+) -> list[str]:
+    command = handler.get("command")
+    if not isinstance(command, str):
+        raise _error("conflict", "Router hook command is invalid")
+    try:
+        arguments = shlex.split(command, posix=True)
+    except ValueError as error:
+        raise _error("conflict", "Router hook command is invalid") from error
+    expected_tail = [
+        "-E",
+        "-P",
+        "-m",
+        "codex_router",
+        "hook-user-prompt",
+        "--installation-dir",
+        str(expected_installation_dir),
+    ]
+    if len(arguments) != 8 or arguments[1:] != expected_tail:
+        raise _error("conflict", "Router hook command does not match its contract")
+    python = Path(arguments[0])
+    if not python.is_absolute():
+        raise _error("conflict", "Router hook Python must be absolute")
+    try:
+        real_python = python.resolve(strict=True)
+        metadata = real_python.stat()
+    except OSError as error:
+        raise _error("conflict", "Router hook Python is unavailable") from error
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or not os.access(real_python, os.X_OK)
+        or not os.access(python, os.X_OK)
+    ):
+        raise _error("conflict", "Router hook Python is unsafe")
+    return arguments
+
+
+def _invoke_hook_argv(
+    arguments: list[str], *, event: Mapping[str, Any], cwd: Path
+) -> dict[str, Any]:
+    try:
+        encoded_event = canonical_json_bytes(dict(event)) + b"\n"
+        completed = subprocess.run(
+            arguments,
+            input=encoded_event,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=cwd,
+            check=False,
+            timeout=_HOOK_PROBE_TIMEOUT_SECONDS,
+        )
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        TypeError,
+        ValueError,
+        UnicodeEncodeError,
+    ) as error:
+        raise _error("conflict", "Router hook command failed preflight") from error
+    if (
+        completed.returncode != 0
+        or completed.stderr
+        or not completed.stdout
+        or len(completed.stdout) > _MAX_HOOK_PROBE_BYTES
+    ):
+        raise _error("conflict", "Router hook command failed preflight")
+    try:
+        output = json.loads(completed.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise _error("conflict", "Router hook command returned invalid JSON") from error
+    if not isinstance(output, dict):
+        raise _error("conflict", "Router hook command returned invalid JSON")
+    return output
+
+
+def _preflight_hook_handler(
+    handler: Mapping[str, Any], *, installation_dir: Path, cwd: Path
+) -> None:
+    arguments = _handler_argv(
+        handler, expected_installation_dir=installation_dir
+    )
+    raw_values = (
+        "synthetic-install-probe-session",
+        "synthetic-install-probe-turn",
+        "你好",
+    )
+    output = _invoke_hook_argv(
+        arguments,
+        event={
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": raw_values[0],
+            "turn_id": raw_values[1],
+            "prompt": "你好",
+            "cwd": str(cwd),
+        },
+        cwd=cwd,
+    )
+    context = _self_test_context(output)
+    encoded_output = canonical_json_bytes(output).decode("utf-8")
+    if (
+        context.get("protocol") != HOOK_CONTEXT_PROTOCOL
+        or context.get("decision") != "direct"
+        or any(value in encoded_output for value in raw_values)
+    ):
+        raise _error("conflict", "Router hook command failed preflight")
 
 
 def _install_hook(original: bytes | None, handler: Mapping[str, Any]) -> bytes:
@@ -484,10 +619,97 @@ def _installed_state_matches(
     *, codex_home: Path, installation_dir: Path, state: Mapping[str, Any]
 ) -> bool:
     for name, record in state["targets"].items():
-        exists, content, _ = _read_user_file(codex_home / name)
-        if not exists or content is None or _sha256(content) != record.get("installed_sha256"):
+        exists, content, mode = _read_user_file(codex_home / name)
+        if (
+            not exists
+            or content is None
+            or _sha256(content) != record.get("installed_sha256")
+            or mode != record.get("installed_mode")
+        ):
             return False
     return True
+
+
+def _install_plan(
+    *, installation_dir: Path, state: Mapping[str, Any]
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    handler = _hook_handler(installation_dir)
+    plan: dict[str, dict[str, Any]] = {}
+    for name in _TARGET_NAMES:
+        record = state["targets"][name]
+        original = _target_original(installation_dir, record)
+        raw_original = None if original is _MISSING else original
+        if name == "hooks.json":
+            installed = _install_hook(raw_original, handler)
+        else:
+            installed = _install_agents(raw_original)
+        if _sha256(installed) != record.get("installed_sha256"):
+            raise _error("conflict", "Router installation plan digest changed")
+        plan[name] = {
+            "original": original,
+            "original_mode": record.get("original_mode"),
+            "installed": installed,
+            "installed_mode": record["installed_mode"],
+        }
+    return handler, plan
+
+
+def _apply_prepared_install(
+    *,
+    home: Path,
+    installation_dir: Path,
+    state: dict[str, Any],
+) -> GlobalStatus:
+    if state.get("phase") != "prepared":
+        raise _error("conflict", "Router installation is not resumable")
+    handler, plan = _install_plan(
+        installation_dir=installation_dir, state=state
+    )
+    for name in _TARGET_NAMES:
+        target = home / name
+        item = plan[name]
+        original_match = _matches_current(
+            target,
+            item["original"],
+            expected_mode=item["original_mode"],
+        )[0]
+        installed_match = _matches_current(
+            target,
+            item["installed"],
+            expected_mode=item["installed_mode"],
+        )[0]
+        if not (original_match or installed_match):
+            raise _error("conflict", "managed user file changed during installation")
+
+    _preflight_hook_handler(
+        handler, installation_dir=installation_dir, cwd=home
+    )
+    for name in _TARGET_NAMES:
+        target = home / name
+        item = plan[name]
+        if _matches_current(
+            target,
+            item["installed"],
+            expected_mode=item["installed_mode"],
+        )[0]:
+            continue
+        _replace_expected(
+            target,
+            expected=item["original"],
+            expected_mode=item["original_mode"],
+            replacement=item["installed"],
+            mode=item["installed_mode"],
+        )
+    if not _installed_state_matches(
+        codex_home=home, installation_dir=installation_dir, state=state
+    ):
+        raise _error("conflict", "Router installation did not commit completely")
+    state["phase"] = "installed"
+    _atomic_write(
+        installation_dir / "install-state.json",
+        canonical_json_bytes(state) + b"\n",
+    )
+    return global_status(home)
 
 
 def global_install(
@@ -509,19 +731,26 @@ def global_install(
         if os.path.lexists(installation_dir):
             _validate_install_directory(installation_dir)
             state = _load_install_state(installation_dir)
+            raw_config = _read_private_file(installation_dir / "config.json")
             installed_config = _private_json(installation_dir / "config.json")
             identity_material = _read_private_file(
                 installation_dir / _IDENTITY_FILE_NAME, maximum_bytes=32
             )
             if (
-                state["phase"] == "installed"
-                and installed_config == config
+                installed_config == config
+                and _sha256(raw_config) == state["config_sha256"]
                 and len(identity_material) == 32
-                and _installed_state_matches(
-                    codex_home=home, installation_dir=installation_dir, state=state
-                )
             ):
-                return global_status(home)
+                if state["phase"] == "prepared":
+                    return _apply_prepared_install(
+                        home=home,
+                        installation_dir=installation_dir,
+                        state=state,
+                    )
+                if state["phase"] == "installed" and _installed_state_matches(
+                    codex_home=home, installation_dir=installation_dir, state=state
+                ):
+                    return global_status(home)
             raise _error("conflict", "an incompatible Router installation already exists")
 
         hooks_path = home / "hooks.json"
@@ -574,30 +803,11 @@ def global_install(
             installation_dir / "install-state.json",
             canonical_json_bytes(install_state) + b"\n",
         )
-        hooks_expected = hooks_original if hooks_exists else _MISSING
-        agents_expected = agents_original if agents_exists else _MISSING
-        if not _matches_current(hooks_path, hooks_expected)[0] or not _matches_current(
-            agents_path, agents_expected
-        )[0]:
-            raise _error("conflict", "managed user files changed concurrently")
-        _replace_expected(
-            hooks_path,
-            expected=hooks_expected,
-            replacement=hooks_installed,
-            mode=hooks_installed_mode,
+        return _apply_prepared_install(
+            home=home,
+            installation_dir=installation_dir,
+            state=install_state,
         )
-        _replace_expected(
-            agents_path,
-            expected=agents_expected,
-            replacement=agents_installed,
-            mode=agents_installed_mode,
-        )
-        install_state["phase"] = "installed"
-        _atomic_write(
-            installation_dir / "install-state.json",
-            canonical_json_bytes(install_state) + b"\n",
-        )
-        return global_status(home)
 
 
 def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, Any]) -> GlobalStatus:
@@ -641,16 +851,21 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
     targets_match_original = True
     for name, record in state["targets"].items():
         path = home / name
-        exists, content, _ = _read_user_file(path)
+        exists, content, mode = _read_user_file(path)
         installed_match = (
             exists
             and content is not None
             and _sha256(content) == record.get("installed_sha256")
+            and mode == record.get("installed_mode")
         )
         targets_match_installed &= installed_match
         try:
             original = _target_original(installation_dir, record)
-            original_match = _matches_current(path, original)[0]
+            original_match = _matches_current(
+                path,
+                original,
+                expected_mode=record.get("original_mode"),
+            )[0]
         except RouterStateError:
             original_match = False
         targets_match_original &= original_match
@@ -742,21 +957,25 @@ def global_uninstall(codex_home: Path | str) -> GlobalStatus:
         state = _load_install_state(installation_dir)
         originals: dict[str, bytes | object] = {}
         current: dict[str, bytes | object] = {}
+        current_modes: dict[str, int | None] = {}
         for name, record in state["targets"].items():
             path = home / name
             original = _target_original(installation_dir, record)
             originals[name] = original
-            exists, content, _ = _read_user_file(path)
-            if not exists or content is None:
-                current[name] = _MISSING
-            else:
-                current[name] = content
+            exists, content, mode = _read_user_file(path)
+            current[name] = content if exists and content is not None else _MISSING
+            current_modes[name] = mode
             installed_match = (
                 exists
                 and content is not None
                 and _sha256(content) == record.get("installed_sha256")
+                and mode == record.get("installed_mode")
             )
-            original_match = _matches_current(path, original)[0]
+            original_match = _matches_current(
+                path,
+                original,
+                expected_mode=record.get("original_mode"),
+            )[0]
             if state["phase"] == "uninstalled":
                 allowed = original_match
             else:
@@ -768,20 +987,27 @@ def global_uninstall(codex_home: Path | str) -> GlobalStatus:
             path = home / name
             original = originals[name]
             installed = current[name]
+            if _matches_current(
+                path,
+                original,
+                expected_mode=record.get("original_mode"),
+            )[0]:
+                continue
             if original is _MISSING:
-                if installed is not _MISSING:
-                    _unlink_expected(path, expected=installed)
-            elif installed is _MISSING:
-                _replace_expected(
+                if installed is _MISSING:
+                    raise _error("conflict", "managed user file changed during recovery")
+                _unlink_expected(
                     path,
-                    expected=_MISSING,
-                    replacement=original,
-                    mode=record["original_mode"],
+                    expected=installed,
+                    expected_mode=current_modes[name],
                 )
-            elif installed != original:
+            else:
+                if installed is _MISSING:
+                    raise _error("conflict", "managed user file changed during recovery")
                 _replace_expected(
                     path,
                     expected=installed,
+                    expected_mode=current_modes[name],
                     replacement=original,
                     mode=record["original_mode"],
                 )
@@ -825,6 +1051,40 @@ def _managed_fingerprints(home: Path) -> dict[str, str]:
     return fingerprints
 
 
+def _configured_hook_handler(home: Path) -> dict[str, Any]:
+    exists, raw_hooks, _ = _read_user_file(home / "hooks.json")
+    if not exists or raw_hooks is None:
+        raise _error("conflict", "configured Router hook is unavailable")
+    try:
+        document = json.loads(raw_hooks)
+        groups = document["hooks"]["UserPromptSubmit"]
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+    ) as error:
+        raise _error("conflict", "configured Router hook is invalid") from error
+    matches: list[dict[str, Any]] = []
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, Mapping) or not isinstance(
+                group.get("hooks"), list
+            ):
+                continue
+            for item in group["hooks"]:
+                if (
+                    isinstance(item, Mapping)
+                    and item.get("type") == "command"
+                    and item.get("statusMessage")
+                    == f"Routing with Codex Router [{HOOK_MARKER}]"
+                ):
+                    matches.append(deepcopy(dict(item)))
+    if len(matches) != 1:
+        raise _error("conflict", "configured Router hook is invalid")
+    return matches[0]
+
+
 def global_self_test(codex_home: Path | str) -> dict[str, Any]:
     home = _validate_codex_home(codex_home)
     live_home = (Path.home() / ".codex").resolve(strict=False)
@@ -836,6 +1096,10 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
 
     installation_dir = home / INSTALL_DIRECTORY_NAME
     config = _private_json(installation_dir / "config.json")
+    configured_handler = _configured_hook_handler(home)
+    configured_arguments = _handler_argv(
+        configured_handler, expected_installation_dir=installation_dir
+    )
     before_fingerprints = _managed_fingerprints(home)
     configured_state_root = Path(config["state_root"])
     configured_state_existed = configured_state_root.exists()
@@ -865,6 +1129,13 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             test_installation / _IDENTITY_FILE_NAME,
             bytes(range(32)),
         )
+        test_handler = deepcopy(configured_handler)
+        test_handler["command"] = shlex.join(
+            [*configured_arguments[:-1], str(test_installation)]
+        )
+        test_arguments = _handler_argv(
+            test_handler, expected_installation_dir=test_installation
+        )
 
         def event(*, prompt: str, session: str, turn: str) -> dict[str, str]:
             return {
@@ -876,39 +1147,53 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             }
 
         direct = _self_test_context(
-            handle_user_prompt(
-                event(prompt=direct_prompt, session=session_a, turn="direct-turn"),
-                test_installation,
+            _invoke_hook_argv(
+                configured_arguments,
+                event=event(
+                    prompt=direct_prompt,
+                    session=session_a,
+                    turn="direct-turn",
+                ),
+                cwd=ephemeral_path,
             )
         )
         bypass = _self_test_context(
-            handle_user_prompt(
-                event(prompt=bypass_prompt, session=session_a, turn="bypass-turn"),
-                test_installation,
+            _invoke_hook_argv(
+                configured_arguments,
+                event=event(
+                    prompt=bypass_prompt,
+                    session=session_a,
+                    turn="bypass-turn",
+                ),
+                cwd=ephemeral_path,
             )
         )
         route = _self_test_context(
-            handle_user_prompt(
-                event(prompt=route_prompt, session=session_a, turn=turn_a),
-                test_installation,
+            _invoke_hook_argv(
+                test_arguments,
+                event=event(prompt=route_prompt, session=session_a, turn=turn_a),
+                cwd=ephemeral_path,
             )
         )
         duplicate = _self_test_context(
-            handle_user_prompt(
-                event(prompt=route_prompt, session=session_a, turn=turn_a),
-                test_installation,
+            _invoke_hook_argv(
+                test_arguments,
+                event=event(prompt=route_prompt, session=session_a, turn=turn_a),
+                cwd=ephemeral_path,
             )
         )
         changed_session = _self_test_context(
-            handle_user_prompt(
-                event(prompt=route_prompt, session=session_b, turn=turn_a),
-                test_installation,
+            _invoke_hook_argv(
+                test_arguments,
+                event=event(prompt=route_prompt, session=session_b, turn=turn_a),
+                cwd=ephemeral_path,
             )
         )
         changed_turn = _self_test_context(
-            handle_user_prompt(
-                event(prompt=route_prompt, session=session_a, turn=turn_b),
-                test_installation,
+            _invoke_hook_argv(
+                test_arguments,
+                event=event(prompt=route_prompt, session=session_a, turn=turn_b),
+                cwd=ephemeral_path,
             )
         )
 
@@ -949,6 +1234,10 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             )
 
         checks = {
+            "hook_protocol": all(
+                context.get("protocol") == HOOK_CONTEXT_PROTOCOL
+                for context in (direct, bypass, *route_contexts)
+            ),
             "direct_policy": direct.get("decision") == "direct",
             "bypass_policy": bypass.get("decision") == "bypass",
             "route_policy": all(
@@ -971,6 +1260,7 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "local_stage_only": local_only,
             "raw_identity_not_persisted": identity_not_persisted,
             "raw_values_not_returned": all(value not in output_text for value in raw_values),
+            "hook_command_subprocess": True,
         }
 
     checks["ephemeral_artifacts_removed"] = (

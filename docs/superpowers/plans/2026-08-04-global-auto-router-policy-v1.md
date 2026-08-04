@@ -228,6 +228,20 @@
 - Produces CLI `router global-self-test --codex-home <temporary home>`.
 - Documents exact manual App acceptance checklist and evidence limits.
 
+### Web review remediation: preflight and cross-file recovery
+
+- [x] Add red tests proving a failed exact Hook command probe leaves
+  `hooks.json` and `AGENTS.md` bytes and modes unchanged.
+- [x] Generate an absolute `-E -P -m codex_router hook-user-prompt` command and
+  run a bounded synthetic protocol probe before either managed write.
+- [x] Run `global-self-test` through the configured child command, using an
+  ephemeral cloned installation for route-producing probes.
+- [x] Treat `prepared` install state as a resumable transaction manifest;
+  support safe completion through `global-install` and rollback through
+  `global-uninstall`.
+- [x] Add crash injection after each managed write and prove status detection,
+  completion, rollback, and concurrent-edit refusal.
+
 - [ ] **Step 1: Add failing self-test privacy tests**
 
   Use runtime-constructed synthetic sessions/prompts. Assert stable/different
@@ -236,8 +250,9 @@
 
 - [ ] **Step 2: Implement offline self-test**
 
-  Exercise production policy/hook functions against temporary roots only. Do
-  not set a trusted/active claim and do not touch the live Codex home.
+  Exercise the configured Hook command in child processes against temporary
+  roots only. Do not set a trusted/active claim and do not touch the live Codex
+  home or configured state root.
 
 - [ ] **Step 3: Document installation and manual acceptance**
 
@@ -248,7 +263,8 @@
 
 - [ ] **Step 4: Run all compatibility tests**
 
-  Run: `PYTHONPATH=src python3.12 -m unittest discover -s tests -v`
+  Run from a Python 3.12 environment with `python -m pip install -e .`, then
+  run: `python -m unittest discover -s tests -v`.
 
 - [ ] **Step 5: Commit**
 
@@ -262,8 +278,11 @@
 - [ ] **Step 1: Run required validation**
 
   ```bash
-  PYTHONPATH=src python3.12 -m unittest discover -s tests -v
-  python3.12 -m compileall -q src tests
+  ROUTER_VERIFY_VENV="$(mktemp -d)"
+  python3.12 -m venv "$ROUTER_VERIFY_VENV"
+  "$ROUTER_VERIFY_VENV/bin/python" -m pip install -e .
+  "$ROUTER_VERIFY_VENV/bin/python" -m unittest discover -s tests -v
+  "$ROUTER_VERIFY_VENV/bin/python" -m compileall -q src tests
   git diff --check 583ceb9aa8a95d8402c6663da05e9120d4a36776..HEAD
   ```
 

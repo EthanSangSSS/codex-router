@@ -62,7 +62,7 @@ The optional global policy makes Router the default for substantive Codex turns 
 
 The hook uses a full HMAC-SHA-256 identity for the Codex conversation and a deterministic event identity for the turn. Re-delivery of the same event returns the same run; it cannot create a duplicate replacement run. Raw hook session and turn IDs are not printed or persisted. The normalized task remains in private per-run state as the explicit local-recovery copy.
 
-Install only from an environment where `router` is available to the same absolute Python interpreter recorded in the hook command:
+Install only from a durable Python environment where `codex_router` is installed for the same absolute interpreter recorded in the hook command. The generated command uses `-E -P -m codex_router` so it cannot depend on the caller's `PYTHONPATH` or working directory. Before changing `hooks.json` or `AGENTS.md`, installation runs that exact command with a synthetic direct `UserPromptSubmit` event and requires one valid Router hook-protocol JSON response. A failed probe leaves both managed files byte-for-byte and mode-for-mode unchanged:
 
 ```bash
 router global-install \
@@ -77,7 +77,7 @@ router global-install \
   --luna-reasoning "max"
 ```
 
-Installation adds exactly one handler to `hooks.json` and one bounded block to `AGENTS.md`. It does not edit `config.toml` or `AGENTS.override.md`. Original user files are backed up byte-for-byte under `.codex-router-policy-v1/` with private permissions. The model names and reasoning levels above are configuration values; `max`, `xhigh`, and `max` are defaults, not state-machine constants.
+Installation adds exactly one handler to `hooks.json` and one bounded block to `AGENTS.md`. It does not edit `config.toml` or `AGENTS.override.md`. Original user files are backed up byte-for-byte under `.codex-router-policy-v1/` with private permissions. The `prepared` install-state manifest records the original and installed digests and modes before either managed file changes. If the process stops after either managed write, `global-status` reports `partial`; the same compatible `global-install` completes the remaining writes, while `global-uninstall` restores the originals. Both recovery paths validate every target before their first write and refuse any post-interruption user edit. The model names and reasoning levels above are configuration values; `max`, `xhigh`, and `max` are defaults, not state-machine constants.
 
 Inspect or reverse the installation with:
 
@@ -102,13 +102,13 @@ router global-self-test --codex-home "$ROUTER_TEST_HOME"
 router global-uninstall --codex-home "$ROUTER_TEST_HOME"
 ```
 
-The self-test creates only ephemeral Router runs, performs no model, Web, browser, or network action, does not activate hook trust, and leaves the configured state root untouched.
+The self-test invokes the configured hook command as a child process instead of calling the hook function in-process. Direct and bypass probes use the exact installed command; routed probes reuse its interpreter and arguments against an ephemeral cloned installation and state root. It creates only ephemeral Router runs, performs no model, Web, browser, or network action, does not activate hook trust, and leaves the configured state root untouched.
 
 ### Manual App acceptance checklist
 
 Automated tests cannot verify Codex UI hook trust, Web model selection, reasoning level, or browser conversation reuse. Before treating a live installation as active:
 
-1. Open `/hooks`, review the exact `UserPromptSubmit` command, and explicitly trust it. Never bypass hook trust with an unsafe launch flag.
+1. Confirm the recorded absolute Python interpreter is durable and still imports `codex_router` with the configured `-E -P -m codex_router` command. Open `/hooks`, review the exact `UserPromptSubmit` command, and explicitly trust it. Never bypass hook trust with an unsafe launch flag.
 2. Start a new Codex task. Confirm `global-status` still reports `hook_trust=requires-user-check`; this conservative value is expected because Router has no supported trust receipt.
 3. Submit one substantive synthetic task. Confirm Codex shows `Router: active` and exactly one deterministic run reaches `awaiting_local_sol`.
 4. Continue with a related question in the same Codex task. Reuse the current in-app Web Sol conversation and current browser page; do not create a new Web conversation for every related turn. Treat this reuse, Web Sol selection, and `xhigh` reasoning as operator-attested.
@@ -219,9 +219,12 @@ Router execution, local state transitions, recovery, and fake validation do not 
 Run all offline tests:
 
 ```bash
-PYTHONPATH=src python3.12 -m unittest discover -s tests -v
-python3.12 -m compileall -q src tests
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m compileall -q src tests
 ```
+
+The editable installation is required for global-install tests because the
+production Hook command deliberately ignores `PYTHONPATH`.
 
 ## Known limitations
 

@@ -245,6 +245,26 @@ original bytes are backed up without timestamps or personal metadata. Install
 is idempotent. Conflicting markers, malformed files, symlinks, duplicate Router
 handlers, or an unsafe previous installation fail closed.
 
+The hook command records the invoking absolute Python interpreter and uses
+`-E -P -m codex_router`, making importability independent of `PYTHONPATH` and
+the hook working directory. After private config, identity, backups, and the
+`prepared` transaction manifest exist, but before either managed user file is
+changed, install runs that exact command with one synthetic direct
+`UserPromptSubmit` event. The probe must start the hook subcommand and return
+one valid Router hook-protocol JSON object without echoing synthetic values.
+Failure changes neither `hooks.json` nor `AGENTS.md`, including their modes.
+
+`install-state.json` is also the cross-file recovery manifest. In `prepared`,
+each target must match either its recorded original bytes/mode or its computed
+installed bytes/mode. `global-status` reports this state as `partial`. A later
+compatible `global-install` prevalidates both targets, reruns the hook probe,
+and applies only missing managed writes before atomically committing
+`installed`. `global-uninstall` can instead restore every target to the
+recorded original and commit `uninstalled`. A target matching neither side is
+a conflict; install and uninstall refuse before changing any other target.
+Crash-injection tests cover interruption after each managed write and the
+post-interruption concurrent-edit boundary.
+
 Uninstall removes only the Router handler and managed AGENTS block. If managed
 files are unchanged since installation, their exact original bytes are
 restored. If hooks changed concurrently and byte-preserving removal cannot be
@@ -261,11 +281,14 @@ AGENTS block, secret presence/mode, configuration validity, hook trust as
 `unknown` or `requires-user-check`, and `new-session-required`. It never claims
 trust without a supported Codex trust receipt.
 
-The safe self-test uses synthetic in-memory hook events, makes no Web/model call,
-and creates no browser activity. It proves stable/different session mapping,
+The safe self-test uses synthetic hook events through child processes, makes no
+Web/model call, and creates no browser activity. Direct and bypass events use
+the exact configured hook command. Routed events reuse that command's absolute
+interpreter and arguments with an ephemeral cloned installation and state root.
+It proves protocol validity, stable/different session mapping,
 bypass/direct/route decisions, duplicate event idempotency, and absence of raw
 synthetic identity/prompt data from output and persisted files. It does not
-activate the live installation.
+activate the live installation or touch the configured state root.
 
 ## Rollback and manual acceptance
 
