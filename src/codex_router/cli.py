@@ -6,10 +6,11 @@ import sys
 from typing import Any
 
 from .adapters import adapters_for_mode
+from .global_install import global_install, global_status, global_uninstall
 from .hook import handle_user_prompt, read_hook_event
 from .pipeline import Router, RouterRunError
 from .state import RouterStateError, fail_stage, get_status, start_run, submit_stage
-from .types import TransitionResult
+from .types import GlobalStatus, TransitionResult
 
 
 def _bounded_parser_message(message: str) -> str:
@@ -82,6 +83,28 @@ def parser() -> argparse.ArgumentParser:
         "hook-user-prompt", help="handle one Codex UserPromptSubmit event"
     )
     hook.add_argument("--installation-dir", type=Path, required=True)
+
+    install = subcommands.add_parser(
+        "global-install", help="install the reversible global Router policy"
+    )
+    install.add_argument("--codex-home", type=Path, required=True)
+    install.add_argument("--state-dir", type=Path, required=True)
+    install.add_argument("--codex-bin", type=Path, required=True)
+    install.add_argument("--local-model", default="gpt-5.6-sol")
+    install.add_argument("--local-reasoning", default="max")
+    install.add_argument("--web-model", default="sol")
+    install.add_argument("--web-reasoning", default="xhigh")
+    install.add_argument("--luna-model", default="gpt-5.6-luna")
+    install.add_argument("--luna-reasoning", default="max")
+
+    global_status_parser = subcommands.add_parser(
+        "global-status", help="inspect the global Router policy installation"
+    )
+    global_status_parser.add_argument("--codex-home", type=Path, required=True)
+    uninstall = subcommands.add_parser(
+        "global-uninstall", help="reversibly remove the global Router policy"
+    )
+    uninstall.add_argument("--codex-home", type=Path, required=True)
     return root
 
 
@@ -101,6 +124,19 @@ def _result_payload(result: TransitionResult) -> dict[str, Any]:
 
 def _print_json(value: dict[str, Any], *, stream=sys.stdout) -> None:
     print(json.dumps(value, ensure_ascii=False, sort_keys=True), file=stream)
+
+
+def _global_status_payload(status: GlobalStatus) -> dict[str, Any]:
+    return {
+        "state": status.state,
+        "installation_dir": str(status.installation_dir),
+        "hook_configured": status.hook_configured,
+        "agents_managed": status.agents_managed,
+        "config_valid": status.config_valid,
+        "identity_material_valid": status.identity_material_valid,
+        "hook_trust": status.hook_trust,
+        "new_session_required": status.new_session_required,
+    }
 
 
 def _print_state_error(error: RouterStateError) -> int:
@@ -192,6 +228,21 @@ def main(argv=None) -> int:
                 read_hook_event(sys.stdin.buffer), args.installation_dir
             )
             _print_json(output)
+            return 0
+        if args.command == "global-install":
+            global_result = global_install(
+                codex_home=args.codex_home,
+                state_root=args.state_dir,
+                codex_binary=args.codex_bin,
+                defaults=_role_config(args),
+            )
+            _print_json(_global_status_payload(global_result))
+            return 0
+        if args.command == "global-status":
+            _print_json(_global_status_payload(global_status(args.codex_home)))
+            return 0
+        if args.command == "global-uninstall":
+            _print_json(_global_status_payload(global_uninstall(args.codex_home)))
             return 0
         if args.command == "start":
             result = start_run(

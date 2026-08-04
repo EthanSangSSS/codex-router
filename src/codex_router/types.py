@@ -40,5 +40,17 @@ class SecurityResult:
     counts: Mapping[str, int]
 
 
+@dataclass(frozen=True)
+class GlobalStatus:
+    state: str
+    installation_dir: Path
+    hook_configured: bool
+    agents_managed: bool
+    config_valid: bool
+    identity_material_valid: bool
+    hook_trust: str
+    new_session_required: bool
+
+
 class StageAdapter(Protocol):
     def run(self, task: str, context: Mapping[str, Any]) -> StageResult: ...
