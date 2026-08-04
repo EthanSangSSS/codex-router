@@ -52,6 +52,75 @@ run-<id>/
 
 `state.json` is the sole canonical workflow state. It is committed under a per-run lock with atomic replacement and directory durability. Packets, stage files, events, request, and result are derived views that `router status` can regenerate.
 
+## Global default routing policy
+
+The optional global policy makes Router the default for substantive Codex turns without adding a daemon, background service, browser bridge, or second App instance. Codex invokes one `UserPromptSubmit` command hook for each turn. The hook classifies the prompt locally and deterministically:
+
+1. An exact first non-empty line of `本次不用 Router` or `仅本地执行` bypasses Router for that turn only.
+2. Greetings, thanks, trivial arithmetic, brief concept explanations, current-task metadata, and one-step read-only inspection may run directly.
+3. Changes, reviews, security or architecture work, research, verification, comparisons, decisions, plans, multi-step work, sensitive content, and ambiguity route through Router.
+
+The hook uses a full HMAC-SHA-256 identity for the Codex conversation and a deterministic event identity for the turn. Re-delivery of the same event returns the same run; it cannot create a duplicate replacement run. Raw hook session and turn IDs are not printed or persisted. The normalized task remains in private per-run state as the explicit local-recovery copy.
+
+Install only from an environment where `router` is available to the same absolute Python interpreter recorded in the hook command:
+
+```bash
+router global-install \
+  --codex-home "/absolute/path/to/active-codex-home" \
+  --state-dir "/absolute/private/path/to/codex-router-runs" \
+  --codex-bin "/Applications/ChatGPT.app/Contents/Resources/codex" \
+  --local-model "gpt-5.6-sol" \
+  --local-reasoning "max" \
+  --web-model "sol" \
+  --web-reasoning "xhigh" \
+  --luna-model "gpt-5.6-luna" \
+  --luna-reasoning "max"
+```
+
+Installation adds exactly one handler to `hooks.json` and one bounded block to `AGENTS.md`. It does not edit `config.toml` or `AGENTS.override.md`. Original user files are backed up byte-for-byte under `.codex-router-policy-v1/` with private permissions. The model names and reasoning levels above are configuration values; `max`, `xhigh`, and `max` are defaults, not state-machine constants.
+
+Inspect or reverse the installation with:
+
+```bash
+router global-status --codex-home "/absolute/path/to/active-codex-home"
+router global-uninstall --codex-home "/absolute/path/to/active-codex-home"
+```
+
+Uninstall restores exact original bytes and modes when the managed files still match the installed hashes. It refuses concurrent or unrelated edits instead of overwriting them. Backups, installation evidence, and Router run state remain. Both install and uninstall require a new Codex task before session-loaded instructions can change.
+
+The offline self-test deliberately refuses the live default Codex home. Run it only against a disposable installed home:
+
+```bash
+ROUTER_TEST_HOME="$(mktemp -d)"
+ROUTER_TEST_STATE="$(mktemp -d)"
+chmod 700 "$ROUTER_TEST_HOME" "$ROUTER_TEST_STATE"
+router global-install \
+  --codex-home "$ROUTER_TEST_HOME" \
+  --state-dir "$ROUTER_TEST_STATE" \
+  --codex-bin "/Applications/ChatGPT.app/Contents/Resources/codex"
+router global-self-test --codex-home "$ROUTER_TEST_HOME"
+router global-uninstall --codex-home "$ROUTER_TEST_HOME"
+```
+
+The self-test creates only ephemeral Router runs, performs no model, Web, browser, or network action, does not activate hook trust, and leaves the configured state root untouched.
+
+### Manual App acceptance checklist
+
+Automated tests cannot verify Codex UI hook trust, Web model selection, reasoning level, or browser conversation reuse. Before treating a live installation as active:
+
+1. Open `/hooks`, review the exact `UserPromptSubmit` command, and explicitly trust it. Never bypass hook trust with an unsafe launch flag.
+2. Start a new Codex task. Confirm `global-status` still reports `hook_trust=requires-user-check`; this conservative value is expected because Router has no supported trust receipt.
+3. Submit one substantive synthetic task. Confirm Codex shows `Router: active` and exactly one deterministic run reaches `awaiting_local_sol`.
+4. Continue with a related question in the same Codex task. Reuse the current in-app Web Sol conversation and current browser page; do not create a new Web conversation for every related turn. Treat this reuse, Web Sol selection, and `xhigh` reasoning as operator-attested.
+5. Start a different Codex task and confirm it receives a different driver context and does not inherit the previous Web conversation.
+6. Confirm Local Sol and Luna use the configured local models with `max` reasoning evidence, while Web remains operator-attested.
+7. Submit a Web response with a wrong run, packet, revision, digest, or response marker and confirm Router rejects it.
+8. Begin one prompt with `仅本地执行` and confirm only that turn bypasses Router; the next substantive turn must route again.
+9. Use a synthetic protected-value fixture and confirm the Web-bound packet is deterministically redacted or the run ends with `router-security-gate`, with no Web packet, Luna transition, retry, or fallback.
+10. Run `global-uninstall`, start a new Codex task, and confirm the global Router behavior is gone while manual Router commands and retained evidence remain.
+
+Same-task Web continuity is an App/operator responsibility. Router binds the run, driver context, revision, packet, digest, and response marker, but it never opens, closes, focuses, or duplicates browser pages.
+
 ## App-driven workflow
 
 Use one stable `driver_context_id` for runs initiated from the same Codex conversation. Those runs may reuse the App-managed continuous Web Sol context, so a new Web conversation is not created for every related question. A different Codex conversation must use a different `driver_context_id` and must not inherit the previous Web context.
@@ -159,6 +228,8 @@ python3.12 -m compileall -q src tests
 - App-driven stages still require Codex App or the operator to execute the returned packet and supply bounded evidence files.
 - Real `--adapter-mode real` provider wiring is not configured or validated.
 - Web model, reasoning, and context claims are operator-attested rather than browser-verified.
+- Hook trust and new-task activation must be confirmed manually through Codex; `global-status` never claims them as verified.
+- The Web security gate blocks or redacts detected protected categories but cannot prove that every unknown sensitive value was detected.
 - Fake mode proves Router orchestration and persistence, not model quality.
 - The MVP does not manage Codex archive/delete lifecycle.
 - There is no Web UI, daemon, scheduler, distributed queue, retry system, database, browser automation, or plugin marketplace.

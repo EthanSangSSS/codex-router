@@ -15,7 +15,11 @@ import sys
 import tempfile
 from typing import Any, Iterator, Mapping
 
-from .hook import GLOBAL_CONFIG_PROTOCOL
+from .hook import (
+    GLOBAL_CONFIG_PROTOCOL,
+    HOOK_CONTEXT_PREFIX,
+    handle_user_prompt,
+)
 from .protocol import canonical_json_bytes
 from .state import RouterStateError
 from .types import GlobalStatus
@@ -787,3 +791,205 @@ def global_uninstall(codex_home: Path | str) -> GlobalStatus:
             canonical_json_bytes(state) + b"\n",
         )
         return global_status(home)
+
+
+def _self_test_context(output: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        hook_output = output["hookSpecificOutput"]
+        additional_context = hook_output["additionalContext"]
+        if (
+            hook_output.get("hookEventName") != "UserPromptSubmit"
+            or not isinstance(additional_context, str)
+            or not additional_context.startswith(HOOK_CONTEXT_PREFIX)
+        ):
+            raise ValueError
+        value = json.loads(additional_context[len(HOOK_CONTEXT_PREFIX) :])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise _error("conflict", "global self-test received invalid hook output") from error
+    if not isinstance(value, dict):
+        raise _error("conflict", "global self-test hook context is invalid")
+    return value
+
+
+def _managed_fingerprints(home: Path) -> dict[str, str]:
+    paths = [home / "hooks.json", home / "AGENTS.md"]
+    installation_dir = home / INSTALL_DIRECTORY_NAME
+    if installation_dir.is_dir():
+        paths.extend(
+            path for path in installation_dir.rglob("*") if path.is_file()
+        )
+    fingerprints: dict[str, str] = {}
+    for path in paths:
+        if path.is_file() and not path.is_symlink():
+            fingerprints[str(path.relative_to(home))] = _sha256(path.read_bytes())
+    return fingerprints
+
+
+def global_self_test(codex_home: Path | str) -> dict[str, Any]:
+    home = _validate_codex_home(codex_home)
+    live_home = (Path.home() / ".codex").resolve(strict=False)
+    if home.resolve(strict=True) == live_home:
+        raise _error("invalid-input", "global self-test refuses the live Codex home")
+    status = global_status(home)
+    if status.state != "installed":
+        raise _error("conflict", "global self-test requires a complete installation")
+
+    installation_dir = home / INSTALL_DIRECTORY_NAME
+    config = _private_json(installation_dir / "config.json")
+    before_fingerprints = _managed_fingerprints(home)
+    configured_state_root = Path(config["state_root"])
+    configured_state_existed = configured_state_root.exists()
+    session_a = "synthetic-self-test-session-" + "a"
+    session_b = "synthetic-self-test-session-" + "b"
+    turn_a = "synthetic-self-test-turn-" + "a"
+    turn_b = "synthetic-self-test-turn-" + "b"
+    route_prompt = "修改 synthetic-self-test-route artifact"
+    direct_prompt = "你好"
+    bypass_prompt = "仅本地执行\n" + route_prompt
+    raw_values = (session_a, session_b, turn_a, turn_b, route_prompt)
+    ephemeral_path: Path | None = None
+
+    with tempfile.TemporaryDirectory(prefix="codex-router-self-test-") as temporary:
+        ephemeral_path = Path(temporary)
+        ephemeral_path.chmod(0o700)
+        test_installation = ephemeral_path / "installation"
+        test_installation.mkdir(mode=0o700)
+        test_installation.chmod(0o700)
+        test_config = deepcopy(config)
+        test_config["state_root"] = str(ephemeral_path / "runs")
+        _atomic_write(
+            test_installation / "config.json",
+            canonical_json_bytes(test_config) + b"\n",
+        )
+        _atomic_write(
+            test_installation / _IDENTITY_FILE_NAME,
+            bytes(range(32)),
+        )
+
+        def event(*, prompt: str, session: str, turn: str) -> dict[str, str]:
+            return {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": session,
+                "turn_id": turn,
+                "prompt": prompt,
+                "cwd": str(ephemeral_path),
+            }
+
+        direct = _self_test_context(
+            handle_user_prompt(
+                event(prompt=direct_prompt, session=session_a, turn="direct-turn"),
+                test_installation,
+            )
+        )
+        bypass = _self_test_context(
+            handle_user_prompt(
+                event(prompt=bypass_prompt, session=session_a, turn="bypass-turn"),
+                test_installation,
+            )
+        )
+        route = _self_test_context(
+            handle_user_prompt(
+                event(prompt=route_prompt, session=session_a, turn=turn_a),
+                test_installation,
+            )
+        )
+        duplicate = _self_test_context(
+            handle_user_prompt(
+                event(prompt=route_prompt, session=session_a, turn=turn_a),
+                test_installation,
+            )
+        )
+        changed_session = _self_test_context(
+            handle_user_prompt(
+                event(prompt=route_prompt, session=session_b, turn=turn_a),
+                test_installation,
+            )
+        )
+        changed_turn = _self_test_context(
+            handle_user_prompt(
+                event(prompt=route_prompt, session=session_a, turn=turn_b),
+                test_installation,
+            )
+        )
+
+        route_contexts = (route, duplicate, changed_session, changed_turn)
+        output_text = json.dumps(
+            {
+                "direct": direct,
+                "bypass": bypass,
+                "routes": route_contexts,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        run_root = ephemeral_path / "runs"
+        run_directories = sorted(
+            path for path in run_root.glob("run-hook-*") if path.is_dir()
+        )
+        local_only = len(run_directories) == 3
+        identity_not_persisted = True
+        for run_directory in run_directories:
+            state = json.loads(
+                (run_directory / "state.json").read_text(encoding="utf-8")
+            )
+            local_only &= (
+                state.get("status") == "awaiting_local_sol"
+                and state.get("next_stage") == "local_sol"
+                and not (run_directory / "web-sol.json").exists()
+                and not (run_directory / "luna.json").exists()
+            )
+            evidence = b"\n".join(
+                path.read_bytes()
+                for path in run_directory.rglob("*")
+                if path.is_file()
+            ).decode("utf-8", errors="ignore")
+            identity_not_persisted &= all(
+                identity not in evidence
+                for identity in (session_a, session_b, turn_a, turn_b)
+            )
+
+        checks = {
+            "direct_policy": direct.get("decision") == "direct",
+            "bypass_policy": bypass.get("decision") == "bypass",
+            "route_policy": all(
+                context.get("decision") == "route" for context in route_contexts
+            ),
+            "duplicate_event_idempotent": (
+                route.get("run_id") == duplicate.get("run_id")
+                and duplicate.get("idempotent") is True
+            ),
+            "same_session_stable": (
+                route.get("driver_context_id")
+                == changed_turn.get("driver_context_id")
+                and route.get("run_id") != changed_turn.get("run_id")
+            ),
+            "different_session_isolated": (
+                route.get("driver_context_id")
+                != changed_session.get("driver_context_id")
+            ),
+            "one_run_per_event": len(run_directories) == 3,
+            "local_stage_only": local_only,
+            "raw_identity_not_persisted": identity_not_persisted,
+            "raw_values_not_returned": all(value not in output_text for value in raw_values),
+        }
+
+    checks["ephemeral_artifacts_removed"] = (
+        ephemeral_path is not None and not ephemeral_path.exists()
+    )
+    checks["persistent_installation_unchanged"] = (
+        _managed_fingerprints(home) == before_fingerprints
+    )
+    checks["configured_state_root_untouched"] = (
+        configured_state_root.exists() == configured_state_existed
+    )
+    if not all(checks.values()):
+        raise _error("conflict", "global self-test failed closed")
+    return {
+        "protocol": "codex-router/global-self-test/v1",
+        "status": "pass",
+        "checks": checks,
+        "network_used": False,
+        "browser_used": False,
+        "installation_activated": False,
+        "hook_trust": "unknown",
+    }

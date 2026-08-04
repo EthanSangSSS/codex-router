@@ -6,7 +6,12 @@ import sys
 from typing import Any
 
 from .adapters import adapters_for_mode
-from .global_install import global_install, global_status, global_uninstall
+from .global_install import (
+    global_install,
+    global_self_test,
+    global_status,
+    global_uninstall,
+)
 from .hook import handle_user_prompt, read_hook_event
 from .pipeline import Router, RouterRunError
 from .state import RouterStateError, fail_stage, get_status, start_run, submit_stage
@@ -105,6 +110,10 @@ def parser() -> argparse.ArgumentParser:
         "global-uninstall", help="reversibly remove the global Router policy"
     )
     uninstall.add_argument("--codex-home", type=Path, required=True)
+    self_test = subcommands.add_parser(
+        "global-self-test", help="run the offline global Router policy self-test"
+    )
+    self_test.add_argument("--codex-home", type=Path, required=True)
     return root
 
 
@@ -243,6 +252,9 @@ def main(argv=None) -> int:
             return 0
         if args.command == "global-uninstall":
             _print_json(_global_status_payload(global_uninstall(args.codex_home)))
+            return 0
+        if args.command == "global-self-test":
+            _print_json(global_self_test(args.codex_home))
             return 0
         if args.command == "start":
             result = start_run(
