@@ -21,13 +21,18 @@ from .protocol import (
     ProtocolError,
     build_stage_packet,
     canonical_json_bytes,
+    digest_json,
     failure_digest as compute_failure_digest,
     normalize_content,
     submission_digest,
     validate_stage_packet,
     validate_web_response,
 )
-from .security import sanitize_failure_code, sanitize_failure_summary
+from .security import (
+    sanitize_failure_code,
+    sanitize_failure_summary,
+    secure_web_payload,
+)
 from .types import TransitionResult
 
 
@@ -67,6 +72,7 @@ _STAGE_FILE_NAMES = {
 }
 _STAGE_SOURCE_REVISIONS = {"local_sol": 0, "web_sol": 1, "luna": 2}
 _DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+_SECURITY_CATEGORY_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _LOCAL_EXECUTION_FIELDS = (
     "requested_model",
     "requested_reasoning",
@@ -480,6 +486,42 @@ def _validate_accepted_record(
 ) -> None:
     driver_context_id = state["driver"]["driver_context_id"]
     run_id = state["run_id"]
+    if failure and record.get("execution") == {
+        "verification": "locally_verified",
+        "source": "router_security_gate",
+        "network_used": False,
+    }:
+        evidence = record.get("security")
+        failure_value = record.get("failure")
+        expected_digest = _security_gate_failure_digest(
+            driver_context_id=driver_context_id,
+            run_id=run_id,
+            evidence=evidence,
+        )
+        if (
+            stage != "web_sol"
+            or set(record)
+            != {
+                "stage",
+                "source_revision",
+                "failure_digest",
+                "failure",
+                "execution",
+                "telemetry",
+                "security",
+            }
+            or record.get("stage") != "web_sol"
+            or record.get("source_revision") != 1
+            or record.get("failure_digest") != expected_digest
+            or failure_value
+            != {
+                "code": "router-security-gate",
+                "summary": "Web payload blocked by Router security policy",
+            }
+            or record.get("telemetry") != {}
+        ):
+            raise ProtocolError("Router security failure record is invalid")
+        return
     packet = record.get("packet")
     validate_stage_packet(
         packet,
@@ -551,6 +593,16 @@ def _validate_state_packets(state: Mapping[str, Any], run_id: str) -> None:
                 _validate_accepted_record(
                     state=state, stage=stage, record=record, failure=is_failure
                 )
+        if "web_security" in state:
+            _validate_security_evidence(state["web_security"])
+        gate_failure = failures.get("web_sol")
+        if (
+            isinstance(gate_failure, Mapping)
+            and gate_failure.get("execution", {}).get("source")
+            == "router_security_gate"
+            and gate_failure.get("security") != state.get("web_security")
+        ):
+            raise ProtocolError("Router security evidence is inconsistent")
         packet = state.get("next_packet")
         if packet is None:
             if state.get("next_stage") is not None:
@@ -811,38 +863,48 @@ def _normalize_execution(
     return stable, telemetry
 
 
-def _build_next_packet(state: Mapping[str, Any], completed_stage: str) -> dict[str, Any] | None:
+def _proposed_web_payload(state: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "task": state["request"]["task"],
+        "local_sol_output": state["submissions"]["local_sol"]["content"],
+        "role": deepcopy(state["role_config"]["web_sol"]),
+        "permission": "no_local_filesystem",
+        "response_marker_contract": {
+            "prefix": WEB_RESPONSE_PREFIX,
+            "placement": "first_nonempty_line",
+            "occurrences": 1,
+            "required_fields": [
+                "driver_context_id",
+                "run_id",
+                "stage",
+                "revision",
+                "packet_id",
+                "packet_digest",
+            ],
+        },
+        "output_contract": {"type": "text"},
+    }
+
+
+def _build_next_packet(
+    state: Mapping[str, Any],
+    completed_stage: str,
+    *,
+    secured_web_payload: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
     driver_context_id = state["driver"]["driver_context_id"]
     run_id = state["run_id"]
     task = state["request"]["task"]
     if completed_stage == "local_sol":
-        local_output = state["submissions"]["local_sol"]["content"]
+        if not isinstance(secured_web_payload, Mapping):
+            raise ProtocolError("secured Web payload is required")
         return build_stage_packet(
             driver_context_id=driver_context_id,
             run_id=run_id,
             packet_id=_new_packet_id(),
             target_stage="web_sol",
             source_revision=1,
-            payload={
-                "task": task,
-                "local_sol_output": local_output,
-                "role": deepcopy(state["role_config"]["web_sol"]),
-                "permission": "no_local_filesystem",
-                "response_marker_contract": {
-                    "prefix": WEB_RESPONSE_PREFIX,
-                    "placement": "first_nonempty_line",
-                    "occurrences": 1,
-                    "required_fields": [
-                        "driver_context_id",
-                        "run_id",
-                        "stage",
-                        "revision",
-                        "packet_id",
-                        "packet_digest",
-                    ],
-                },
-                "output_contract": {"type": "text"},
-            },
+            payload=deepcopy(dict(secured_web_payload)),
         )
     if completed_stage == "web_sol":
         return build_stage_packet(
@@ -861,6 +923,75 @@ def _build_next_packet(state: Mapping[str, Any], completed_stage: str) -> dict[s
             },
         )
     return None
+
+
+def _validate_security_evidence(value: Mapping[str, Any]) -> None:
+    if not isinstance(value, Mapping) or set(value) != {
+        "decision",
+        "categories",
+        "counts",
+    }:
+        raise ProtocolError("Router security evidence schema is invalid")
+    decision = value.get("decision")
+    categories = value.get("categories")
+    counts = value.get("counts")
+    if decision not in ("allow", "redacted", "block"):
+        raise ProtocolError("Router security decision is invalid")
+    if (
+        not isinstance(categories, list)
+        or categories != sorted(set(categories))
+        or any(
+            not isinstance(category, str)
+            or _SECURITY_CATEGORY_PATTERN.fullmatch(category) is None
+            for category in categories
+        )
+    ):
+        raise ProtocolError("Router security categories are invalid")
+    if (
+        not isinstance(counts, Mapping)
+        or set(counts) != set(categories)
+        or any(
+            not isinstance(count, int) or isinstance(count, bool) or count <= 0
+            for count in counts.values()
+        )
+    ):
+        raise ProtocolError("Router security counts are invalid")
+    if (decision == "allow") != (not categories):
+        raise ProtocolError("Router security evidence is inconsistent")
+
+
+def _security_evidence(result) -> dict[str, Any]:
+    evidence = {
+        "decision": result.decision,
+        "categories": list(result.categories),
+        "counts": dict(result.counts),
+    }
+    _validate_security_evidence(evidence)
+    return evidence
+
+
+def _security_gate_failure_digest(
+    *, driver_context_id: str, run_id: str, evidence: Mapping[str, Any]
+) -> str:
+    _validate_security_evidence(evidence)
+    return digest_json(
+        {
+            "driver_context_id": driver_context_id,
+            "run_id": run_id,
+            "stage": "web_sol",
+            "source_revision": 1,
+            "failure": {
+                "code": "router-security-gate",
+                "summary": "Web payload blocked by Router security policy",
+            },
+            "execution": {
+                "verification": "locally_verified",
+                "source": "router_security_gate",
+                "network_used": False,
+            },
+            "security": dict(evidence),
+        }
+    )
 
 
 def _sanitize_failure(value: Mapping[str, Any]) -> dict[str, str]:
@@ -1212,9 +1343,53 @@ def submit_stage(
             }
         )
         if stage == "local_sol":
-            next_state["status"] = "awaiting_web_sol"
-            next_state["next_stage"] = "web_sol"
-            next_state["next_packet"] = _build_next_packet(next_state, stage)
+            security_result = secure_web_payload(_proposed_web_payload(next_state))
+            evidence = _security_evidence(security_result)
+            next_state["web_security"] = evidence
+            if security_result.decision == "block":
+                failure = {
+                    "stage": "web_sol",
+                    "source_revision": 1,
+                    "failure": {
+                        "code": "router-security-gate",
+                        "summary": "Web payload blocked by Router security policy",
+                    },
+                    "execution": {
+                        "verification": "locally_verified",
+                        "source": "router_security_gate",
+                        "network_used": False,
+                    },
+                    "telemetry": {},
+                    "security": deepcopy(evidence),
+                }
+                failure["failure_digest"] = _security_gate_failure_digest(
+                    driver_context_id=driver_context_id,
+                    run_id=run_id,
+                    evidence=evidence,
+                )
+                next_state["failures"]["web_sol"] = failure
+                next_state["status"] = "failed"
+                next_state["revision"] = next_revision + 1
+                next_state["next_stage"] = None
+                next_state["next_packet"] = None
+                next_state["failed_stage"] = "web_sol"
+                next_state["history"].append(
+                    {
+                        "revision": next_revision + 1,
+                        "event": "stage_failed",
+                        "stage": "web_sol",
+                        "failure_digest": failure["failure_digest"],
+                        "source": "router_security_gate",
+                    }
+                )
+            else:
+                secured_payload = deepcopy(dict(security_result.value))
+                secured_payload["security_evidence"] = deepcopy(evidence)
+                next_state["status"] = "awaiting_web_sol"
+                next_state["next_stage"] = "web_sol"
+                next_state["next_packet"] = _build_next_packet(
+                    next_state, stage, secured_web_payload=secured_payload
+                )
         elif stage == "web_sol":
             next_state["status"] = "awaiting_luna"
             next_state["next_stage"] = "luna"

@@ -662,6 +662,75 @@ class SuccessfulTransitionTests(RouterStateTestCase):
         self.assertEqual(raised.exception.code, "conflict")
 
 
+class WebSecurityBoundaryTests(RouterStateTestCase):
+    def test_redactable_local_output_is_sanitized_before_web_packet_persistence(self):
+        started = self.start()
+        protected_value = "synthetic-local-value"
+        local_output = "analysis api_" + "key=" + protected_value
+
+        local = self.submit(
+            started, "local_sol", local_output, self.local_execution()
+        )
+
+        self.assertEqual(
+            (local.status, local.revision, local.next_stage),
+            ("awaiting_web_sol", 1, "web_sol"),
+        )
+        state = self.read_state()
+        web_packet = state["next_packet"]
+        serialized_packet = json.dumps(web_packet, ensure_ascii=False, sort_keys=True)
+        self.assertNotIn(protected_value, serialized_packet)
+        self.assertIn("[REDACTED:", serialized_packet)
+        self.assertEqual(state["web_security"]["decision"], "redacted")
+        self.assertEqual(
+            set(state["web_security"]), {"decision", "categories", "counts"}
+        )
+        self.assertNotIn(
+            protected_value, json.dumps(state["web_security"], ensure_ascii=False)
+        )
+        packet_file = local.stage_packet_path
+        self.assertEqual(
+            json.loads(packet_file.read_text(encoding="utf-8")), web_packet
+        )
+        self.assertNotIn(protected_value, packet_file.read_text(encoding="utf-8"))
+
+    def test_blocked_local_output_commits_safe_terminal_web_failure_without_packet(self):
+        started = self.start()
+        private_key = (
+            "-----BEGIN " + "PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----"
+        )
+
+        result = self.submit(
+            started, "local_sol", private_key, self.local_execution()
+        )
+
+        self.assertEqual((result.status, result.revision, result.next_stage), ("failed", 2, None))
+        state = self.read_state()
+        self.assertIn("local_sol", state["submissions"])
+        self.assertNotIn("web_sol", state["submissions"])
+        self.assertEqual(state["failed_stage"], "web_sol")
+        failure = state["failures"]["web_sol"]
+        self.assertEqual(failure["failure"]["code"], "router-security-gate")
+        self.assertEqual(failure["execution"]["source"], "router_security_gate")
+        self.assertFalse(failure["execution"]["network_used"])
+        self.assertNotIn("packet", failure)
+        self.assertNotIn("packet_digest", failure)
+        self.assertEqual(state["web_security"]["decision"], "block")
+        self.assertIsNone(state["next_packet"])
+        self.assertIsNone(state["final_result"])
+        web_packets = []
+        for path in (result.run_dir / "packets").glob("*.json"):
+            packet = json.loads(path.read_text(encoding="utf-8"))
+            if packet["target_stage"] == "web_sol":
+                web_packets.append(path)
+        self.assertEqual(web_packets, [])
+        failure_projection = (result.run_dir / "web-sol.json").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn(private_key, failure_projection)
+        self.assertNotIn("synthetic", failure_projection)
+
+
 class CanonicalPacketIntegrityTests(RouterStateTestCase):
     def _rewrite_state(self, state):
         (self.started.run_dir / "state.json").write_text(

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Literal, Mapping, Protocol
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,17 @@ class TransitionResult:
     stage_packet_path: Path | None
     idempotent: bool = False
     projection_warnings: tuple[str, ...] = ()
+
+
+SecurityDecision = Literal["allow", "redacted", "block"]
+
+
+@dataclass(frozen=True)
+class SecurityResult:
+    decision: SecurityDecision
+    value: Any | None
+    categories: tuple[str, ...]
+    counts: Mapping[str, int]
 
 
 class StageAdapter(Protocol):
