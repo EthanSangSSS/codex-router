@@ -1,14 +1,14 @@
 from contextlib import contextmanager
 import json
 from pathlib import Path
-import re
 import signal
 import time
 from typing import Any, Iterator, Mapping
 import uuid
 
 from .protocol import make_handoff, web_response_marker
-from .state import fail_stage, get_status, start_run, submit_stage
+from .security import sanitize_failure_summary
+from .state import fail_stage, get_status, prepare_state_root, start_run, submit_stage
 from .types import RunOutcome, StageAdapter, StageResult
 
 
@@ -30,20 +30,10 @@ class RouterRunError(RuntimeError):
 
 
 def _safe_error(error: BaseException) -> str:
-    summary = " ".join(str(error).splitlines())[:500]
-    patterns = (
-        r"(?i)bearer\s+\S+",
-        r"(?i)(authorization|cookie|password|secret|token|api[_-]?key)\s*[:=]\s*\S+",
-    )
-    for pattern in patterns:
-        summary = re.sub(
-            pattern,
-            lambda match: (
-                f"{match.group(1)}=<redacted>" if match.lastindex else "<redacted>"
-            ),
-            summary,
-        )
-    return summary or error.__class__.__name__
+    try:
+        return sanitize_failure_summary(str(error))
+    except (Exception, UnicodeEncodeError):
+        return "stage failed; sensitive details omitted"
 
 
 @contextmanager
@@ -124,17 +114,11 @@ class Router:
         self.adapter_mode = adapter_mode
 
     def run(self, task: str) -> RunOutcome:
-        resolved_root = self.state_root.expanduser().resolve(strict=False)
-        live_root = (Path.home() / ".codex").resolve(strict=False)
-        if resolved_root == live_root or live_root in resolved_root.parents:
-            raise ValueError("Router state must not use the live Codex profile")
-        resolved_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        resolved_root.chmod(0o700)
+        resolved_root = prepare_state_root(self.state_root)
 
         driver_context_id = f"ctx-{uuid.uuid4()}"
         fake_binary = resolved_root / ".profiles" / driver_context_id / "offline-codex"
         fake_binary.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fake_binary.parent.chmod(0o700)
         fake_binary.write_text("offline pipeline marker\n", encoding="utf-8")
         fake_binary.chmod(0o700)
         role_config = {

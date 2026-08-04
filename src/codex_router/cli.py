@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -8,6 +9,27 @@ from .adapters import adapters_for_mode
 from .pipeline import Router, RouterRunError
 from .state import RouterStateError, fail_stage, get_status, start_run, submit_stage
 from .types import TransitionResult
+
+
+def _bounded_parser_message(message: str) -> str:
+    if "unrecognized arguments" in message:
+        return "unexpected arguments"
+    if "the following arguments are required" in message:
+        names = re.findall(r"--[A-Za-z0-9-]+|\bcommand\b", message)
+        return ("missing required arguments: " + ", ".join(dict.fromkeys(names)))[:200]
+    argument = re.search(r"argument ([^:]+):", message)
+    if argument:
+        name = argument.group(1)
+        if name == "command":
+            return "invalid subcommand"
+        if re.fullmatch(r"--[A-Za-z0-9-]+", name):
+            return f"invalid value for {name}"
+    return "invalid command usage"
+
+
+class RouterArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise RouterStateError("invalid-input", _bounded_parser_message(message))
 
 
 def _add_transition_identity_arguments(command: argparse.ArgumentParser) -> None:
@@ -20,7 +42,7 @@ def _add_transition_identity_arguments(command: argparse.ArgumentParser) -> None
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="router")
+    root = RouterArgumentParser(prog="router")
     subcommands = root.add_subparsers(dest="command", required=True)
 
     run = subcommands.add_parser("run", help="run Local Sol → Web Sol → Luna")
@@ -73,6 +95,21 @@ def _result_payload(result: TransitionResult) -> dict[str, Any]:
 
 def _print_json(value: dict[str, Any], *, stream=sys.stdout) -> None:
     print(json.dumps(value, ensure_ascii=False, sort_keys=True), file=stream)
+
+
+def _print_state_error(error: RouterStateError) -> int:
+    _print_json(
+        {
+            "status": "error",
+            "code": error.code,
+            "message": str(error)[:200],
+            "run_id": error.run_id,
+            "stage": error.stage,
+            "revision": error.revision,
+        },
+        stream=sys.stderr,
+    )
+    return error.exit_code
 
 
 def _read_utf8(path: Path, description: str) -> str:
@@ -140,10 +177,10 @@ def _run_legacy(args: argparse.Namespace) -> int:
 
 
 def main(argv=None) -> int:
-    args = parser().parse_args(argv)
-    if args.command == "run":
-        return _run_legacy(args)
     try:
+        args = parser().parse_args(argv)
+        if args.command == "run":
+            return _run_legacy(args)
         if args.command == "start":
             result = start_run(
                 state_root=args.state_dir,
@@ -177,17 +214,6 @@ def main(argv=None) -> int:
         else:
             result = get_status(state_root=args.state_dir, run_id=args.run_id)
     except RouterStateError as error:
-        _print_json(
-            {
-                "status": "error",
-                "code": error.code,
-                "message": str(error),
-                "run_id": error.run_id,
-                "stage": error.stage,
-                "revision": error.revision,
-            },
-            stream=sys.stderr,
-        )
-        return error.exit_code
+        return _print_state_error(error)
     _print_json(_result_payload(result))
     return 0

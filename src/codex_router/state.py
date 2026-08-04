@@ -5,10 +5,12 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import tempfile
 from typing import Any, Iterator, Mapping
 import uuid
@@ -22,8 +24,10 @@ from .protocol import (
     failure_digest as compute_failure_digest,
     normalize_content,
     submission_digest,
+    validate_stage_packet,
     validate_web_response,
 )
+from .security import sanitize_failure_code, sanitize_failure_summary
 from .types import TransitionResult
 
 
@@ -38,6 +42,7 @@ ERROR_EXIT_CODES = {
     "unsafe-state-root": 27,
     "state-corrupt": 28,
     "profile-mismatch": 29,
+    "state-root-unowned": 30,
 }
 
 _DRIVER_CONTEXT_PATTERN = re.compile(
@@ -46,12 +51,19 @@ _DRIVER_CONTEXT_PATTERN = re.compile(
 _RUN_ID_PATTERN = re.compile(r"run-[A-Za-z0-9][A-Za-z0-9._-]*")
 _DRIVER_TYPES = frozenset(("codex_app", "offline_pipeline"))
 _PROFILE_PROTOCOL = "codex-router/profile/v1"
+_STATE_ROOT_PROTOCOL = "codex-router/state-root/v1"
+_STATE_ROOT_MARKER = ".codex-router-root.json"
+_ROOT_ID_PATTERN = re.compile(
+    r"root-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
 _LOCAL_STAGES = ("local_sol", "luna")
 _STAGE_FILE_NAMES = {
     "local_sol": "local-sol.json",
     "web_sol": "web-sol.json",
     "luna": "luna.json",
 }
+_STAGE_SOURCE_REVISIONS = {"local_sol": 0, "web_sol": 1, "luna": 2}
+_DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 _LOCAL_EXECUTION_FIELDS = (
     "requested_model",
     "requested_reasoning",
@@ -86,15 +98,6 @@ _OFFLINE_EXECUTION_FIELDS = (
     "verification",
     "network_used",
 )
-_SECRET_PATTERNS = (
-    re.compile(r"(?i)bearer\s+\S+"),
-    re.compile(
-        r"(?i)(authorization|cookie|password|secret|token|api[_-]?key)"
-        r"\s*[:=]\s*\S+"
-    ),
-)
-
-
 class RouterStateError(RuntimeError):
     def __init__(
         self,
@@ -136,7 +139,10 @@ def _validate_run_id(run_id: str) -> None:
 
 
 def _resolve_state_root(state_root: Path | str) -> Path:
-    candidate = Path(state_root).expanduser().resolve(strict=False)
+    unresolved = Path(os.path.abspath(Path(state_root).expanduser()))
+    if unresolved.is_symlink():
+        raise RouterStateError("state-root-unowned", "Router state root must not be a symlink")
+    candidate = unresolved.resolve(strict=False)
     live_root = (Path.home() / ".codex").resolve(strict=False)
     if candidate == live_root or live_root in candidate.parents:
         raise RouterStateError(
@@ -175,9 +181,128 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _state_root_error(message: str) -> None:
+    raise RouterStateError("state-root-unowned", message)
+
+
+def _validate_private_directory(path: Path, *, state_root: bool = False) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        raise
+    label = "Router state root" if state_root else "Router-owned directory"
+    if stat.S_ISLNK(metadata.st_mode):
+        if state_root:
+            _state_root_error(f"{label} must not be a symlink")
+        raise RouterStateError("state-corrupt", f"{label} must not be a symlink")
+    if not stat.S_ISDIR(metadata.st_mode):
+        if state_root:
+            _state_root_error(f"{label} must be a directory")
+        raise RouterStateError("state-corrupt", f"{label} must be a directory")
+    if metadata.st_uid != os.geteuid():
+        if state_root:
+            _state_root_error(f"{label} must be owned by the current user")
+        raise RouterStateError("state-corrupt", f"{label} has the wrong owner")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
+        if state_root:
+            _state_root_error(f"{label} must not grant group or other permissions")
+        raise RouterStateError("state-corrupt", f"{label} is not private")
+
+
 def _ensure_private_directory(path: Path, *, parents: bool = False) -> None:
-    path.mkdir(mode=0o700, parents=parents, exist_ok=True)
-    os.chmod(path, 0o700)
+    if os.path.lexists(path):
+        _validate_private_directory(path)
+        return
+    if not parents:
+        path.mkdir(mode=0o700, exist_ok=False)
+        _fsync_directory(path.parent)
+        return
+    missing: list[Path] = []
+    current = path
+    while not os.path.lexists(current):
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700, exist_ok=False)
+        _fsync_directory(directory.parent)
+
+
+def _valid_root_marker(marker_path: Path) -> bool:
+    try:
+        metadata = marker_path.lstat()
+    except FileNotFoundError:
+        return False
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_size > 4096
+    ):
+        return False
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(marker, dict)
+        and set(marker) == {"protocol", "owner", "root_id", "created_by"}
+        and marker.get("protocol") == _STATE_ROOT_PROTOCOL
+        and marker.get("owner") == "codex-router"
+        and marker.get("created_by") == "codex-router"
+        and isinstance(marker.get("root_id"), str)
+        and _ROOT_ID_PATTERN.fullmatch(marker["root_id"]) is not None
+    )
+
+
+def _legacy_root_is_recognized(state_root: Path) -> bool:
+    for entry in state_root.iterdir():
+        if entry.name == ".profiles":
+            if entry.is_symlink() or not entry.is_dir():
+                return False
+            continue
+        if _RUN_ID_PATTERN.fullmatch(entry.name):
+            if entry.is_symlink() or not entry.is_dir():
+                return False
+            continue
+        return False
+    return True
+
+
+def prepare_state_root(state_root: Path | str) -> Path:
+    resolved = _resolve_state_root(state_root)
+    marker_path = resolved / _STATE_ROOT_MARKER
+    if not os.path.lexists(resolved):
+        _ensure_private_directory(resolved, parents=True)
+        _atomic_json(
+            marker_path,
+            {
+                "protocol": _STATE_ROOT_PROTOCOL,
+                "owner": "codex-router",
+                "root_id": f"root-{uuid.uuid4()}",
+                "created_by": "codex-router",
+            },
+        )
+        return resolved
+
+    _validate_private_directory(resolved, state_root=True)
+    if os.path.lexists(marker_path):
+        if not _valid_root_marker(marker_path):
+            _state_root_error("Router state root ownership marker is invalid")
+        return resolved
+    if not _legacy_root_is_recognized(resolved):
+        _state_root_error("existing directory is not a recognized Router state root")
+    _atomic_json(
+        marker_path,
+        {
+            "protocol": _STATE_ROOT_PROTOCOL,
+            "owner": "codex-router",
+            "root_id": f"root-{uuid.uuid4()}",
+            "created_by": "codex-router",
+        },
+    )
+    return resolved
 
 
 @contextmanager
@@ -310,7 +435,106 @@ def _initial_packet(
     )
 
 
+def _validate_accepted_record(
+    *,
+    state: Mapping[str, Any],
+    stage: str,
+    record: Mapping[str, Any],
+    failure: bool,
+) -> None:
+    driver_context_id = state["driver"]["driver_context_id"]
+    run_id = state["run_id"]
+    packet = record.get("packet")
+    validate_stage_packet(
+        packet,
+        expected_driver_context_id=driver_context_id,
+        expected_run_id=run_id,
+        expected_target_stage=stage,
+        expected_source_revision=_STAGE_SOURCE_REVISIONS[stage],
+    )
+    if (
+        record.get("stage") != stage
+        or record.get("source_revision") != _STAGE_SOURCE_REVISIONS[stage]
+        or record.get("packet_digest") != packet["packet_digest"]
+        or not isinstance(record.get("execution"), Mapping)
+        or not isinstance(record.get("telemetry"), Mapping)
+    ):
+        raise ProtocolError("accepted stage record identity is invalid")
+    if failure:
+        evidence = record.get("failure")
+        if (
+            not isinstance(evidence, Mapping)
+            or not isinstance(evidence.get("code"), str)
+            or not isinstance(evidence.get("summary"), str)
+        ):
+            raise ProtocolError("accepted failure record is invalid")
+        stored_digest = record.get("failure_digest")
+        recomputed = compute_failure_digest(
+            driver_context_id,
+            run_id,
+            stage,
+            packet["packet_digest"],
+            evidence,
+            record["execution"],
+        )
+    else:
+        if not isinstance(record.get("content"), str):
+            raise ProtocolError("accepted submission record is invalid")
+        stored_digest = record.get("submission_digest")
+        recomputed = submission_digest(
+            driver_context_id,
+            run_id,
+            stage,
+            packet["packet_digest"],
+            record["content"],
+            record["execution"],
+        )
+    if (
+        not isinstance(stored_digest, str)
+        or _DIGEST_PATTERN.fullmatch(stored_digest) is None
+        or not hmac.compare_digest(stored_digest, recomputed)
+    ):
+        raise ProtocolError("accepted stage record digest is invalid")
+    canonical_json_bytes(record["telemetry"])
+
+
+def _validate_state_packets(state: Mapping[str, Any], run_id: str) -> None:
+    try:
+        driver = state["driver"]
+        driver_context_id = driver["driver_context_id"]
+        if not isinstance(driver, Mapping) or not isinstance(driver_context_id, str):
+            raise ProtocolError("canonical driver identity is invalid")
+        submissions = state["submissions"]
+        failures = state["failures"]
+        if not isinstance(submissions, Mapping) or not isinstance(failures, Mapping):
+            raise ProtocolError("canonical stage records are invalid")
+        for collection, is_failure in ((submissions, False), (failures, True)):
+            for stage, record in collection.items():
+                if stage not in _STAGE_SOURCE_REVISIONS or not isinstance(record, Mapping):
+                    raise ProtocolError("canonical stage record is invalid")
+                _validate_accepted_record(
+                    state=state, stage=stage, record=record, failure=is_failure
+                )
+        packet = state.get("next_packet")
+        if packet is None:
+            if state.get("next_stage") is not None:
+                raise ProtocolError("canonical next packet is missing")
+        else:
+            validate_stage_packet(
+                packet,
+                expected_driver_context_id=driver_context_id,
+                expected_run_id=run_id,
+                expected_target_stage=state.get("next_stage"),
+                expected_source_revision=state.get("revision"),
+            )
+    except (KeyError, TypeError, ValueError, UnicodeEncodeError, ProtocolError) as error:
+        raise RouterStateError(
+            "state-corrupt", "canonical packet integrity validation failed", run_id=run_id
+        ) from error
+
+
 def _projection_payloads(state: Mapping[str, Any]) -> dict[Path, bytes]:
+    _validate_state_packets(state, state.get("run_id", "invalid"))
     request = {
         "protocol": RUN_PROTOCOL,
         "run_id": state["run_id"],
@@ -412,6 +636,7 @@ def _load_state(run_dir: Path, run_id: str) -> dict[str, Any]:
     )
     if any(key not in state for key in required):
         raise RouterStateError("state-corrupt", "canonical state is incomplete", run_id=run_id)
+    _validate_state_packets(state, run_id)
     return state
 
 
@@ -490,6 +715,22 @@ def _normalize_execution(
                 raise RouterStateError(
                     "profile-mismatch", "App Server execution evidence is incomplete"
                 )
+        if not isinstance(stable.get("reported_model"), str) or not stable[
+            "reported_model"
+        ].strip():
+            raise RouterStateError(
+                "profile-mismatch", "App Server reported_model evidence is incomplete"
+            )
+        if "reported_reasoning" not in stable or (
+            stable["reported_reasoning"] is not None
+            and (
+                not isinstance(stable["reported_reasoning"], str)
+                or not stable["reported_reasoning"].strip()
+            )
+        ):
+            raise RouterStateError(
+                "profile-mismatch", "App Server reported_reasoning evidence is incomplete"
+            )
     elif stage == "web_sol":
         fields = _WEB_EXECUTION_FIELDS
         stable = {name: deepcopy(execution[name]) for name in fields if name in execution}
@@ -589,17 +830,19 @@ def _build_next_packet(state: Mapping[str, Any], completed_stage: str) -> dict[s
 def _sanitize_failure(value: Mapping[str, Any]) -> dict[str, str]:
     if not isinstance(value, Mapping):
         _raise_invalid("failure must be an object")
-    code = " ".join(str(value.get("code", "stage-failed")).splitlines())[:64]
-    code = re.sub(r"[^A-Za-z0-9._-]+", "-", code).strip("-._") or "stage-failed"
-    summary = " ".join(str(value.get("summary", "stage failed")).splitlines())[:500]
-    for pattern in _SECRET_PATTERNS:
-        summary = pattern.sub(
-            lambda match: (
-                f"{match.group(1)}=<redacted>" if match.lastindex else "<redacted>"
-            ),
-            summary,
-        )
-    return {"code": code, "summary": summary or "stage failed"}
+    code = value.get("code")
+    summary = value.get("summary")
+    if not isinstance(code, str):
+        _raise_invalid("failure code must be text")
+    if not isinstance(summary, str):
+        _raise_invalid("failure summary must be text")
+    try:
+        return {
+            "code": sanitize_failure_code(code),
+            "summary": sanitize_failure_summary(summary),
+        }
+    except UnicodeEncodeError as error:
+        raise RouterStateError("invalid-input", "failure text must be valid UTF-8") from error
 
 
 def start_run(
@@ -631,7 +874,7 @@ def start_run(
     resolved_root = _resolve_state_root(state_root)
     binary_realpath, binary_sha256 = _resolve_binary(codex_binary)
 
-    _ensure_private_directory(resolved_root, parents=True)
+    resolved_root = prepare_state_root(resolved_root)
     run_dir = None
     run_id = None
     for _ in range(3):
@@ -693,7 +936,7 @@ def start_run(
 
 def get_status(*, state_root: Path | str, run_id: str) -> TransitionResult:
     _validate_run_id(run_id)
-    resolved_root = _resolve_state_root(state_root)
+    resolved_root = prepare_state_root(state_root)
     run_dir = resolved_root / run_id
     if not run_dir.is_dir():
         raise RouterStateError("run-not-found", "run does not exist", run_id=run_id)
@@ -724,7 +967,7 @@ def submit_stage(
         raise RouterStateError(
             "invalid-input", str(error), run_id=run_id, stage=stage
         ) from error
-    resolved_root = _resolve_state_root(state_root)
+    resolved_root = prepare_state_root(state_root)
     run_dir = resolved_root / run_id
     if not run_dir.is_dir():
         raise RouterStateError("run-not-found", "run does not exist", run_id=run_id)
@@ -894,7 +1137,7 @@ def fail_stage(
     if stage not in ("local_sol", "web_sol", "luna"):
         raise RouterStateError("invalid-transition", "unknown stage", run_id=run_id, stage=stage)
     sanitized_failure = _sanitize_failure(failure)
-    resolved_root = _resolve_state_root(state_root)
+    resolved_root = prepare_state_root(state_root)
     run_dir = resolved_root / run_id
     if not run_dir.is_dir():
         raise RouterStateError("run-not-found", "run does not exist", run_id=run_id)

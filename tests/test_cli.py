@@ -114,6 +114,78 @@ class RouterCliTests(unittest.TestCase):
             self.assertTrue(Path(payload["stage_packet_path"]).is_file())
             self.assertTrue((state_root / payload["run_id"] / "state.json").is_file())
 
+    def test_all_parser_errors_use_the_bounded_json_contract(self):
+        sensitive_value = "synthetic-parser-value-must-not-echo"
+        common = (
+            "--run-id",
+            "run-parser-test",
+            "--driver-context-id",
+            DRIVER_CONTEXT_ID,
+            "--state-dir",
+            "/tmp/router-parser-test",
+            "--stage",
+            "local_sol",
+            "--expected-revision",
+            "0",
+            "--packet-digest",
+            "sha256:" + "0" * 64,
+            "--output-file",
+            "/tmp/output",
+            "--execution-file",
+            "/tmp/execution",
+        )
+        cases = (
+            (),
+            ("start",),
+            (
+                "submit-stage",
+                *common[: common.index("local_sol")],
+                sensitive_value,
+                *common[common.index("local_sol") + 1 :],
+            ),
+            (
+                "submit-stage",
+                *common[: common.index("0")],
+                sensitive_value,
+                *common[common.index("0") + 1 :],
+            ),
+            (
+                "status",
+                "--run-id",
+                "run-parser-test",
+                "--state-dir",
+                "/tmp/router-parser-test",
+                "--unexpected",
+                sensitive_value,
+            ),
+            (sensitive_value,),
+        )
+
+        for arguments in cases:
+            with self.subTest(arguments=arguments[:1]):
+                completed = self.cli(*arguments)
+                self.assertEqual(completed.returncode, 25)
+                self.assertEqual(completed.stdout, "")
+                payload = json.loads(completed.stderr)
+                self.assertEqual(
+                    set(payload),
+                    {"status", "code", "message", "run_id", "stage", "revision"},
+                )
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["code"], "invalid-input")
+                self.assertIsNone(payload["run_id"])
+                self.assertIsNone(payload["stage"])
+                self.assertIsNone(payload["revision"])
+                self.assertLessEqual(len(payload["message"]), 200)
+                self.assertNotIn(sensitive_value, completed.stderr)
+
+    def test_help_remains_normal_text_with_exit_zero(self):
+        completed = self.cli("--help")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stderr, "")
+        self.assertIn("usage: router", completed.stdout)
+
     def test_app_driver_cli_lifecycle_and_terminal_idempotency(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -256,6 +328,49 @@ class RouterCliTests(unittest.TestCase):
             self.assertEqual(missing.returncode, 26)
             self.assertEqual(json.loads(missing.stderr)["code"], "run-not-found")
 
+    def test_sensitive_failure_never_appears_in_cli_or_run_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_root, start_arguments = self.start_arguments(root)
+            started = self.cli(*start_arguments)
+            current = json.loads(started.stdout)
+            run_dir = state_root / current["run_id"]
+            state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
+            packet = state["next_packet"]
+            protected = '{"api_' + 'key":"synthetic-sensitive-value"}'
+            failure_file = root / "failure.json"
+            execution_file = root / "execution.json"
+            write_json(failure_file, {"code": "app-error", "summary": protected})
+            write_json(execution_file, app_execution(state, "local_sol", packet))
+
+            failed = self.cli(
+                "fail-stage",
+                "--run-id",
+                current["run_id"],
+                "--driver-context-id",
+                DRIVER_CONTEXT_ID,
+                "--state-dir",
+                str(state_root),
+                "--stage",
+                "local_sol",
+                "--expected-revision",
+                "0",
+                "--packet-digest",
+                packet["packet_digest"],
+                "--error-file",
+                str(failure_file),
+                "--execution-file",
+                str(execution_file),
+            )
+
+            evidence = b"\n".join(
+                path.read_bytes() for path in run_dir.rglob("*") if path.is_file()
+            ).decode("utf-8", errors="replace")
+            self.assertEqual(failed.returncode, 0, failed.stderr)
+            self.assertEqual(failed.stderr, "")
+            self.assertNotIn(protected, failed.stdout)
+            self.assertNotIn(protected, evidence)
+
     def test_state_error_codes_have_stable_cli_exit_codes(self):
         expected = {
             "conflict": 20,
@@ -268,6 +383,7 @@ class RouterCliTests(unittest.TestCase):
             "unsafe-state-root": 27,
             "state-corrupt": 28,
             "profile-mismatch": 29,
+            "state-root-unowned": 30,
         }
         for error_code, exit_code in expected.items():
             with self.subTest(error_code=error_code):

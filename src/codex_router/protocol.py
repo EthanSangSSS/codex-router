@@ -1,5 +1,7 @@
 import hashlib
+import hmac
 import json
+import re
 from typing import Any, Iterable, Mapping
 import unicodedata
 
@@ -10,6 +12,17 @@ STAGES = ("local_sol", "web_sol", "luna")
 RUN_PROTOCOL = "codex-router/run-state/v1"
 PACKET_PROTOCOL = "codex-router/stage-packet/v1"
 WEB_RESPONSE_PREFIX = "[CODEX_ROUTER_RESPONSE_V1]"
+_PACKET_KEYS = {
+    "protocol",
+    "driver_context_id",
+    "run_id",
+    "packet_id",
+    "target_stage",
+    "source_revision",
+    "payload",
+    "packet_digest",
+}
+_SHA256_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class ProtocolError(ValueError):
@@ -77,6 +90,53 @@ def build_stage_packet(
         "payload": dict(payload),
     }
     return {**packet, "packet_digest": digest_json(packet)}
+
+
+def validate_stage_packet(
+    packet: Mapping[str, Any],
+    *,
+    expected_driver_context_id: str | None = None,
+    expected_run_id: str | None = None,
+    expected_target_stage: str | None = None,
+    expected_source_revision: int | None = None,
+) -> None:
+    if not isinstance(packet, Mapping) or set(packet) != _PACKET_KEYS:
+        raise ProtocolError("stage packet schema is invalid")
+    if packet.get("protocol") != PACKET_PROTOCOL:
+        raise ProtocolError("stage packet protocol is invalid")
+    for name in ("driver_context_id", "run_id", "packet_id"):
+        if not isinstance(packet.get(name), str) or not packet[name]:
+            raise ProtocolError("stage packet identity is invalid")
+    if packet.get("target_stage") not in STAGES:
+        raise ProtocolError("stage packet target is invalid")
+    source_revision = packet.get("source_revision")
+    if (
+        not isinstance(source_revision, int)
+        or isinstance(source_revision, bool)
+        or source_revision < 0
+    ):
+        raise ProtocolError("stage packet revision is invalid")
+    if not isinstance(packet.get("payload"), Mapping):
+        raise ProtocolError("stage packet payload is invalid")
+    stored_digest = packet.get("packet_digest")
+    if not isinstance(stored_digest, str) or _SHA256_PATTERN.fullmatch(stored_digest) is None:
+        raise ProtocolError("stage packet digest is malformed")
+    unsigned = {key: value for key, value in packet.items() if key != "packet_digest"}
+    try:
+        recomputed = digest_json(unsigned)
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise ProtocolError("stage packet is not canonical JSON") from error
+    if not hmac.compare_digest(stored_digest, recomputed):
+        raise ProtocolError("stage packet digest does not match its content")
+    expected = {
+        "driver_context_id": expected_driver_context_id,
+        "run_id": expected_run_id,
+        "target_stage": expected_target_stage,
+        "source_revision": expected_source_revision,
+    }
+    for name, expected_value in expected.items():
+        if expected_value is not None and packet.get(name) != expected_value:
+            raise ProtocolError("stage packet does not match canonical state")
 
 
 def submission_digest(

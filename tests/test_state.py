@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from codex_router.protocol import web_response_marker
+from codex_router.protocol import digest_json, web_response_marker
 
 
 DRIVER_CONTEXT_ID = "ctx-550e8400-e29b-41d4-a716-446655440000"
@@ -98,6 +98,14 @@ class RunCreationTests(unittest.TestCase):
         self.assertTrue((result.run_dir / "request.json").is_file())
         self.assertTrue((result.run_dir / "events.jsonl").is_file())
         self.assertEqual(stat.S_IMODE(result.run_dir.stat().st_mode), 0o700)
+        root_marker = self.state_root / ".codex-router-root.json"
+        self.assertTrue(root_marker.is_file())
+        self.assertEqual(stat.S_IMODE(self.state_root.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(root_marker.stat().st_mode), 0o600)
+        self.assertEqual(
+            json.loads(root_marker.read_text(encoding="utf-8"))["protocol"],
+            "codex-router/state-root/v1",
+        )
         for file_path in (
             state_path,
             result.run_dir / ".lock",
@@ -166,6 +174,82 @@ class RunCreationTests(unittest.TestCase):
         self.assertEqual(result.run_id, "run-second")
         self.assertTrue((result.run_dir / "state.json").is_file())
 
+    def test_existing_public_root_is_rejected_without_chmod(self):
+        RouterStateError, _, start_run = load_state_api(self)
+        self.state_root.mkdir(mode=0o755)
+
+        with self.assertRaises(RouterStateError) as raised:
+            start_run(
+                state_root=self.state_root,
+                task="review",
+                driver_context_id=DRIVER_CONTEXT_ID,
+                role_config=ROLE_CONFIG,
+                codex_binary=self.binary,
+            )
+
+        self.assertEqual(raised.exception.code, "state-root-unowned")
+        self.assertEqual(stat.S_IMODE(self.state_root.stat().st_mode), 0o755)
+        self.assertFalse((self.state_root / ".codex-router-root.json").exists())
+
+    def test_valid_marked_private_root_is_accepted(self):
+        first = self.start()
+        marker = self.state_root / ".codex-router-root.json"
+        marker_before = marker.read_bytes()
+
+        second = self.start()
+
+        self.assertNotEqual(first.run_id, second.run_id)
+        self.assertEqual(marker.read_bytes(), marker_before)
+        self.assertEqual(stat.S_IMODE(self.state_root.stat().st_mode), 0o700)
+
+    def test_private_legacy_router_root_is_marker_migrated_without_chmod(self):
+        self.state_root.mkdir(mode=0o700)
+        (self.state_root / ".profiles").mkdir(mode=0o700)
+        before_mode = stat.S_IMODE(self.state_root.stat().st_mode)
+
+        self.start()
+
+        marker = self.state_root / ".codex-router-root.json"
+        self.assertTrue(marker.is_file())
+        self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.state_root.stat().st_mode), before_mode)
+
+    def test_symlinked_state_root_is_rejected(self):
+        RouterStateError, _, start_run = load_state_api(self)
+        target = self.root / "real-state-root"
+        target.mkdir(mode=0o700)
+        self.state_root.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaises(RouterStateError) as raised:
+            start_run(
+                state_root=self.state_root,
+                task="review",
+                driver_context_id=DRIVER_CONTEXT_ID,
+                role_config=ROLE_CONFIG,
+                codex_binary=self.binary,
+            )
+
+        self.assertEqual(raised.exception.code, "state-root-unowned")
+        self.assertTrue(self.state_root.is_symlink())
+        self.assertFalse((target / ".codex-router-root.json").exists())
+
+    def test_unrelated_existing_file_prevents_legacy_migration(self):
+        RouterStateError, _, start_run = load_state_api(self)
+        self.state_root.mkdir(mode=0o700)
+        (self.state_root / "unrelated.txt").write_text("not Router state", encoding="utf-8")
+
+        with self.assertRaises(RouterStateError) as raised:
+            start_run(
+                state_root=self.state_root,
+                task="review",
+                driver_context_id=DRIVER_CONTEXT_ID,
+                role_config=ROLE_CONFIG,
+                codex_binary=self.binary,
+            )
+
+        self.assertEqual(raised.exception.code, "state-root-unowned")
+        self.assertFalse((self.state_root / ".codex-router-root.json").exists())
+
     def test_invalid_driver_context_id_is_rejected_without_writes(self):
         RouterStateError, _, start_run = load_state_api(self)
 
@@ -216,7 +300,8 @@ class RunCreationTests(unittest.TestCase):
     def test_incomplete_run_directory_is_state_corrupt(self):
         RouterStateError, get_status, _ = load_state_api(self)
         run_dir = self.state_root / "run-incomplete"
-        run_dir.mkdir(parents=True, mode=0o700)
+        self.state_root.mkdir(mode=0o700)
+        run_dir.mkdir(mode=0o700)
 
         with self.assertRaises(RouterStateError) as raised:
             get_status(state_root=self.state_root, run_id="run-incomplete")
@@ -459,6 +544,40 @@ class SuccessfulTransitionTests(RouterStateTestCase):
 
         self.assertEqual(raised.exception.code, "profile-mismatch")
 
+    def test_app_server_reported_model_fields_are_required_and_nonempty(self):
+        RouterStateError, _, _, _ = load_transition_api(self)
+        cases = (
+            ("reported_model", "missing"),
+            ("reported_model", "empty"),
+            ("reported_reasoning", "missing"),
+            ("reported_reasoning", "empty"),
+        )
+
+        for field, mutation in cases:
+            with self.subTest(field=field, mutation=mutation):
+                started = self.start()
+                execution = self.local_execution()
+                if mutation == "missing":
+                    execution.pop(field)
+                else:
+                    execution[field] = ""
+                with self.assertRaises(RouterStateError) as raised:
+                    self.submit(started, "local_sol", "local result", execution)
+                self.assertEqual(raised.exception.code, "profile-mismatch")
+
+    def test_null_reported_reasoning_and_mismatched_reported_model_are_preserved(self):
+        started = self.start()
+        execution = self.local_execution()
+        execution["reported_model"] = "server-reported-different-model"
+        execution["reported_reasoning"] = None
+
+        self.submit(started, "local_sol", "local result", execution)
+
+        persisted = self.read_state()["submissions"]["local_sol"]["execution"]
+        self.assertEqual(persisted["reported_model"], "server-reported-different-model")
+        self.assertIsNone(persisted["reported_reasoning"])
+        self.assertEqual(persisted["requested_model"], ROLE_CONFIG["local_sol"]["requested_model"])
+
     def test_reverse_duplicate_conflicts_before_current_stage_validation(self):
         RouterStateError, _, _, submit_stage = load_transition_api(self)
         local, arguments = self.submit_local()
@@ -468,6 +587,57 @@ class SuccessfulTransitionTests(RouterStateTestCase):
             submit_stage(**arguments)
 
         self.assertEqual(raised.exception.code, "conflict")
+
+
+class CanonicalPacketIntegrityTests(RouterStateTestCase):
+    def _rewrite_state(self, state):
+        (self.started.run_dir / "state.json").write_text(
+            json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_current_packet_tampering_is_state_corrupt(self):
+        RouterStateError, get_status, _, _ = load_transition_api(self)
+        cases = ("payload-old-digest", "target", "source-revision", "run-id", "malformed-digest")
+
+        for mutation in cases:
+            with self.subTest(mutation=mutation):
+                started = self.start()
+                state = self.read_state()
+                packet = state["next_packet"]
+                if mutation == "payload-old-digest":
+                    packet["payload"]["task"] = "tampered task"
+                elif mutation == "target":
+                    packet["target_stage"] = "web_sol"
+                elif mutation == "source-revision":
+                    packet["source_revision"] = 7
+                elif mutation == "run-id":
+                    packet["run_id"] = "run-other"
+                else:
+                    packet["packet_digest"] = "malformed"
+                if mutation in {"target", "source-revision", "run-id"}:
+                    unsigned = {key: value for key, value in packet.items() if key != "packet_digest"}
+                    packet["packet_digest"] = digest_json(unsigned)
+                self._rewrite_state(state)
+
+                with self.assertRaises(RouterStateError) as raised:
+                    get_status(state_root=self.state_root, run_id=started.run_id)
+                self.assertEqual(raised.exception.code, "state-corrupt")
+
+    def test_accepted_packet_tampering_blocks_projection_repair(self):
+        RouterStateError, get_status, _, _ = load_transition_api(self)
+        transition, _ = self.submit_local()
+        state = self.read_state()
+        state["submissions"]["local_sol"]["packet"]["payload"]["task"] = "tampered task"
+        self._rewrite_state(state)
+        projection = transition.run_dir / "local-sol.json"
+        projection.unlink()
+
+        with self.assertRaises(RouterStateError) as raised:
+            get_status(state_root=self.state_root, run_id=transition.run_id)
+
+        self.assertEqual(raised.exception.code, "state-corrupt")
+        self.assertFalse(projection.exists())
 
 
 class ConcurrencyAndDurabilityTests(RouterStateTestCase):
@@ -661,42 +831,72 @@ class FailureTransitionTests(RouterStateTestCase):
 
         self.assertEqual(raised.exception.code, "conflict")
 
-    def test_failure_evidence_is_bounded_and_secret_values_are_not_persisted(self):
-        _, fail_stage, _ = load_failure_api(self)
-        started = self.start()
-        packet = self.read_state()["next_packet"]
-        failure = {
-            "code": "provider-error",
-            "summary": "Authorization: Bearer router-secret-123\npassword=hunter2",
-            "environment": {"API_KEY": "must-never-persist"},
-            "stack_trace": "private traceback",
-        }
+    def test_failure_code_and_summary_reject_non_text_values(self):
+        RouterStateError, fail_stage, _ = load_failure_api(self)
+        invalid_values = ([], {}, b"bytes", 7, True, object())
 
-        fail_stage(
-            state_root=self.state_root,
-            run_id=started.run_id,
-            driver_context_id=DRIVER_CONTEXT_ID,
-            stage="local_sol",
-            expected_revision=0,
-            packet_digest_value=packet["packet_digest"],
-            failure=failure,
-            execution=self.local_execution(),
+        for field in ("code", "summary"):
+            for invalid in invalid_values:
+                with self.subTest(field=field, value_type=type(invalid).__name__):
+                    started = self.start()
+                    packet = self.read_state()["next_packet"]
+                    failure = {"code": "provider-error", "summary": "stage failed"}
+                    failure[field] = invalid
+                    with self.assertRaises(RouterStateError) as raised:
+                        fail_stage(
+                            state_root=self.state_root,
+                            run_id=started.run_id,
+                            driver_context_id=DRIVER_CONTEXT_ID,
+                            stage="local_sol",
+                            expected_revision=0,
+                            packet_digest_value=packet["packet_digest"],
+                            failure=failure,
+                            execution=self.local_execution(),
+                        )
+                    self.assertEqual(raised.exception.code, "invalid-input")
+                    self.assertEqual(self.read_state()["status"], "awaiting_local_sol")
+
+    def test_adversarial_failure_summaries_are_completely_omitted(self):
+        _, fail_stage, _ = load_failure_api(self)
+        card = "4242 " * 3 + "4242"
+        email = "user" + "@" + "example.com"
+        summaries = (
+            '{"to' + 'ken":"secret-value"}',
+            "Cookie: session=secret",
+            "-----BEGIN PRIVATE KEY-----\nkey material",
+            "OPENAI_API" + "_KEY=synthetic-value",
+            "/" + "Users/example/private/file",
+            "/private/" + "tmp/secret",
+            card,
+            email,
+            "Authorization: Bearer synthetic-credential",
         )
 
-        evidence = b"\n".join(
-            path.read_bytes() for path in started.run_dir.rglob("*") if path.is_file()
-        ).decode("utf-8", errors="replace")
-        for forbidden in (
-            "router-secret-123",
-            "hunter2",
-            "must-never-persist",
-            "API_KEY",
-            "environment",
-            "private traceback",
-            "stack_trace",
-        ):
-            self.assertNotIn(forbidden, evidence)
-        self.assertIn("<redacted>", evidence)
+        for summary in summaries:
+            with self.subTest(category=summary.splitlines()[0][:16]):
+                started = self.start()
+                packet = self.read_state()["next_packet"]
+                fail_stage(
+                    state_root=self.state_root,
+                    run_id=started.run_id,
+                    driver_context_id=DRIVER_CONTEXT_ID,
+                    stage="local_sol",
+                    expected_revision=0,
+                    packet_digest_value=packet["packet_digest"],
+                    failure={
+                        "code": "provider-error",
+                        "summary": summary,
+                        "unrecognized": "discard-this-value",
+                    },
+                    execution=self.local_execution(),
+                )
+
+                evidence = b"\n".join(
+                    path.read_bytes() for path in started.run_dir.rglob("*") if path.is_file()
+                ).decode("utf-8", errors="replace")
+                self.assertNotIn(summary, evidence)
+                self.assertNotIn("discard-this-value", evidence)
+                self.assertIn("stage failed; sensitive details omitted", evidence)
 
 
 if __name__ == "__main__":
