@@ -265,6 +265,79 @@ class RunCreationTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "invalid-input")
         self.assertFalse(self.state_root.exists())
 
+    def test_hmac_driver_context_id_is_accepted(self):
+        _, _, start_run = load_state_api(self)
+        driver_context_id = "ctx-" + "a" * 64
+
+        result = start_run(
+            state_root=self.state_root,
+            task="review",
+            driver_context_id=driver_context_id,
+            role_config=ROLE_CONFIG,
+            codex_binary=self.binary,
+        )
+
+        state = json.loads((result.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["driver"]["driver_context_id"], driver_context_id)
+
+    def test_deterministic_run_creation_is_idempotent_and_mismatch_conflicts(self):
+        RouterStateError, _, start_run = load_state_api(self)
+        run_id = "run-hook-" + "a" * 64
+        idempotency_key = "event-" + "b" * 64
+        prompt_digest = "hmac-sha256:" + "c" * 64
+        arguments = {
+            "state_root": self.state_root,
+            "task": "review",
+            "driver_context_id": "ctx-" + "d" * 64,
+            "role_config": ROLE_CONFIG,
+            "codex_binary": self.binary,
+            "run_id": run_id,
+            "idempotency_key": idempotency_key,
+            "prompt_digest": prompt_digest,
+        }
+
+        first = start_run(**arguments)
+        repeated = start_run(**arguments)
+
+        self.assertEqual(first.run_id, run_id)
+        self.assertEqual(repeated.run_id, run_id)
+        self.assertTrue(repeated.idempotent)
+        state = json.loads((first.run_dir / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["request"]["idempotency_key"], idempotency_key)
+        self.assertEqual(state["request"]["prompt_digest"], prompt_digest)
+
+        for override in (
+            {"task": "different"},
+            {"idempotency_key": "event-" + "e" * 64},
+            {"prompt_digest": "hmac-sha256:" + "f" * 64},
+        ):
+            with self.subTest(override=next(iter(override))):
+                with self.assertRaises(RouterStateError) as raised:
+                    start_run(**{**arguments, **override})
+                self.assertEqual(raised.exception.code, "conflict")
+
+    def test_incomplete_deterministic_run_is_not_replaced(self):
+        RouterStateError, _, start_run = load_state_api(self)
+        run_id = "run-hook-" + "a" * 64
+        self.state_root.mkdir(mode=0o700)
+        run_dir = self.state_root / run_id
+        run_dir.mkdir(mode=0o700)
+
+        with self.assertRaises(RouterStateError) as raised:
+            start_run(
+                state_root=self.state_root,
+                task="review",
+                driver_context_id="ctx-" + "d" * 64,
+                role_config=ROLE_CONFIG,
+                codex_binary=self.binary,
+                run_id=run_id,
+                idempotency_key="event-" + "b" * 64,
+                prompt_digest="hmac-sha256:" + "c" * 64,
+            )
+
+        self.assertEqual(raised.exception.code, "state-corrupt")
+        self.assertTrue(run_dir.is_dir())
+
     def test_live_codex_root_is_rejected_without_writes(self):
         RouterStateError, _, start_run = load_state_api(self)
         unsafe_root = Path.home() / ".codex" / "router-runs"

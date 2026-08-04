@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime, timezone
 import fcntl
@@ -45,10 +45,13 @@ ERROR_EXIT_CODES = {
     "state-root-unowned": 30,
 }
 
-_DRIVER_CONTEXT_PATTERN = re.compile(
+_UUID_DRIVER_CONTEXT_PATTERN = re.compile(
     r"ctx-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
+_HMAC_DRIVER_CONTEXT_PATTERN = re.compile(r"ctx-[0-9a-f]{64}")
 _RUN_ID_PATTERN = re.compile(r"run-[A-Za-z0-9][A-Za-z0-9._-]*")
+_EVENT_ID_PATTERN = re.compile(r"event-[0-9a-f]{64}")
+_PROMPT_DIGEST_PATTERN = re.compile(r"hmac-sha256:[0-9a-f]{64}")
 _DRIVER_TYPES = frozenset(("codex_app", "offline_pipeline"))
 _PROFILE_PROTOCOL = "codex-router/profile/v1"
 _STATE_ROOT_PROTOCOL = "codex-router/state-root/v1"
@@ -121,10 +124,12 @@ def _raise_invalid(message: str) -> None:
 
 
 def _validate_driver_context_id(driver_context_id: str) -> None:
-    if not isinstance(driver_context_id, str) or not _DRIVER_CONTEXT_PATTERN.fullmatch(
-        driver_context_id
-    ):
-        _raise_invalid("driver_context_id must be ctx- followed by a canonical UUID")
+    if not isinstance(driver_context_id, str):
+        _raise_invalid("driver_context_id must be text")
+    if _HMAC_DRIVER_CONTEXT_PATTERN.fullmatch(driver_context_id):
+        return
+    if not _UUID_DRIVER_CONTEXT_PATTERN.fullmatch(driver_context_id):
+        _raise_invalid("driver_context_id must use a supported canonical identity")
     try:
         parsed = uuid.UUID(driver_context_id[4:])
     except ValueError as error:
@@ -316,6 +321,37 @@ def _exclusive_run_lock(run_dir: Path) -> Iterator[None]:
     finally:
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
+
+
+@contextmanager
+def _exclusive_event_lock(state_root: Path, run_id: str) -> Iterator[None]:
+    lock_directory = state_root / ".event-locks"
+    try:
+        lock_directory.mkdir(mode=0o700, exist_ok=False)
+        _fsync_directory(state_root)
+    except FileExistsError:
+        pass
+    _validate_private_directory(lock_directory)
+    lock_path = lock_directory / f"{run_id}.lock"
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as error:
+        raise RouterStateError("state-corrupt", "event lock is unsafe") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise RouterStateError("state-corrupt", "event lock is unsafe")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _atomic_bytes(path: Path, content: bytes) -> None:
@@ -853,6 +889,9 @@ def start_run(
     role_config: Mapping[str, Any],
     codex_binary: Path | str,
     driver_type: str = "codex_app",
+    run_id: str | None = None,
+    idempotency_key: str | None = None,
+    prompt_digest: str | None = None,
 ) -> TransitionResult:
     _validate_driver_context_id(driver_context_id)
     if driver_type not in _DRIVER_TYPES:
@@ -874,64 +913,138 @@ def start_run(
     resolved_root = _resolve_state_root(state_root)
     binary_realpath, binary_sha256 = _resolve_binary(codex_binary)
 
-    resolved_root = prepare_state_root(resolved_root)
-    run_dir = None
-    run_id = None
-    for _ in range(3):
-        candidate_id = _new_run_id()
-        candidate_dir = resolved_root / candidate_id
-        try:
-            candidate_dir.mkdir(mode=0o700, exist_ok=False)
-        except FileExistsError:
-            continue
-        run_id = candidate_id
-        run_dir = candidate_dir
-        _fsync_directory(resolved_root)
-        break
-    if run_dir is None or run_id is None:
-        raise RouterStateError("conflict", "could not allocate a unique run directory")
-
-    with _exclusive_run_lock(run_dir):
-        profiles = {
-            stage: _create_profile(
-                state_root=resolved_root,
-                driver_context_id=driver_context_id,
-                run_id=run_id,
-                stage=stage,
-                binary_realpath=binary_realpath,
-                binary_sha256=binary_sha256,
-            )
-            for stage in _LOCAL_STAGES
-        }
-        initial_packet = _initial_packet(
-            driver_context_id=driver_context_id,
-            run_id=run_id,
-            task=normalized_task,
-            role_config=copied_role_config,
-            profiles=profiles,
+    deterministic_values = (run_id, idempotency_key, prompt_digest)
+    deterministic = any(value is not None for value in deterministic_values)
+    if deterministic and not all(isinstance(value, str) for value in deterministic_values):
+        _raise_invalid(
+            "run_id, idempotency_key, and prompt_digest must be provided together"
         )
-        state = {
-            "protocol": RUN_PROTOCOL,
-            "run_id": run_id,
-            "driver": {
-                "driver_type": driver_type,
-                "driver_context_id": driver_context_id,
-            },
-            "status": "awaiting_local_sol",
-            "revision": 0,
-            "next_stage": "local_sol",
-            "request": {"task": normalized_task},
-            "role_config": copied_role_config,
-            "profiles": profiles,
-            "submissions": {},
-            "failures": {},
-            "next_packet": initial_packet,
-            "final_result": None,
-            "history": [{"revision": 0, "event": "run_started", "stage": "local_sol"}],
-        }
-        _commit_state(run_dir, state)
-        _rebuild_projections(run_dir, state)
-        return _result(run_dir, state)
+    if deterministic:
+        _validate_run_id(run_id)
+        if _EVENT_ID_PATTERN.fullmatch(idempotency_key) is None:
+            _raise_invalid("idempotency_key must use the canonical event identity")
+        if _PROMPT_DIGEST_PATTERN.fullmatch(prompt_digest) is None:
+            _raise_invalid("prompt_digest must use the canonical keyed digest")
+
+    resolved_root = prepare_state_root(resolved_root)
+    if deterministic:
+        allocation_lock = _exclusive_event_lock(resolved_root, run_id)
+    else:
+        allocation_lock = nullcontext()
+
+    with allocation_lock:
+        run_dir = None
+        allocated_run_id = run_id
+        if deterministic:
+            candidate_dir = resolved_root / allocated_run_id
+            if os.path.lexists(candidate_dir):
+                _validate_private_directory(candidate_dir)
+                with _exclusive_run_lock(candidate_dir):
+                    existing = _load_state(candidate_dir, allocated_run_id)
+                    request = existing.get("request")
+                    profiles = existing.get("profiles")
+                    matching_binary = isinstance(profiles, Mapping) and all(
+                        isinstance(profiles.get(stage), Mapping)
+                        and profiles[stage].get("codex_binary_realpath")
+                        == str(binary_realpath)
+                        and profiles[stage].get("codex_binary_sha256") == binary_sha256
+                        for stage in _LOCAL_STAGES
+                    )
+                    matches = (
+                        isinstance(request, Mapping)
+                        and request.get("task") == normalized_task
+                        and isinstance(request.get("idempotency_key"), str)
+                        and hmac.compare_digest(
+                            request["idempotency_key"], idempotency_key
+                        )
+                        and isinstance(request.get("prompt_digest"), str)
+                        and hmac.compare_digest(request["prompt_digest"], prompt_digest)
+                        and existing.get("driver")
+                        == {
+                            "driver_type": driver_type,
+                            "driver_context_id": driver_context_id,
+                        }
+                        and existing.get("role_config") == copied_role_config
+                        and matching_binary
+                    )
+                    if not matches:
+                        raise RouterStateError(
+                            "conflict",
+                            "deterministic run identity does not match existing state",
+                            run_id=allocated_run_id,
+                        )
+                    _rebuild_projections(candidate_dir, existing)
+                    return _result(candidate_dir, existing, idempotent=True)
+            else:
+                candidate_dir.mkdir(mode=0o700, exist_ok=False)
+                _fsync_directory(resolved_root)
+            run_dir = candidate_dir
+        else:
+            for _ in range(3):
+                candidate_id = _new_run_id()
+                candidate_dir = resolved_root / candidate_id
+                try:
+                    candidate_dir.mkdir(mode=0o700, exist_ok=False)
+                except FileExistsError:
+                    continue
+                allocated_run_id = candidate_id
+                run_dir = candidate_dir
+                _fsync_directory(resolved_root)
+                break
+            if run_dir is None or allocated_run_id is None:
+                raise RouterStateError("conflict", "could not allocate a unique run directory")
+
+        with _exclusive_run_lock(run_dir):
+            profiles = {
+                stage: _create_profile(
+                    state_root=resolved_root,
+                    driver_context_id=driver_context_id,
+                    run_id=allocated_run_id,
+                    stage=stage,
+                    binary_realpath=binary_realpath,
+                    binary_sha256=binary_sha256,
+                )
+                for stage in _LOCAL_STAGES
+            }
+            initial_packet = _initial_packet(
+                driver_context_id=driver_context_id,
+                run_id=allocated_run_id,
+                task=normalized_task,
+                role_config=copied_role_config,
+                profiles=profiles,
+            )
+            request = {"task": normalized_task}
+            if deterministic:
+                request.update(
+                    {
+                        "idempotency_key": idempotency_key,
+                        "prompt_digest": prompt_digest,
+                    }
+                )
+            state = {
+                "protocol": RUN_PROTOCOL,
+                "run_id": allocated_run_id,
+                "driver": {
+                    "driver_type": driver_type,
+                    "driver_context_id": driver_context_id,
+                },
+                "status": "awaiting_local_sol",
+                "revision": 0,
+                "next_stage": "local_sol",
+                "request": request,
+                "role_config": copied_role_config,
+                "profiles": profiles,
+                "submissions": {},
+                "failures": {},
+                "next_packet": initial_packet,
+                "final_result": None,
+                "history": [
+                    {"revision": 0, "event": "run_started", "stage": "local_sol"}
+                ],
+            }
+            _commit_state(run_dir, state)
+            _rebuild_projections(run_dir, state)
+            return _result(run_dir, state)
 
 
 def get_status(*, state_root: Path | str, run_id: str) -> TransitionResult:

@@ -286,4 +286,3 @@ facts.
 - No provider integration or automatic model turn in tests.
 - No database, retry engine, fallback provider, or background queue.
 - No PR #3 merge, runner start, second PR, or Phase 2 push in this task.
-

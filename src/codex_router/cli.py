@@ -6,6 +6,7 @@ import sys
 from typing import Any
 
 from .adapters import adapters_for_mode
+from .hook import handle_user_prompt, read_hook_event
 from .pipeline import Router, RouterRunError
 from .state import RouterStateError, fail_stage, get_status, start_run, submit_stage
 from .types import TransitionResult
@@ -76,6 +77,11 @@ def parser() -> argparse.ArgumentParser:
     status = subcommands.add_parser("status", help="read and repair derived run views")
     status.add_argument("--run-id", required=True)
     status.add_argument("--state-dir", type=Path, required=True)
+
+    hook = subcommands.add_parser(
+        "hook-user-prompt", help="handle one Codex UserPromptSubmit event"
+    )
+    hook.add_argument("--installation-dir", type=Path, required=True)
     return root
 
 
@@ -181,6 +187,12 @@ def main(argv=None) -> int:
         args = parser().parse_args(argv)
         if args.command == "run":
             return _run_legacy(args)
+        if args.command == "hook-user-prompt":
+            output = handle_user_prompt(
+                read_hook_event(sys.stdin.buffer), args.installation_dir
+            )
+            _print_json(output)
+            return 0
         if args.command == "start":
             result = start_run(
                 state_root=args.state_dir,
