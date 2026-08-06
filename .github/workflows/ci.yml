@@ -5,14 +5,14 @@ on:
   push:
     branches:
       - main
-      - feat/local-sol-web-sol-luna-router-v1
+      - feat/app-orchestrated-real-router-v1
 
 permissions:
   contents: read
 
 jobs:
   test:
-    runs-on: [self-hosted, Linux, ARM64, codex-router-ci]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

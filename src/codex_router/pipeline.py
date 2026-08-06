@@ -1,24 +1,18 @@
 from contextlib import contextmanager
 import json
-import os
 from pathlib import Path
-import re
 import signal
-import tempfile
 import time
 from typing import Any, Iterator, Mapping
 import uuid
 
-from .protocol import make_handoff
+from .protocol import make_handoff, web_response_marker
+from .security import sanitize_failure_summary
+from .state import fail_stage, get_status, prepare_state_root, start_run, submit_stage
 from .types import RunOutcome, StageAdapter, StageResult
 
 
 STAGES = ("local_sol", "web_sol", "luna")
-STAGE_FILES = {
-    "local_sol": "local-sol.json",
-    "web_sol": "web-sol.json",
-    "luna": "luna.json",
-}
 
 
 class StageTimedOut(TimeoutError):
@@ -35,48 +29,11 @@ class RouterRunError(RuntimeError):
         self.summary = summary
 
 
-def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(value, stream, ensure_ascii=False, sort_keys=True, indent=2)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def _append_event(path: Path, value: Mapping[str, Any]) -> None:
-    with path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    path.chmod(0o600)
-
-
 def _safe_error(error: BaseException) -> str:
-    summary = " ".join(str(error).splitlines())[:500]
-    patterns = (
-        r"(?i)(authorization|cookie|password|secret|token|api[_-]?key)\s*[:=]\s*\S+",
-        r"(?i)bearer\s+\S+",
-    )
-    for pattern in patterns:
-        summary = re.sub(
-            pattern,
-            lambda match: (
-                f"{match.group(1)}=<redacted>" if match.lastindex else "<redacted>"
-            ),
-            summary,
-        )
-    return summary or error.__class__.__name__
+    try:
+        return sanitize_failure_summary(str(error))
+    except (Exception, UnicodeEncodeError):
+        return "stage failed; sensitive details omitted"
 
 
 @contextmanager
@@ -98,6 +55,48 @@ def _timeout(seconds: float) -> Iterator[None]:
         signal.signal(signal.SIGALRM, previous)
 
 
+def _validate_stage_result(stage: str, result: StageResult) -> None:
+    if not isinstance(result, StageResult):
+        raise TypeError("adapter must return StageResult")
+    if result.stage != stage:
+        raise ValueError(f"adapter returned stage {result.stage!r}, expected {stage!r}")
+    if not isinstance(result.content, str):
+        raise TypeError("stage content must be text")
+
+
+def _fake_execution(
+    stage: str,
+    driver_context_id: str,
+    packet: Mapping[str, Any],
+    *,
+    duration_ms: float,
+) -> dict[str, Any]:
+    del stage
+    return {
+        "driver_context_id": driver_context_id,
+        "packet_digest": packet["packet_digest"],
+        "verification": "fake_offline",
+        "network_used": False,
+        "duration_ms": duration_ms,
+    }
+
+
+def _adapter_context_from_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
+    payload = packet["payload"]
+    context = {"run_id": packet["run_id"], "task": payload["task"]}
+    if packet["target_stage"] == "web_sol":
+        context["handoff"] = make_handoff(
+            packet["run_id"], "local_sol", payload["local_sol_output"]
+        )
+    elif packet["target_stage"] == "luna":
+        web_lines = payload["web_sol_output"].splitlines()
+        semantic_web_output = "\n".join(web_lines[1:])
+        context["handoff"] = make_handoff(
+            packet["run_id"], "web_sol", semantic_web_output
+        )
+    return context
+
+
 class Router:
     def __init__(
         self,
@@ -115,74 +114,97 @@ class Router:
         self.adapter_mode = adapter_mode
 
     def run(self, task: str) -> RunOutcome:
-        run_id = f"run-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:12]}"
-        run_dir = self.state_root / run_id
-        run_dir.mkdir(parents=True, mode=0o700)
-        run_dir.chmod(0o700)
-        events = run_dir / "events.jsonl"
-        events.touch(mode=0o600)
-        events.chmod(0o600)
-        _atomic_json(
-            run_dir / "request.json",
-            {"run_id": run_id, "task": task, "adapter_mode": self.adapter_mode},
+        resolved_root = prepare_state_root(self.state_root)
+
+        driver_context_id = f"ctx-{uuid.uuid4()}"
+        fake_binary = resolved_root / ".profiles" / driver_context_id / "offline-codex"
+        fake_binary.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fake_binary.write_text("offline pipeline marker\n", encoding="utf-8")
+        fake_binary.chmod(0o700)
+        role_config = {
+            "local_sol": {
+                "requested_model": "fake-local-sol",
+                "requested_reasoning": "offline",
+            },
+            "web_sol": {
+                "model_claimed": "fake-web-sol",
+                "reasoning_claimed": "offline",
+                "verification": "fake_offline",
+            },
+            "luna": {
+                "requested_model": "fake-luna",
+                "requested_reasoning": "offline",
+            },
+        }
+        transition = start_run(
+            state_root=resolved_root,
+            task=task,
+            driver_context_id=driver_context_id,
+            role_config=role_config,
+            codex_binary=fake_binary.resolve(),
+            driver_type="offline_pipeline",
         )
-        context: dict[str, Any] = {"run_id": run_id, "task": task}
 
         for stage in STAGES:
+            packet = json.loads(transition.stage_packet_path.read_text(encoding="utf-8"))
+            context = _adapter_context_from_packet(packet)
+            canonical_task = packet["payload"]["task"]
             started = time.perf_counter()
-            _append_event(
-                events, {"stage": stage, "status": "started", "duration_ms": 0.0}
-            )
             try:
                 with _timeout(self.timeout_seconds):
-                    stage_result = self.adapters[stage].run(task, context.copy())
-                if not isinstance(stage_result, StageResult):
-                    raise TypeError("adapter must return StageResult")
-                if stage_result.stage != stage:
-                    raise ValueError(f"adapter returned stage {stage_result.stage!r}, expected {stage!r}")
-                if not isinstance(stage_result.content, str):
-                    raise TypeError("stage content must be text")
+                    stage_result = self.adapters[stage].run(canonical_task, context.copy())
+                _validate_stage_result(stage, stage_result)
             except Exception as error:
                 duration = round((time.perf_counter() - started) * 1000, 3)
                 code = "stage-timeout" if isinstance(error, StageTimedOut) else "adapter-error"
                 summary = _safe_error(error)
-                failure = {
-                    "run_id": run_id,
-                    "stage": stage,
-                    "status": "failed",
-                    "duration_ms": duration,
-                    "error": {"code": code, "summary": summary},
-                }
-                _atomic_json(run_dir / STAGE_FILES[stage], failure)
-                _append_event(
-                    events,
-                    {"stage": stage, "status": "failed", "duration_ms": duration, "error": failure["error"]},
+                fail_stage(
+                    state_root=resolved_root,
+                    run_id=transition.run_id,
+                    driver_context_id=driver_context_id,
+                    stage=stage,
+                    expected_revision=transition.revision,
+                    packet_digest_value=packet["packet_digest"],
+                    failure={"code": code, "summary": summary},
+                    execution=_fake_execution(
+                        stage,
+                        driver_context_id,
+                        packet,
+                        duration_ms=duration,
+                    ),
                 )
-                raise RouterRunError(run_id, run_dir, stage, code, summary) from error
+                raise RouterRunError(
+                    transition.run_id,
+                    transition.run_dir,
+                    stage,
+                    code,
+                    summary,
+                ) from error
 
             duration = round((time.perf_counter() - started) * 1000, 3)
-            handoff = make_handoff(run_id, stage, stage_result.content)
-            stage_record = {
-                "run_id": run_id,
-                "stage": stage,
-                "status": "completed",
-                "duration_ms": duration,
-                "result": {
-                    "content": stage_result.content,
-                    "metadata": dict(stage_result.metadata),
-                },
-                "handoff": handoff,
-            }
-            _atomic_json(run_dir / STAGE_FILES[stage], stage_record)
-            _append_event(
-                events,
-                {"stage": stage, "status": "completed", "duration_ms": duration},
+            content = stage_result.content
+            if stage == "web_sol":
+                content = web_response_marker(packet) + "\n" + content
+            transition = submit_stage(
+                state_root=resolved_root,
+                run_id=transition.run_id,
+                driver_context_id=driver_context_id,
+                stage=stage,
+                expected_revision=transition.revision,
+                packet_digest_value=packet["packet_digest"],
+                content=content,
+                execution=_fake_execution(
+                    stage,
+                    driver_context_id,
+                    packet,
+                    duration_ms=duration,
+                ),
             )
-            context = {"run_id": run_id, "task": task, "handoff": handoff}
 
-        final_result = context["handoff"]["content"]
-        _atomic_json(
-            run_dir / "result.json",
-            {"run_id": run_id, "status": "completed", "result": final_result},
+        completed = get_status(state_root=resolved_root, run_id=transition.run_id)
+        result = json.loads((completed.run_dir / "result.json").read_text(encoding="utf-8"))
+        return RunOutcome(
+            run_id=completed.run_id,
+            run_dir=completed.run_dir,
+            final_result=result["result"],
         )
-        return RunOutcome(run_id=run_id, run_dir=run_dir, final_result=final_result)

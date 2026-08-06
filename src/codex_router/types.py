@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Literal, Mapping, Protocol
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,42 @@ class RunOutcome:
     run_id: str
     run_dir: Path
     final_result: str
+
+
+@dataclass(frozen=True)
+class TransitionResult:
+    run_id: str
+    run_dir: Path
+    revision: int
+    status: str
+    next_stage: str | None
+    stage_packet_path: Path | None
+    idempotent: bool = False
+    projection_warnings: tuple[str, ...] = ()
+
+
+SecurityDecision = Literal["allow", "redacted", "block"]
+
+
+@dataclass(frozen=True)
+class SecurityResult:
+    decision: SecurityDecision
+    value: Any | None
+    categories: tuple[str, ...]
+    counts: Mapping[str, int]
+
+
+@dataclass(frozen=True)
+class GlobalStatus:
+    state: str
+    installation_dir: Path
+    hook_configured: bool
+    agents_managed: bool
+    luna_agent_configured: bool
+    config_valid: bool
+    identity_material_valid: bool
+    hook_trust: str
+    new_session_required: bool
 
 
 class StageAdapter(Protocol):
