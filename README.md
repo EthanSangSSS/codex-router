@@ -14,6 +14,8 @@ Codex App is the execution driver: it runs Local Sol, carries the Web packet to 
 
 All V1 access to the target workspace is read-only. Router writes only to its dedicated state root and Router-owned isolated Codex profiles. Each stage runs once and in order; a failed or timed-out stage blocks all downstream stages.
 
+That staged workflow remains available as an explicit CLI compatibility path. The optional global policy is intentionally lighter: Sol plans and reviews, a native `luna_worker` executes sequential bounded work packets by default, and all Web Sol work remains manual operator copy/paste.
+
 ## Install
 
 Python 3.12 or newer is required. The runtime has no third-party dependencies.
@@ -54,15 +56,17 @@ run-<id>/
 
 ## Global default routing policy
 
-The optional global policy makes Router the default for substantive Codex turns without adding a daemon, background service, browser bridge, or second App instance. Codex invokes one `UserPromptSubmit` command hook for each turn. The hook classifies the prompt locally and deterministically:
+The optional global policy makes bounded native Luna delegation the default for substantive Codex turns without adding a daemon, background service, browser bridge, second App instance, or per-prompt Router run. Codex invokes one `UserPromptSubmit` command hook for each turn. The hook classifies the prompt locally and deterministically:
 
 1. An exact first non-empty line of `本次不用 Router` or `仅本地执行` bypasses Router for that turn only.
 2. Greetings, thanks, trivial arithmetic, brief concept explanations, current-task metadata, and one-step read-only inspection may run directly.
 3. Changes, reviews, security or architecture work, research, verification, comparisons, decisions, plans, multi-step work, sensitive content, and ambiguity route through Router.
 
-The hook uses a full HMAC-SHA-256 identity for the Codex conversation and a deterministic event identity for the turn. Re-delivery of the same event returns the same run; it cannot create a duplicate replacement run. Raw hook session and turn IDs are not printed or persisted. The normalized task remains in private per-run state as the explicit local-recovery copy.
+For `route`, the Hook returns only a stateless policy context naming `luna_worker`, its configured model/reasoning, `sol_role=plan_review`, `luna_role=default_execution`, `delegation_mode=sequential_work_packets`, `luna_lifecycle=persistent_per_parent_task`, `capacity_failure_policy=reuse_close_relay_or_block`, and `web_mode=manual_operator`. It does not create a `run_id`, write the configured state root, launch a model, or touch a browser. Re-delivery therefore returns the same policy context without allocating recovery state.
 
-Install only from a durable Python environment where `codex_router` is installed for the same absolute interpreter recorded in the hook command. The generated command uses `-E -P -m codex_router` so it cannot depend on the caller's `PYTHONPATH` or working directory. Before changing `hooks.json` or `AGENTS.md`, installation runs that exact command with a synthetic direct `UserPromptSubmit` event and requires one valid Router hook-protocol JSON response. A failed probe leaves both managed files byte-for-byte and mode-for-mode unchanged:
+Each parent Codex task may create at most one persistent `luna_worker`. Before every packet, Sol queries the task tree and follows up with the existing Luna, including completed or idle workers; it does not spawn a new Luna per packet. Every packet restates its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output, and the previous packet's path authorization expires automatically. Before creating any helper non-Luna Agent, Sol first ensures Luna exists and reserves capacity. If capacity is exhausted, Sol must reuse Luna, optionally close an unused completed non-Luna Agent when supported, try a completed Agent as a pure relay, or return `BLOCKED_LUNA_CAPACITY`; capacity exhaustion never authorizes Sol takeover, and a relay performs no project work. Only direct/bypass, an unsafe architectural decomposition, or a non-capacity Luna execution blocker permits a disclosed bounded Sol takeover.
+
+Install only from a durable Python environment where `codex_router` is installed for the same absolute interpreter recorded in the hook command. The generated command uses `-E -P -m codex_router` so it cannot depend on the caller's `PYTHONPATH` or working directory. Before changing managed files, installation runs that exact command with a synthetic direct `UserPromptSubmit` event and requires one valid Router hook-protocol JSON response. A failed probe leaves all managed user files unchanged:
 
 ```bash
 router global-install \
@@ -77,7 +81,9 @@ router global-install \
   --luna-reasoning "max"
 ```
 
-Installation adds exactly one handler to `hooks.json` and one bounded block to `AGENTS.md`. It does not edit `config.toml` or `AGENTS.override.md`. Original user files are backed up byte-for-byte under `.codex-router-policy-v1/` with private permissions. The `prepared` install-state manifest records the original and installed digests and modes before either managed file changes. If the process stops after either managed write, `global-status` reports `partial`; the same compatible `global-install` completes the remaining writes, while `global-uninstall` restores the originals. Both recovery paths validate every target before their first write and refuse any post-interruption user edit. The model names and reasoning levels above are configuration values; `max`, `xhigh`, and `max` are defaults, not state-machine constants.
+Installation adds exactly one handler to `hooks.json`, one bounded block to `AGENTS.md`, and one custom agent at `agents/luna-worker.toml`. The Luna file defines `name=luna_worker`, uses the configured Luna model and reasoning, and deliberately omits sandbox and approval overrides so it inherits the parent task's effective controls. It does not edit `config.toml`, `AGENTS.override.md`, or unrelated agent files.
+
+Original managed files are backed up byte-for-byte under `.codex-router-policy-v1/` with private permissions. The `prepared` manifest records original and installed digests and modes before any managed write. If the process stops after any of the three writes, `global-status` reports `partial`; the same compatible `global-install` completes the remaining writes, while `global-uninstall` restores exact originals. Both recovery paths validate every target before their first write and refuse post-interruption user edits. An old two-target installation must first be uninstalled with its existing package; the new installer can then safely reuse that uninstalled evidence directory and add Luna management.
 
 Inspect or reverse the installation with:
 
@@ -102,24 +108,20 @@ router global-self-test --codex-home "$ROUTER_TEST_HOME"
 router global-uninstall --codex-home "$ROUTER_TEST_HOME"
 ```
 
-The self-test invokes the configured hook command as a child process instead of calling the hook function in-process. Direct and bypass probes use the exact installed command; routed probes reuse its interpreter and arguments against an ephemeral cloned installation and state root. It creates only ephemeral Router runs, performs no model, Web, browser, or network action, does not activate hook trust, and leaves the configured state root untouched.
+The self-test invokes the configured hook command as a child process instead of calling the hook function in-process. Direct, bypass, repeated route, changed-session, and changed-turn probes all use the exact installed command. It verifies that route output is stateless and bound to the installed Luna configuration. It performs no model, Web, browser, or network action, does not activate Hook trust, and leaves the configured state root untouched.
 
 ### Manual App acceptance checklist
 
-Automated tests cannot verify Codex UI hook trust, Web model selection, reasoning level, or browser conversation reuse. Before treating a live installation as active:
+Automated tests cannot verify Codex UI Hook trust or a real Luna model turn. Before treating a live installation as active:
 
 1. Confirm the recorded absolute Python interpreter is durable and still imports `codex_router` with the configured `-E -P -m codex_router` command. Open `/hooks`, review the exact `UserPromptSubmit` command, and explicitly trust it. Never bypass hook trust with an unsafe launch flag.
 2. Start a new Codex task. Confirm `global-status` still reports `hook_trust=requires-user-check`; this conservative value is expected because Router has no supported trust receipt.
-3. Submit one substantive synthetic task. Confirm Codex shows `Router: active` and exactly one deterministic run reaches `awaiting_local_sol`.
-4. Continue with a related question in the same Codex task. Reuse the current in-app Web Sol conversation and current browser page; do not create a new Web conversation for every related turn. Treat this reuse, Web Sol selection, and `xhigh` reasoning as operator-attested.
-5. Start a different Codex task and confirm it receives a different driver context and does not inherit the previous Web conversation.
-6. Confirm Local Sol and Luna use the configured local models with `max` reasoning evidence, while Web remains operator-attested.
-7. Submit a Web response with a wrong run, packet, revision, digest, or response marker and confirm Router rejects it.
-8. Begin one prompt with `仅本地执行` and confirm only that turn bypasses Router; the next substantive turn must route again.
-9. Use a synthetic protected-value fixture and confirm the Web-bound packet is deterministically redacted or the run ends with `router-security-gate`, with no Web packet, Luna transition, retry, or fallback.
-10. Run `global-uninstall`, start a new Codex task, and confirm the global Router behavior is gone while manual Router commands and retained evidence remain.
-
-Same-task Web continuity is an App/operator responsibility. Router binds the run, driver context, revision, packet, digest, and response marker, but it never opens, closes, focuses, or duplicates browser pages.
+3. Submit a bounded synthetic implementation task. Confirm Codex shows `Router: active`, uses Sol for planning and review, and delegates each executable packet to one persistent `luna_worker` sequentially.
+4. Confirm the Luna task uses `gpt-5.6-luna` with `max` reasoning, accepts follow-up packets with fresh boundaries, and inherits the parent controls. Verify it does not browse, access credentials, or mutate GitHub/install/deployment state.
+5. Confirm no per-prompt Router run is created and the configured state root is untouched.
+6. Begin one prompt with `仅本地执行` and confirm only that turn bypasses Router; the next substantive turn routes again.
+7. Perform any Web Sol consultation manually by copy/paste in the operator's existing conversation. The Router must not open, close, focus, or automate browser pages.
+8. Run `global-uninstall`, start a new Codex task, and confirm the global Hook, managed AGENTS block, and `luna_worker` definition are gone or restored while explicit legacy Router commands and retained installation evidence remain.
 
 ## App-driven workflow
 

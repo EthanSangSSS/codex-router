@@ -46,6 +46,7 @@ class GlobalStatus:
     installation_dir: Path
     hook_configured: bool
     agents_managed: bool
+    luna_agent_configured: bool
     config_valid: bool
     identity_material_valid: bool
     hook_trust: str

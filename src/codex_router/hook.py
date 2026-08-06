@@ -9,12 +9,9 @@ from typing import Any, Mapping
 
 from .policy import (
     classify_prompt,
-    derive_driver_context,
-    derive_event_identity,
-    derive_prompt_digest,
 )
 from .protocol import canonical_json_bytes
-from .state import RouterStateError, start_run
+from .state import RouterStateError
 
 
 HOOK_CONTEXT_PROTOCOL = "codex-router/hook-context/v1"
@@ -156,24 +153,8 @@ def handle_user_prompt(
         )
 
     try:
-        identity_material, config = _load_installation(Path(installation_dir))
-        driver_context_id = derive_driver_context(
-            identity_material, validated["session_id"]
-        )
-        event_identity = derive_event_identity(
-            identity_material, validated["session_id"], validated["turn_id"]
-        )
-        run_id = "run-hook-" + event_identity.removeprefix("event-")
-        result = start_run(
-            state_root=Path(config["state_root"]),
-            task=validated["prompt"],
-            driver_context_id=driver_context_id,
-            role_config=config["role_config"],
-            codex_binary=Path(config["codex_binary"]),
-            run_id=run_id,
-            idempotency_key=event_identity,
-            prompt_digest=derive_prompt_digest(identity_material, validated["prompt"]),
-        )
+        _, config = _load_installation(Path(installation_dir))
+        luna = config["role_config"]["luna"]
     except Exception:
         return {"decision": "block", "reason": _BLOCK_REASON}
 
@@ -182,13 +163,16 @@ def handle_user_prompt(
             "protocol": HOOK_CONTEXT_PROTOCOL,
             "decision": "route",
             "reason": policy.reason_code,
-            "run_id": result.run_id,
-            "driver_context_id": driver_context_id,
-            "revision": result.revision,
-            "next_stage": result.next_stage,
-            "stage_packet_path": str(result.stage_packet_path),
-            "idempotent": result.idempotent,
-            "web_policy": "redact_or_fail",
+            "workflow": "native_luna_worker",
+            "sol_role": "plan_review",
+            "luna_role": "default_execution",
+            "delegation_mode": "sequential_work_packets",
+            "luna_agent": "luna_worker",
+            "luna_model": luna["requested_model"],
+            "luna_reasoning": luna["requested_reasoning"],
+            "luna_lifecycle": "persistent_per_parent_task",
+            "capacity_failure_policy": "reuse_close_relay_or_block",
+            "web_mode": "manual_operator",
         }
     )
 

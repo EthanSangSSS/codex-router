@@ -138,37 +138,39 @@ class HookSchemaTests(HookTestCase):
         self.assertNotIn("config", serialized.lower())
 
 
-class HookIdempotencyTests(HookTestCase):
-    def test_duplicate_delivery_is_idempotent_and_changed_turn_is_distinct(self):
+class HookNativeDelegationTests(HookTestCase):
+    def test_routed_events_are_stateless_native_luna_contexts(self):
         event = self.event()
 
         first = self.parse_context(self.handle(event))
         repeated = self.parse_context(self.handle(event))
         different = self.parse_context(self.handle(self.event(turn="turn-b")))
 
-        self.assertEqual(first["run_id"], repeated["run_id"])
-        self.assertTrue(repeated["idempotent"])
-        self.assertNotEqual(first["run_id"], different["run_id"])
-        self.assertRegex(first["run_id"], r"run-hook-[0-9a-f]{64}\Z")
-        run_directories = sorted(
-            path.name for path in self.state_root.glob("run-hook-*") if path.is_dir()
+        self.assertEqual(first, repeated)
+        self.assertEqual(first, different)
+        self.assertEqual(
+            first,
+            {
+                "protocol": "codex-router/hook-context/v1",
+                "decision": "route",
+                "reason": "substantive_request",
+                "workflow": "native_luna_worker",
+                "sol_role": "plan_review",
+                "luna_role": "default_execution",
+                "delegation_mode": "sequential_work_packets",
+                "luna_agent": "luna_worker",
+                "luna_model": "gpt-5.6-luna",
+                "luna_reasoning": "max",
+                "luna_lifecycle": "persistent_per_parent_task",
+                "capacity_failure_policy": "reuse_close_relay_or_block",
+                "web_mode": "manual_operator",
+            },
         )
-        self.assertEqual(run_directories, sorted((first["run_id"], different["run_id"])))
+        self.assertFalse(self.state_root.exists())
 
-        state = json.loads(
-            (self.state_root / first["run_id"] / "state.json").read_text(encoding="utf-8")
-        )
-        self.assertRegex(state["request"]["idempotency_key"], r"event-[0-9a-f]{64}\Z")
-        self.assertRegex(
-            state["request"]["prompt_digest"], r"hmac-sha256:[0-9a-f]{64}\Z"
-        )
-        persisted = json.dumps(state, ensure_ascii=False)
-        self.assertNotIn(event["session_id"], persisted)
-        self.assertNotIn(event["turn_id"], persisted)
-
-    def test_concurrent_duplicate_delivery_returns_one_run(self):
+    def test_concurrent_routed_events_do_not_allocate_runs(self):
         event = self.event()
-        expected = self.parse_context(self.handle(event))["run_id"]
+        expected = self.parse_context(self.handle(event))
         context = multiprocessing.get_context("fork")
         queue = context.Queue()
         processes = [
@@ -187,12 +189,9 @@ class HookIdempotencyTests(HookTestCase):
             self.assertEqual(process.exitcode, 0)
 
         self.assertTrue(all(status == "ok" for status, _ in results), results)
-        run_ids = {self.parse_context(output)["run_id"] for _, output in results}
-        self.assertEqual(run_ids, {expected})
-        self.assertEqual(
-            [path.name for path in self.state_root.glob("run-hook-*") if path.is_dir()],
-            [expected],
-        )
+        contexts = [self.parse_context(output) for _, output in results]
+        self.assertEqual(contexts, [expected] * 4)
+        self.assertFalse(self.state_root.exists())
 
 
 class HookCliTests(HookTestCase):

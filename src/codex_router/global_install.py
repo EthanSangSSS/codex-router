@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 from typing import Any, Iterator, Mapping
 
 from .hook import (
@@ -38,17 +39,76 @@ _MAX_HOOK_PROBE_BYTES = 16 * 1024
 _HOOK_PROBE_TIMEOUT_SECONDS = 5
 _MISSING = object()
 _DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
-_TARGET_NAMES = ("hooks.json", "AGENTS.md")
+LUNA_AGENT_RELATIVE_PATH = "agents/luna-worker.toml"
+_LEGACY_TARGET_NAMES = ("hooks.json", "AGENTS.md")
+_TARGET_NAMES = (*_LEGACY_TARGET_NAMES, LUNA_AGENT_RELATIVE_PATH)
+_TARGET_BACKUPS = {
+    "hooks.json": "backups/hooks.json.original",
+    "AGENTS.md": "backups/agents.md.original",
+    LUNA_AGENT_RELATIVE_PATH: "backups/luna-worker.toml.original",
+}
+_TARGET_SLUGS = {
+    "hooks.json": "hooks",
+    "AGENTS.md": "agents",
+    LUNA_AGENT_RELATIVE_PATH: "luna",
+}
+_UPGRADE_FIELDS = {
+    "upgrade_from_sha256",
+    "upgrade_from_mode",
+    "upgrade_source_sha256",
+    "upgrade_source_mode",
+    "upgrade_original_sha256",
+    "upgrade_original_mode",
+    "upgrade_backup",
+}
+_UPGRADE_BACKUP_PATTERN = re.compile(
+    r"backups/upgrades/(hooks|agents|luna)-[0-9a-f]{64}\.original\Z"
+)
 
 AGENTS_BLOCK = f"""{AGENTS_BEGIN}
-Codex Router is the sole workflow state authority; this Codex task is the execution driver.
+This Codex task remains the primary coordinator and final reviewer. Luna is the default writable execution owner for delegated work packets.
 Honor `[CODEX_ROUTER_POLICY_V1]` hook context exactly:
 - `direct` and `bypass` run only the current turn locally.
-- `route` must show `Router: active`, resume the referenced canonical run, and drive Local Sol -> Web Sol -> Luna in order.
-- Local Sol and Luna use Router-configured local models; Web Sol uses the operator-attested continuous Web conversation for this driver context.
-- Never fabricate a stage result, skip a transition, create a replacement run, or open/close browser pages on Router's behalf.
-- Wait for a terminal Router state before answering routed substantive work; recover from canonical `state.json` after interruption.
+- For `route`, show `Router: active`. Sol plans, decomposes, and reviews; delegate every executable work packet with explicit scope and acceptance criteria to `luna_worker` by default.
+- Sol may send multiple sequential work packets or bounded correction packets to Luna. Keep one writable executor per file set and never run conflicting writes concurrently.
+- Each parent Codex task may create at most one persistent `luna_worker`; query the task tree before every packet and reuse that same Luna, including when it is completed or idle, instead of spawning a new Luna per packet.
+- Before creating any helper non-Luna child Agent, ensure the persistent Luna exists and preserve capacity for it.
+- Capacity exhaustion does not authorize Sol takeover. On Luna capacity exhaustion, reuse the existing Luna; if the interface supports it, close an unused completed non-Luna Agent; then try a completed Agent as a pure relay to create the real Luna descendant; if that still fails, return `BLOCKED_LUNA_CAPACITY`.
+- A relay is only a capacity handoff and must not execute project work.
+- Every new Luna delegation must restate its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output; the previous packet's path authorization expires automatically, and Luna obeys only the latest explicit boundary. Keep one writable executor for that file set.
+- Sol takes over writable execution only for `direct`/`bypass`, an architecture decision that cannot yet be safely decomposed, or a non-capacity Luna execution blocker; capacity exhaustion is never a takeover reason and every permitted takeover must disclose its reason.
+- Luna must not browse, operate Web Sol, access authentication or secrets, or commit, push, open a PR, install, deploy, or broaden scope.
+- Web Sol is manual operator work outside automatic Router execution. Never open, close, or control browser pages on Router's behalf.
+- The Hook route is stateless. Do not create or resume a canonical run unless the user explicitly invokes the legacy Router CLI workflow.
+- Verify any delegated result before using it and report only observed outcomes.
 {AGENTS_END}
+"""
+
+_LUNA_DESCRIPTION = (
+    "The default execution worker for planned, bounded implementation, testing, "
+    "and verification with explicit acceptance criteria."
+)
+_LUNA_DEVELOPER_INSTRUCTIONS = """You are the default execution worker for planned, bounded implementation, testing, and verification.
+
+Operating rules:
+- Remain the persistent execution worker for each parent task and accept multiple sequential follow-up or correction packets through the same Luna identity.
+- Before each packet, the parent must query the task tree and reuse this Luna when it is already present, including completed or idle states; do not spawn a new Luna for an ordinary packet.
+- New packets do not inherit the previous packet's write permissions. Obey only the latest explicit boundary, including its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output.
+- Do not create child agents for ordinary packets. The parent must reserve Luna capacity before creating any helper non-Luna Agent.
+- Inherit the parent task's effective sandbox and approval controls; never request or add overrides.
+- Work only on the exact task delegated by the parent agent.
+- Treat the parent's allowed paths as a hard write boundary and preserve every unrelated file and behavior.
+- Do not broaden scope, redesign unrelated components, or become a second workflow coordinator.
+- Inspect relevant files and existing conventions before acting.
+- Complete planned, multi-step work across the explicitly allowed paths, including implementation, focused tests, corrections, and verification.
+- Accept bounded follow-up correction packets from the parent and resolve review findings within the same delegated boundary.
+- Prefer the smallest defensible change and remain the single writable executor for each delegated file set until returning control.
+- Never browse or operate Web Sol.
+- Never access authentication, credentials, cookies, tokens, private keys, payment data, or unrelated user data.
+- Never commit, push, create or modify a pull request, install, deploy, publish, or start persistent services unless the parent task explicitly authorizes that exact action.
+- Validate with the narrowest relevant checks. Never claim a command or test passed unless you ran it and observed the result.
+- If requirements are ambiguous, dependencies are missing, permissions are insufficient, or the task is larger than delegated, stop and report the blocker instead of guessing.
+- Return a concise summary of work completed, files or artifacts affected, validation performed with observed results, and remaining risks or blockers.
 """
 
 
@@ -122,6 +182,143 @@ def _read_user_file(path: Path) -> tuple[bool, bytes | None, int | None]:
     if len(content) > _MAX_USER_FILE_BYTES:
         raise _error("conflict", "managed user file exceeds the size limit")
     return True, content, stat.S_IMODE(metadata.st_mode)
+
+
+def _validate_agents_directory(codex_home: Path, *, create: bool) -> Path:
+    agents_directory = codex_home / "agents"
+    if not os.path.lexists(agents_directory):
+        if not create:
+            return agents_directory
+        try:
+            agents_directory.mkdir(mode=0o700)
+            os.chmod(agents_directory, 0o700)
+            _fsync_directory(codex_home)
+        except OSError as error:
+            raise _error("conflict", "Codex agents directory cannot be created safely") from error
+        return agents_directory
+    try:
+        metadata = agents_directory.lstat()
+    except OSError as error:
+        raise _error("conflict", "Codex agents directory is unavailable") from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o7000
+    ):
+        raise _error("conflict", "Codex agents directory is unsafe")
+    return agents_directory
+
+
+def _read_target_file(
+    codex_home: Path, name: str
+) -> tuple[bool, bytes | None, int | None]:
+    if name == LUNA_AGENT_RELATIVE_PATH:
+        agents_directory = _validate_agents_directory(codex_home, create=False)
+        if not os.path.lexists(agents_directory):
+            return False, None, None
+    return _read_user_file(codex_home / name)
+
+
+def _valid_mode(value: Any) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 0o777
+    )
+
+
+def _upgrade_backup_name(name: str, digest: str) -> str:
+    if name not in _TARGET_SLUGS or not _valid_digest(digest):
+        raise _error("conflict", "Router upgrade backup identity is invalid")
+    return (
+        f"backups/upgrades/{_TARGET_SLUGS[name]}-"
+        f"{digest.removeprefix('sha256:')}.original"
+    )
+
+
+def _validate_upgrade_directory(installation_dir: Path, *, create: bool) -> Path:
+    backups = installation_dir / "backups"
+    try:
+        backups_metadata = backups.lstat()
+    except OSError as error:
+        raise _error("conflict", "Router backup directory is unavailable") from error
+    if (
+        not stat.S_ISDIR(backups_metadata.st_mode)
+        or stat.S_ISLNK(backups_metadata.st_mode)
+        or backups_metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(backups_metadata.st_mode) != 0o700
+    ):
+        raise _error("conflict", "Router backup directory is unsafe")
+    upgrades = backups / "upgrades"
+    if not os.path.lexists(upgrades):
+        if not create:
+            return upgrades
+        try:
+            upgrades.mkdir(mode=0o700)
+            os.chmod(upgrades, 0o700)
+            _fsync_directory(backups)
+        except OSError as error:
+            raise _error("conflict", "Router upgrade directory cannot be created safely") from error
+        return upgrades
+    try:
+        metadata = upgrades.lstat()
+    except OSError as error:
+        raise _error("conflict", "Router upgrade directory is unavailable") from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise _error("conflict", "Router upgrade directory is unsafe")
+    return upgrades
+
+
+def _upgrade_backup_path(
+    installation_dir: Path, name: str, relative: str
+) -> Path:
+    if (
+        not isinstance(relative, str)
+        or _UPGRADE_BACKUP_PATTERN.fullmatch(relative) is None
+        or not relative.startswith(
+            f"backups/upgrades/{_TARGET_SLUGS.get(name, 'invalid')}-"
+        )
+    ):
+        raise _error("conflict", "Router upgrade backup path is invalid")
+    _validate_upgrade_directory(installation_dir, create=False)
+    return installation_dir / relative
+
+
+def _target_backup_path(
+    installation_dir: Path, name: str, relative: str
+) -> Path:
+    if relative == _TARGET_BACKUPS.get(name):
+        return installation_dir / relative
+    return _upgrade_backup_path(installation_dir, name, relative)
+
+
+def _write_upgrade_backup(
+    *,
+    installation_dir: Path,
+    name: str,
+    original: bytes | object,
+) -> str | None:
+    if original is _MISSING:
+        return None
+    if not isinstance(original, bytes):
+        raise _error("conflict", "Router upgrade original is invalid")
+    digest = _sha256(original)
+    relative = _upgrade_backup_name(name, digest)
+    upgrades = _validate_upgrade_directory(installation_dir, create=True)
+    path = upgrades / Path(relative).name
+    if os.path.lexists(path):
+        existing = _read_private_file(path, maximum_bytes=_MAX_USER_FILE_BYTES)
+        if existing != original:
+            raise _error("conflict", "Router upgrade backup already differs")
+        return relative
+    _atomic_write(path, original)
+    return relative
 
 
 def _read_private_file(path: Path, *, maximum_bytes: int = _MAX_PRIVATE_FILE_BYTES) -> bytes:
@@ -264,6 +461,43 @@ def _validate_defaults(defaults: Mapping[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError, UnicodeEncodeError) as error:
         raise _error("invalid-input", "Router role defaults are invalid") from error
     return copied
+
+
+def _luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
+    model = role.get("requested_model")
+    reasoning = role.get("requested_reasoning")
+    if not isinstance(model, str) or not model.strip():
+        raise _error("invalid-input", "Luna model configuration is invalid")
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        raise _error("invalid-input", "Luna reasoning configuration is invalid")
+    values = {
+        "name": "luna_worker",
+        "description": _LUNA_DESCRIPTION,
+        "model": model,
+        "model_reasoning_effort": reasoning,
+        "developer_instructions": _LUNA_DEVELOPER_INSTRUCTIONS,
+    }
+    rendered = "".join(
+        f"{key} = {json.dumps(value, ensure_ascii=False)}\n"
+        for key, value in values.items()
+    ).encode("utf-8")
+    try:
+        parsed = tomllib.loads(rendered.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise _error("conflict", "generated Luna agent configuration is invalid") from error
+    if parsed != values:
+        raise _error("conflict", "generated Luna agent configuration is unstable")
+    return rendered
+
+
+def _luna_agent_matches(content: bytes | None, role: Mapping[str, Any]) -> bool:
+    if content is None:
+        return False
+    try:
+        parsed = tomllib.loads(content.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    return parsed == tomllib.loads(_luna_agent_bytes(role).decode("utf-8"))
 
 
 def _validate_install_inputs(
@@ -555,39 +789,55 @@ def _load_install_state(installation_dir: Path) -> dict[str, Any]:
         or state.get("protocol") != INSTALL_STATE_PROTOCOL
         or state.get("phase") not in ("prepared", "installed", "uninstalled")
         or not isinstance(state.get("targets"), Mapping)
-        or set(state["targets"]) != {"hooks.json", "AGENTS.md"}
+        or set(state["targets"])
+        not in (set(_LEGACY_TARGET_NAMES), set(_TARGET_NAMES))
     ):
         raise _error("conflict", "Router installation state is invalid")
-    expected_backups = {
-        "hooks.json": "backups/hooks.json.original",
-        "AGENTS.md": "backups/agents.md.original",
+    base_record_fields = {
+        "existed",
+        "original_sha256",
+        "original_mode",
+        "backup",
+        "installed_sha256",
+        "installed_mode",
     }
+    migration_seen: bool | None = None
     for name, record in state["targets"].items():
-        if not isinstance(record, Mapping) or set(record) != {
-            "existed",
-            "original_sha256",
-            "original_mode",
-            "backup",
-            "installed_sha256",
-            "installed_mode",
-        }:
+        if not isinstance(record, Mapping):
             raise _error("conflict", "Router target evidence is invalid")
+        record_fields = set(record)
+        has_migration = record_fields == base_record_fields | _UPGRADE_FIELDS
+        if record_fields not in (base_record_fields, base_record_fields | _UPGRADE_FIELDS):
+            raise _error("conflict", "Router target evidence is invalid")
+        if migration_seen is None:
+            migration_seen = has_migration
+        elif migration_seen != has_migration:
+            raise _error("conflict", "Router migration evidence is incomplete")
+        if has_migration and state["phase"] != "prepared":
+            raise _error("conflict", "Router migration evidence is not resumable")
         installed_mode = record.get("installed_mode")
         if (
             not _valid_digest(record.get("installed_sha256"))
-            or not isinstance(installed_mode, int)
-            or isinstance(installed_mode, bool)
-            or not 0 <= installed_mode <= 0o777
+            or not _valid_mode(installed_mode)
         ):
             raise _error("conflict", "Router installed target evidence is invalid")
         if record.get("existed") is True:
             original_mode = record.get("original_mode")
+            backup = record.get("backup")
             if (
                 not _valid_digest(record.get("original_sha256"))
-                or not isinstance(original_mode, int)
-                or isinstance(original_mode, bool)
-                or not 0 <= original_mode <= 0o777
-                or record.get("backup") != expected_backups[name]
+                or not _valid_mode(original_mode)
+                or not isinstance(backup, str)
+                or (
+                    backup != _TARGET_BACKUPS[name]
+                    and _UPGRADE_BACKUP_PATTERN.fullmatch(backup) is None
+                )
+                or (
+                    backup != _TARGET_BACKUPS[name]
+                    and not backup.startswith(
+                        f"backups/upgrades/{_TARGET_SLUGS[name]}-"
+                    )
+                )
             ):
                 raise _error("conflict", "Router original target evidence is invalid")
         elif record.get("existed") is False:
@@ -598,10 +848,65 @@ def _load_install_state(installation_dir: Path) -> dict[str, Any]:
                 raise _error("conflict", "Router absence evidence is invalid")
         else:
             raise _error("conflict", "Router target ownership evidence is invalid")
+        if has_migration:
+            if (
+                not _valid_digest(record.get("upgrade_from_sha256"))
+                or not _valid_mode(record.get("upgrade_from_mode"))
+                or not _valid_digest(record.get("upgrade_source_sha256"))
+                or not _valid_mode(record.get("upgrade_source_mode"))
+            ):
+                raise _error("conflict", "Router migration source evidence is invalid")
+            upgrade_backup = record.get("upgrade_backup")
+            upgrade_original_sha256 = record.get("upgrade_original_sha256")
+            upgrade_original_mode = record.get("upgrade_original_mode")
+            if record.get("existed") is True:
+                if (
+                    not isinstance(upgrade_backup, str)
+                    or _upgrade_backup_path(
+                        installation_dir, name, upgrade_backup
+                    )
+                    is None
+                    or not _valid_digest(upgrade_original_sha256)
+                    or not _valid_mode(upgrade_original_mode)
+                ):
+                    raise _error("conflict", "Router migration backup evidence is invalid")
+            elif any(
+                value is not None
+                for value in (
+                    upgrade_backup,
+                    upgrade_original_sha256,
+                    upgrade_original_mode,
+                )
+            ):
+                raise _error("conflict", "Router migration absence evidence is invalid")
     return state
 
 
-def _target_original(installation_dir: Path, record: Mapping[str, Any]) -> bytes | object:
+def _target_original(
+    installation_dir: Path, name: str, record: Mapping[str, Any]
+) -> bytes | object:
+    if "upgrade_backup" in record:
+        if record.get("existed") is False:
+            if any(
+                record.get(field) is not None
+                for field in (
+                    "upgrade_backup",
+                    "upgrade_original_sha256",
+                    "upgrade_original_mode",
+                )
+            ):
+                raise _error("conflict", "Router migration absence evidence is invalid")
+            return _MISSING
+        backup = record.get("upgrade_backup")
+        if not isinstance(backup, str):
+            raise _error("conflict", "Router migration backup evidence is invalid")
+        original = _read_private_file(
+            _upgrade_backup_path(installation_dir, name, backup),
+            maximum_bytes=_MAX_USER_FILE_BYTES,
+        )
+        if _sha256(original) != record.get("upgrade_original_sha256"):
+            raise _error("conflict", "Router migration backup digest does not match")
+        return original
     if record.get("existed") is False:
         if any(record.get(name) is not None for name in ("original_sha256", "original_mode", "backup")):
             raise _error("conflict", "Router absence evidence is invalid")
@@ -609,17 +914,36 @@ def _target_original(installation_dir: Path, record: Mapping[str, Any]) -> bytes
     backup = record.get("backup")
     if record.get("existed") is not True or not isinstance(backup, str):
         raise _error("conflict", "Router backup evidence is invalid")
-    original = _read_private_file(installation_dir / backup, maximum_bytes=_MAX_USER_FILE_BYTES)
+    original = _read_private_file(
+        _target_backup_path(installation_dir, name, backup),
+        maximum_bytes=_MAX_USER_FILE_BYTES,
+    )
     if _sha256(original) != record.get("original_sha256"):
         raise _error("conflict", "Router backup digest does not match")
     return original
+
+
+def _migration_source_if_matches(
+    *, home: Path, name: str, record: Mapping[str, Any]
+) -> tuple[bytes, int] | None:
+    if "upgrade_source_sha256" not in record:
+        return None
+    exists, content, mode = _read_target_file(home, name)
+    if (
+        not exists
+        or content is None
+        or _sha256(content) != record.get("upgrade_source_sha256")
+        or mode != record.get("upgrade_source_mode")
+    ):
+        return None
+    return content, mode
 
 
 def _installed_state_matches(
     *, codex_home: Path, installation_dir: Path, state: Mapping[str, Any]
 ) -> bool:
     for name, record in state["targets"].items():
-        exists, content, mode = _read_user_file(codex_home / name)
+        exists, content, mode = _read_target_file(codex_home, name)
         if (
             not exists
             or content is None
@@ -631,25 +955,40 @@ def _installed_state_matches(
 
 
 def _install_plan(
-    *, installation_dir: Path, state: Mapping[str, Any]
+    *, home: Path, installation_dir: Path, state: Mapping[str, Any]
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     handler = _hook_handler(installation_dir)
+    config = _private_json(installation_dir / "config.json")
+    role_config = _validate_defaults(config.get("role_config"))
     plan: dict[str, dict[str, Any]] = {}
     for name in _TARGET_NAMES:
+        if name not in state["targets"]:
+            continue
         record = state["targets"][name]
-        original = _target_original(installation_dir, record)
+        original = _target_original(installation_dir, name, record)
         raw_original = None if original is _MISSING else original
         if name == "hooks.json":
             installed = _install_hook(raw_original, handler)
-        else:
+        elif name == "AGENTS.md":
             installed = _install_agents(raw_original)
+        else:
+            installed = _luna_agent_bytes(role_config["luna"])
         if _sha256(installed) != record.get("installed_sha256"):
             raise _error("conflict", "Router installation plan digest changed")
+        migration_source = _migration_source_if_matches(
+            home=home, name=name, record=record
+        )
         plan[name] = {
             "original": original,
             "original_mode": record.get("original_mode"),
             "installed": installed,
             "installed_mode": record["installed_mode"],
+            "migration_source": (
+                migration_source[0] if migration_source is not None else None
+            ),
+            "migration_source_mode": (
+                migration_source[1] if migration_source is not None else None
+            ),
         }
     return handler, plan
 
@@ -663,9 +1002,12 @@ def _apply_prepared_install(
     if state.get("phase") != "prepared":
         raise _error("conflict", "Router installation is not resumable")
     handler, plan = _install_plan(
-        installation_dir=installation_dir, state=state
+        home=home, installation_dir=installation_dir, state=state
     )
-    for name in _TARGET_NAMES:
+    target_names = tuple(name for name in _TARGET_NAMES if name in state["targets"])
+    if LUNA_AGENT_RELATIVE_PATH in target_names:
+        _validate_agents_directory(home, create=False)
+    for name in target_names:
         target = home / name
         item = plan[name]
         original_match = _matches_current(
@@ -678,13 +1020,23 @@ def _apply_prepared_install(
             item["installed"],
             expected_mode=item["installed_mode"],
         )[0]
-        if not (original_match or installed_match):
+        migration_source_match = (
+            item["migration_source"] is not None
+            and _matches_current(
+                target,
+                item["migration_source"],
+                expected_mode=item["migration_source_mode"],
+            )[0]
+        )
+        if not (original_match or installed_match or migration_source_match):
             raise _error("conflict", "managed user file changed during installation")
 
     _preflight_hook_handler(
         handler, installation_dir=installation_dir, cwd=home
     )
-    for name in _TARGET_NAMES:
+    if LUNA_AGENT_RELATIVE_PATH in target_names:
+        _validate_agents_directory(home, create=True)
+    for name in target_names:
         target = home / name
         item = plan[name]
         if _matches_current(
@@ -693,10 +1045,20 @@ def _apply_prepared_install(
             expected_mode=item["installed_mode"],
         )[0]:
             continue
+        expected = (
+            item["migration_source"]
+            if item["migration_source"] is not None
+            else item["original"]
+        )
+        expected_mode = (
+            item["migration_source_mode"]
+            if item["migration_source"] is not None
+            else item["original_mode"]
+        )
         _replace_expected(
             target,
-            expected=item["original"],
-            expected_mode=item["original_mode"],
+            expected=expected,
+            expected_mode=expected_mode,
             replacement=item["installed"],
             mode=item["installed_mode"],
         )
@@ -704,12 +1066,314 @@ def _apply_prepared_install(
         codex_home=home, installation_dir=installation_dir, state=state
     ):
         raise _error("conflict", "Router installation did not commit completely")
+    _finalize_upgrade_state(state)
     state["phase"] = "installed"
     _atomic_write(
         installation_dir / "install-state.json",
         canonical_json_bytes(state) + b"\n",
     )
     return global_status(home)
+
+
+def _finalize_upgrade_state(state: dict[str, Any]) -> None:
+    for record in state["targets"].values():
+        if "upgrade_backup" not in record:
+            continue
+        record["original_sha256"] = record.pop("upgrade_original_sha256")
+        record["original_mode"] = record.pop("upgrade_original_mode")
+        record["backup"] = record.pop("upgrade_backup")
+        record.pop("upgrade_from_sha256")
+        record.pop("upgrade_from_mode")
+        record.pop("upgrade_source_sha256")
+        record.pop("upgrade_source_mode")
+
+
+def _build_target_records(
+    *,
+    home: Path,
+    installation_dir: Path,
+    config: Mapping[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, bytes | None]]:
+    handler = _hook_handler(installation_dir)
+    originals: dict[str, bytes | None] = {}
+    evidence: dict[str, tuple[bool, int | None]] = {}
+    for name in _TARGET_NAMES:
+        exists, original, mode = _read_target_file(home, name)
+        originals[name] = original
+        evidence[name] = (exists, mode)
+    installed = {
+        "hooks.json": _install_hook(originals["hooks.json"], handler),
+        "AGENTS.md": _install_agents(originals["AGENTS.md"]),
+        LUNA_AGENT_RELATIVE_PATH: _luna_agent_bytes(
+            config["role_config"]["luna"]
+        ),
+    }
+    records: dict[str, dict[str, Any]] = {}
+    for name in _TARGET_NAMES:
+        existed, original_mode = evidence[name]
+        installed_mode = (
+            0o600
+            if name == LUNA_AGENT_RELATIVE_PATH
+            else original_mode if original_mode is not None else 0o600
+        )
+        records[name] = _target_record(
+            existed=existed,
+            original=originals[name],
+            original_mode=original_mode,
+            installed=installed[name],
+            backup=_TARGET_BACKUPS[name] if existed else None,
+            installed_mode=installed_mode,
+        )
+    return records, originals
+
+
+def _write_target_backups(
+    *, installation_dir: Path, originals: Mapping[str, bytes | None]
+) -> None:
+    for name in _TARGET_NAMES:
+        original = originals[name]
+        if original is not None:
+            _atomic_write(installation_dir / _TARGET_BACKUPS[name], original)
+
+
+def _reprepare_uninstalled_install(
+    *,
+    home: Path,
+    installation_dir: Path,
+    state: dict[str, Any],
+    config: Mapping[str, Any],
+) -> GlobalStatus:
+    if state.get("phase") != "uninstalled":
+        raise _error("conflict", "Router installation is not safely re-installable")
+    for name, record in state["targets"].items():
+        original = _target_original(installation_dir, name, record)
+        if not _matches_current(
+            home / name,
+            original,
+            expected_mode=record.get("original_mode"),
+        )[0]:
+            raise _error("conflict", "managed user file changed after uninstallation")
+    records, originals = _build_target_records(
+        home=home,
+        installation_dir=installation_dir,
+        config=config,
+    )
+    _write_target_backups(
+        installation_dir=installation_dir,
+        originals=originals,
+    )
+    state["targets"] = records
+    state["phase"] = "prepared"
+    _atomic_write(
+        installation_dir / "install-state.json",
+        canonical_json_bytes(state) + b"\n",
+    )
+    return _apply_prepared_install(
+        home=home,
+        installation_dir=installation_dir,
+        state=state,
+    )
+
+
+def _read_exact_installed_target(
+    *, home: Path, name: str, record: Mapping[str, Any]
+) -> tuple[bytes, int]:
+    exists, content, mode = _read_target_file(home, name)
+    if (
+        not exists
+        or content is None
+        or _sha256(content) != record.get("installed_sha256")
+        or mode != record.get("installed_mode")
+    ):
+        raise _error("conflict", "managed Router target changed before refresh")
+    return content, mode
+
+
+def _derive_refresh_agents_target(
+    *,
+    home: Path,
+    old_original: bytes | object,
+    record: Mapping[str, Any],
+) -> tuple[bytes, int, bytes | object, int | None]:
+    exists, content, mode = _read_target_file(home, "AGENTS.md")
+    if not exists or content is None or mode is None:
+        raise _error("conflict", "AGENTS.md changed before refresh")
+    current = content
+    current_mode = mode
+    if current_mode != record.get("installed_mode"):
+        raise _error("conflict", "AGENTS.md mode changed before refresh")
+    if _sha256(current) == record.get("installed_sha256"):
+        return (
+            current,
+            current_mode,
+            old_original,
+            record.get("original_mode"),
+        )
+
+    try:
+        current.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise _error("conflict", "AGENTS.md is not valid UTF-8") from error
+    begin = AGENTS_BEGIN.encode("utf-8")
+    end = AGENTS_END.encode("utf-8")
+    if current.count(begin) != 1 or current.count(end) != 1:
+        raise _error("conflict", "AGENTS.md Router markers are ambiguous")
+    begin_index = current.find(begin)
+    suffix = current[begin_index:]
+    if not (suffix.endswith(end) or suffix.endswith(end + b"\n")):
+        raise _error("conflict", "AGENTS.md Router block is not at file end")
+
+    if old_original is _MISSING:
+        if begin_index != 0:
+            raise _error("conflict", "AGENTS.md missing-original boundary is ambiguous")
+        new_original: bytes | object = _MISSING
+        separator = b""
+    else:
+        if not isinstance(old_original, bytes):
+            raise _error("conflict", "AGENTS.md original evidence is invalid")
+        separator = (
+            b""
+            if not old_original
+            else b"\n" if old_original.endswith(b"\n") else b"\n\n"
+        )
+        if separator:
+            prefix = current[:begin_index]
+            if not prefix.endswith(separator):
+                raise _error("conflict", "AGENTS.md separator boundary is invalid")
+            new_original = prefix[: -len(separator)]
+        else:
+            if begin_index != 0:
+                raise _error("conflict", "AGENTS.md empty-original boundary is ambiguous")
+            new_original = b""
+
+    reconstructed = (
+        suffix if old_original is _MISSING else old_original + separator + suffix
+    )
+    if _sha256(reconstructed) != record.get("installed_sha256"):
+        raise _error("conflict", "AGENTS.md old Router block does not match evidence")
+    if new_original is _MISSING or new_original == b"":
+        canonical_current = suffix
+    else:
+        canonical_separator = (
+            b"\n" if new_original.endswith(b"\n") else b"\n\n"
+        )
+        canonical_current = new_original + canonical_separator + suffix
+    if canonical_current != current:
+        raise _error("conflict", "AGENTS.md user boundary is not reversible")
+    return current, current_mode, new_original, record.get("original_mode")
+
+
+def _prepare_installed_refresh(
+    *,
+    home: Path,
+    installation_dir: Path,
+    state: dict[str, Any],
+) -> GlobalStatus:
+    if (
+        state.get("phase") != "installed"
+        or set(state.get("targets", {})) != set(_TARGET_NAMES)
+    ):
+        raise _error("conflict", "Router installation is not refreshable")
+    handler = _hook_handler(installation_dir)
+    config = _private_json(installation_dir / "config.json")
+    role_config = _validate_defaults(config.get("role_config"))
+    sources: dict[str, tuple[bytes, int]] = {}
+    strategy_generated: dict[str, bytes] = {}
+    installed_outputs: dict[str, bytes] = {}
+    new_originals: dict[str, bytes | object] = {}
+    new_original_modes: dict[str, int | None] = {}
+
+    for name in _TARGET_NAMES:
+        record = state["targets"][name]
+        old_original = _target_original(installation_dir, name, record)
+        raw_original = None if old_original is _MISSING else old_original
+        if name == "hooks.json":
+            sources[name] = _read_exact_installed_target(
+                home=home, name=name, record=record
+            )
+            strategy_generated[name] = _install_hook(raw_original, handler)
+            installed_outputs[name] = strategy_generated[name]
+            new_originals[name] = old_original
+            new_original_modes[name] = record.get("original_mode")
+        elif name == "AGENTS.md":
+            (
+                source_content,
+                source_mode,
+                new_original,
+                new_original_mode,
+            ) = _derive_refresh_agents_target(
+                home=home,
+                old_original=old_original,
+                record=record,
+            )
+            sources[name] = (source_content, source_mode)
+            strategy_generated[name] = _install_agents(raw_original)
+            installed_outputs[name] = _install_agents(
+                None if new_original is _MISSING else new_original
+            )
+            new_originals[name] = new_original
+            new_original_modes[name] = new_original_mode
+        else:
+            sources[name] = _read_exact_installed_target(
+                home=home, name=name, record=record
+            )
+            strategy_generated[name] = _luna_agent_bytes(role_config["luna"])
+            installed_outputs[name] = strategy_generated[name]
+            new_originals[name] = old_original
+            new_original_modes[name] = record.get("original_mode")
+
+    changed = any(
+        _sha256(strategy_generated[name])
+        != state["targets"][name].get("installed_sha256")
+        for name in _TARGET_NAMES
+    )
+    if not changed:
+        if _installed_state_matches(
+            codex_home=home,
+            installation_dir=installation_dir,
+            state=state,
+        ):
+            return global_status(home)
+        raise _error("conflict", "Router policy has no refreshable strategy change")
+
+    prepared = deepcopy(state)
+    for name in _TARGET_NAMES:
+        old_record = state["targets"][name]
+        record = prepared["targets"][name]
+        new_original = new_originals[name]
+        new_digest = None if new_original is _MISSING else _sha256(new_original)
+        upgrade_backup = _write_upgrade_backup(
+            installation_dir=installation_dir,
+            name=name,
+            original=new_original,
+        )
+        record.update(
+            {
+                "upgrade_from_sha256": old_record["installed_sha256"],
+                "upgrade_from_mode": old_record["installed_mode"],
+                "upgrade_source_sha256": _sha256(sources[name][0]),
+                "upgrade_source_mode": sources[name][1],
+                "upgrade_original_sha256": new_digest,
+                "upgrade_original_mode": (
+                    None
+                    if new_original is _MISSING
+                    else new_original_modes[name]
+                ),
+                "upgrade_backup": upgrade_backup,
+                "installed_sha256": _sha256(installed_outputs[name]),
+                "installed_mode": old_record["installed_mode"],
+            }
+        )
+    prepared["phase"] = "prepared"
+    _atomic_write(
+        installation_dir / "install-state.json",
+        canonical_json_bytes(prepared) + b"\n",
+    )
+    return _apply_prepared_install(
+        home=home,
+        installation_dir=installation_dir,
+        state=prepared,
+    )
 
 
 def global_install(
@@ -747,21 +1411,29 @@ def global_install(
                         installation_dir=installation_dir,
                         state=state,
                     )
-                if state["phase"] == "installed" and _installed_state_matches(
-                    codex_home=home, installation_dir=installation_dir, state=state
+                if (
+                    state["phase"] == "installed"
+                    and set(state["targets"]) == set(_TARGET_NAMES)
                 ):
-                    return global_status(home)
+                    return _prepare_installed_refresh(
+                        home=home,
+                        installation_dir=installation_dir,
+                        state=state,
+                    )
+                if state["phase"] == "uninstalled":
+                    return _reprepare_uninstalled_install(
+                        home=home,
+                        installation_dir=installation_dir,
+                        state=state,
+                        config=config,
+                    )
             raise _error("conflict", "an incompatible Router installation already exists")
 
-        hooks_path = home / "hooks.json"
-        agents_path = home / "AGENTS.md"
-        hooks_exists, hooks_original, hooks_mode = _read_user_file(hooks_path)
-        agents_exists, agents_original, agents_mode = _read_user_file(agents_path)
-        handler = _hook_handler(installation_dir)
-        hooks_installed = _install_hook(hooks_original, handler)
-        agents_installed = _install_agents(agents_original)
-        hooks_installed_mode = hooks_mode if hooks_mode is not None else 0o600
-        agents_installed_mode = agents_mode if agents_mode is not None else 0o600
+        records, originals = _build_target_records(
+            home=home,
+            installation_dir=installation_dir,
+            config=config,
+        )
 
         installation_dir.mkdir(mode=0o700, exist_ok=False)
         os.chmod(installation_dir, 0o700)
@@ -769,10 +1441,10 @@ def global_install(
         backups.mkdir(mode=0o700, exist_ok=False)
         os.chmod(backups, 0o700)
         _fsync_directory(home)
-        if hooks_original is not None:
-            _atomic_write(backups / "hooks.json.original", hooks_original)
-        if agents_original is not None:
-            _atomic_write(backups / "agents.md.original", agents_original)
+        _write_target_backups(
+            installation_dir=installation_dir,
+            originals=originals,
+        )
         config_bytes = canonical_json_bytes(config) + b"\n"
         _atomic_write(installation_dir / "config.json", config_bytes)
         _atomic_write(installation_dir / _IDENTITY_FILE_NAME, secrets.token_bytes(32))
@@ -780,24 +1452,7 @@ def global_install(
             "protocol": INSTALL_STATE_PROTOCOL,
             "phase": "prepared",
             "config_sha256": _sha256(config_bytes),
-            "targets": {
-                "hooks.json": _target_record(
-                    existed=hooks_exists,
-                    original=hooks_original,
-                    original_mode=hooks_mode,
-                    installed=hooks_installed,
-                    backup="backups/hooks.json.original" if hooks_exists else None,
-                    installed_mode=hooks_installed_mode,
-                ),
-                "AGENTS.md": _target_record(
-                    existed=agents_exists,
-                    original=agents_original,
-                    original_mode=agents_mode,
-                    installed=agents_installed,
-                    backup="backups/agents.md.original" if agents_exists else None,
-                    installed_mode=agents_installed_mode,
-                ),
-            },
+            "targets": records,
         }
         _atomic_write(
             installation_dir / "install-state.json",
@@ -813,6 +1468,7 @@ def global_install(
 def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, Any]) -> GlobalStatus:
     config_valid = False
     identity_valid = False
+    role_config: dict[str, Any] | None = None
     try:
         raw_config = _read_private_file(installation_dir / "config.json")
         config = json.loads(raw_config)
@@ -847,11 +1503,12 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
 
     hook_configured = False
     agents_managed = False
+    luna_agent_configured = False
     targets_match_installed = True
     targets_match_original = True
     for name, record in state["targets"].items():
         path = home / name
-        exists, content, mode = _read_user_file(path)
+        exists, content, mode = _read_target_file(home, name)
         installed_match = (
             exists
             and content is not None
@@ -860,7 +1517,7 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
         )
         targets_match_installed &= installed_match
         try:
-            original = _target_original(installation_dir, record)
+            original = _target_original(installation_dir, name, record)
             original_match = _matches_current(
                 path,
                 original,
@@ -887,6 +1544,14 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
                 )
             except UnicodeDecodeError:
                 agents_managed = False
+        elif (
+            name == LUNA_AGENT_RELATIVE_PATH
+            and installed_match
+            and role_config is not None
+        ):
+            luna_agent_configured = _luna_agent_matches(
+                content, role_config["luna"]
+            )
 
     phase = state["phase"]
     if (
@@ -894,6 +1559,7 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
         and targets_match_installed
         and hook_configured
         and agents_managed
+        and luna_agent_configured
         and config_valid
         and identity_valid
     ):
@@ -909,6 +1575,7 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
         installation_dir=installation_dir,
         hook_configured=hook_configured,
         agents_managed=agents_managed,
+        luna_agent_configured=luna_agent_configured,
         config_valid=config_valid,
         identity_material_valid=identity_valid,
         hook_trust=("requires-user-check" if status_state == "installed" else "unknown"),
@@ -925,6 +1592,7 @@ def global_status(codex_home: Path | str) -> GlobalStatus:
             installation_dir=installation_dir,
             hook_configured=False,
             agents_managed=False,
+            luna_agent_configured=False,
             config_valid=False,
             identity_material_valid=False,
             hook_trust="unknown",
@@ -940,6 +1608,7 @@ def global_status(codex_home: Path | str) -> GlobalStatus:
             installation_dir=installation_dir,
             hook_configured=False,
             agents_managed=False,
+            luna_agent_configured=False,
             config_valid=False,
             identity_material_valid=False,
             hook_trust="unknown",
@@ -955,14 +1624,16 @@ def global_uninstall(codex_home: Path | str) -> GlobalStatus:
             return global_status(home)
         _validate_install_directory(installation_dir)
         state = _load_install_state(installation_dir)
+        if LUNA_AGENT_RELATIVE_PATH in state["targets"]:
+            _validate_agents_directory(home, create=False)
         originals: dict[str, bytes | object] = {}
         current: dict[str, bytes | object] = {}
         current_modes: dict[str, int | None] = {}
         for name, record in state["targets"].items():
             path = home / name
-            original = _target_original(installation_dir, record)
+            original = _target_original(installation_dir, name, record)
             originals[name] = original
-            exists, content, mode = _read_user_file(path)
+            exists, content, mode = _read_target_file(home, name)
             current[name] = content if exists and content is not None else _MISSING
             current_modes[name] = mode
             installed_match = (
@@ -976,10 +1647,14 @@ def global_uninstall(codex_home: Path | str) -> GlobalStatus:
                 original,
                 expected_mode=record.get("original_mode"),
             )[0]
+            migration_source = _migration_source_if_matches(
+                home=home, name=name, record=record
+            )
+            migration_source_match = migration_source is not None
             if state["phase"] == "uninstalled":
                 allowed = original_match
             else:
-                allowed = installed_match or original_match
+                allowed = installed_match or original_match or migration_source_match
             if not allowed:
                 raise _error("conflict", "managed user file changed after installation")
 
@@ -1011,6 +1686,8 @@ def global_uninstall(codex_home: Path | str) -> GlobalStatus:
                     replacement=original,
                     mode=record["original_mode"],
                 )
+        if any("upgrade_backup" in record for record in state["targets"].values()):
+            _finalize_upgrade_state(state)
         state["phase"] = "uninstalled"
         _atomic_write(
             installation_dir / "install-state.json",
@@ -1038,7 +1715,11 @@ def _self_test_context(output: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _managed_fingerprints(home: Path) -> dict[str, str]:
-    paths = [home / "hooks.json", home / "AGENTS.md"]
+    paths = [
+        home / "hooks.json",
+        home / "AGENTS.md",
+        home / LUNA_AGENT_RELATIVE_PATH,
+    ]
     installation_dir = home / INSTALL_DIRECTORY_NAME
     if installation_dir.is_dir():
         paths.extend(
@@ -1116,26 +1797,6 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="codex-router-self-test-") as temporary:
         ephemeral_path = Path(temporary)
         ephemeral_path.chmod(0o700)
-        test_installation = ephemeral_path / "installation"
-        test_installation.mkdir(mode=0o700)
-        test_installation.chmod(0o700)
-        test_config = deepcopy(config)
-        test_config["state_root"] = str(ephemeral_path / "runs")
-        _atomic_write(
-            test_installation / "config.json",
-            canonical_json_bytes(test_config) + b"\n",
-        )
-        _atomic_write(
-            test_installation / _IDENTITY_FILE_NAME,
-            bytes(range(32)),
-        )
-        test_handler = deepcopy(configured_handler)
-        test_handler["command"] = shlex.join(
-            [*configured_arguments[:-1], str(test_installation)]
-        )
-        test_arguments = _handler_argv(
-            test_handler, expected_installation_dir=test_installation
-        )
 
         def event(*, prompt: str, session: str, turn: str) -> dict[str, str]:
             return {
@@ -1170,28 +1831,28 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
         )
         route = _self_test_context(
             _invoke_hook_argv(
-                test_arguments,
+                configured_arguments,
                 event=event(prompt=route_prompt, session=session_a, turn=turn_a),
                 cwd=ephemeral_path,
             )
         )
         duplicate = _self_test_context(
             _invoke_hook_argv(
-                test_arguments,
+                configured_arguments,
                 event=event(prompt=route_prompt, session=session_a, turn=turn_a),
                 cwd=ephemeral_path,
             )
         )
         changed_session = _self_test_context(
             _invoke_hook_argv(
-                test_arguments,
+                configured_arguments,
                 event=event(prompt=route_prompt, session=session_b, turn=turn_a),
                 cwd=ephemeral_path,
             )
         )
         changed_turn = _self_test_context(
             _invoke_hook_argv(
-                test_arguments,
+                configured_arguments,
                 event=event(prompt=route_prompt, session=session_a, turn=turn_b),
                 cwd=ephemeral_path,
             )
@@ -1207,31 +1868,23 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             ensure_ascii=False,
             sort_keys=True,
         )
-        run_root = ephemeral_path / "runs"
-        run_directories = sorted(
-            path for path in run_root.glob("run-hook-*") if path.is_dir()
-        )
-        local_only = len(run_directories) == 3
-        identity_not_persisted = True
-        for run_directory in run_directories:
-            state = json.loads(
-                (run_directory / "state.json").read_text(encoding="utf-8")
-            )
-            local_only &= (
-                state.get("status") == "awaiting_local_sol"
-                and state.get("next_stage") == "local_sol"
-                and not (run_directory / "web-sol.json").exists()
-                and not (run_directory / "luna.json").exists()
-            )
-            evidence = b"\n".join(
-                path.read_bytes()
-                for path in run_directory.rglob("*")
-                if path.is_file()
-            ).decode("utf-8", errors="ignore")
-            identity_not_persisted &= all(
-                identity not in evidence
-                for identity in (session_a, session_b, turn_a, turn_b)
-            )
+        expected_route = {
+            "protocol": HOOK_CONTEXT_PROTOCOL,
+            "decision": "route",
+            "reason": "substantive_request",
+            "workflow": "native_luna_worker",
+            "sol_role": "plan_review",
+            "luna_role": "default_execution",
+            "delegation_mode": "sequential_work_packets",
+            "luna_agent": "luna_worker",
+            "luna_model": config["role_config"]["luna"]["requested_model"],
+            "luna_reasoning": config["role_config"]["luna"][
+                "requested_reasoning"
+            ],
+            "luna_lifecycle": "persistent_per_parent_task",
+            "capacity_failure_policy": "reuse_close_relay_or_block",
+            "web_mode": "manual_operator",
+        }
 
         checks = {
             "hook_protocol": all(
@@ -1243,23 +1896,14 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "route_policy": all(
                 context.get("decision") == "route" for context in route_contexts
             ),
-            "duplicate_event_idempotent": (
-                route.get("run_id") == duplicate.get("run_id")
-                and duplicate.get("idempotent") is True
+            "stateless_native_luna_route": all(
+                context == expected_route for context in route_contexts
             ),
-            "same_session_stable": (
-                route.get("driver_context_id")
-                == changed_turn.get("driver_context_id")
-                and route.get("run_id") != changed_turn.get("run_id")
+            "no_router_run_created": (
+                configured_state_root.exists() == configured_state_existed
             ),
-            "different_session_isolated": (
-                route.get("driver_context_id")
-                != changed_session.get("driver_context_id")
-            ),
-            "one_run_per_event": len(run_directories) == 3,
-            "local_stage_only": local_only,
-            "raw_identity_not_persisted": identity_not_persisted,
             "raw_values_not_returned": all(value not in output_text for value in raw_values),
+            "luna_agent_configured": status.luna_agent_configured,
             "hook_command_subprocess": True,
         }
 

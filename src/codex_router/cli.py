@@ -141,6 +141,7 @@ def _global_status_payload(status: GlobalStatus) -> dict[str, Any]:
         "installation_dir": str(status.installation_dir),
         "hook_configured": status.hook_configured,
         "agents_managed": status.agents_managed,
+        "luna_agent_configured": status.luna_agent_configured,
         "config_valid": status.config_valid,
         "identity_material_valid": status.identity_material_valid,
         "hook_trust": status.hook_trust,

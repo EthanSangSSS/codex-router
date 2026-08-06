@@ -6,6 +6,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -90,6 +91,26 @@ class GlobalInstallTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 self.install()
 
+    def install_legacy_policy_fixture(self):
+        import codex_router.global_install as global_install_module
+
+        old_agents_block = (
+            f"{global_install_module.AGENTS_BEGIN}\n"
+            "Legacy Router policy before refresh.\n"
+            f"{global_install_module.AGENTS_END}\n"
+        )
+        old_luna_instructions = "Legacy Luna developer instructions before refresh.\n"
+        with patch.object(
+            global_install_module, "AGENTS_BLOCK", old_agents_block
+        ), patch.object(
+            global_install_module,
+            "_LUNA_DEVELOPER_INSTRUCTIONS",
+            old_luna_instructions,
+        ):
+            installed = self.install()
+        self.assertEqual(installed.state, "installed")
+        return old_agents_block, old_luna_instructions
+
     def test_install_preserves_semantics_modes_and_exact_uninstall_bytes(self):
         hooks_path = self.codex_home / "hooks.json"
         agents_path = self.codex_home / "AGENTS.md"
@@ -112,6 +133,7 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(installed.state, "installed")
         self.assertTrue(installed.hook_configured)
         self.assertTrue(installed.agents_managed)
+        self.assertTrue(installed.luna_agent_configured)
         self.assertEqual(installed.hook_trust, "requires-user-check")
         self.assertTrue(installed.new_session_required)
         hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
@@ -126,6 +148,51 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(handler["type"], "command")
         self.assertTrue(handler["command"].startswith("/"))
         self.assertIn("codex-router-global-policy-v1", handler["statusMessage"])
+        managed_agents = agents_path.read_text(encoding="utf-8")
+        self.assertIn("`luna_worker`", managed_agents)
+        self.assertIn("Sol plans, decomposes, and reviews", managed_agents)
+        self.assertIn("multiple sequential work packets", managed_agents)
+        self.assertIn("takes over writable execution only", managed_agents)
+        self.assertIn("Web Sol is manual operator work", managed_agents)
+        self.assertIn("The Hook route is stateless", managed_agents)
+        self.assertNotIn("drive Local Sol -> Web Sol -> Luna", managed_agents)
+        self.assertIn("at most one persistent `luna_worker`", managed_agents)
+        self.assertIn("reuse the existing Luna", managed_agents)
+        self.assertIn("Capacity exhaustion does not authorize Sol takeover", managed_agents)
+        self.assertIn("completed non-Luna", managed_agents)
+        self.assertIn("BLOCKED_LUNA_CAPACITY", managed_agents)
+        self.assertIn("packet id", managed_agents)
+        self.assertIn("latest explicit boundary", managed_agents)
+        luna_path = self.codex_home / "agents" / "luna-worker.toml"
+        luna = tomllib.loads(luna_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {
+                "name": luna["name"],
+                "model": luna["model"],
+                "model_reasoning_effort": luna["model_reasoning_effort"],
+            },
+            {
+                "name": "luna_worker",
+                "model": "gpt-5.6-luna",
+                "model_reasoning_effort": "max",
+            },
+        )
+        self.assertIsInstance(luna["description"], str)
+        self.assertIsInstance(luna["developer_instructions"], str)
+        self.assertIn("default execution worker", luna["description"])
+        self.assertIn(
+            "multi-step work across the explicitly allowed paths",
+            luna["developer_instructions"],
+        )
+        self.assertIn(
+            "Accept bounded follow-up correction packets",
+            luna["developer_instructions"],
+        )
+        self.assertIn("persistent execution worker for each parent task", luna["developer_instructions"])
+        self.assertIn("New packets do not inherit the previous packet's write permissions", luna["developer_instructions"])
+        self.assertIn("Do not create child agents for ordinary packets", luna["developer_instructions"])
+        self.assertNotIn("sandbox_mode", luna)
+        self.assertNotIn("approval_policy", luna)
         self.assertEqual(config_toml.read_bytes(), b"[features]\nhooks = true\n")
         self.assertEqual(override.read_bytes(), b"existing override\n")
 
@@ -138,6 +205,7 @@ class GlobalInstallTests(unittest.TestCase):
             install_dir / "install-state.json",
             install_dir / "backups" / "hooks.json.original",
             install_dir / "backups" / "agents.md.original",
+            luna_path,
         ):
             self.assertTrue(path.is_file(), path)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600, path)
@@ -149,7 +217,33 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(agents_path.read_bytes(), agents_original)
         self.assertEqual(stat.S_IMODE(hooks_path.stat().st_mode), 0o640)
         self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), 0o644)
+        self.assertFalse(luna_path.exists())
         self.assertTrue(install_dir.is_dir())
+
+    def test_existing_luna_agent_and_unrelated_agents_are_preserved_and_restored(self):
+        agents_dir = self.codex_home / "agents"
+        agents_dir.mkdir(mode=0o750)
+        luna_path = agents_dir / "luna-worker.toml"
+        other_path = agents_dir / "keep.toml"
+        original_luna = b'name = "personal_luna"\n'
+        original_other = b'name = "keep"\n'
+        luna_path.write_bytes(original_luna)
+        other_path.write_bytes(original_other)
+        luna_path.chmod(0o640)
+        other_path.chmod(0o644)
+
+        installed = self.install()
+
+        self.assertTrue(installed.luna_agent_configured)
+        self.assertNotEqual(luna_path.read_bytes(), original_luna)
+        self.assertEqual(other_path.read_bytes(), original_other)
+        self.assertEqual(stat.S_IMODE(other_path.stat().st_mode), 0o644)
+
+        self.uninstall()
+
+        self.assertEqual(luna_path.read_bytes(), original_luna)
+        self.assertEqual(stat.S_IMODE(luna_path.stat().st_mode), 0o640)
+        self.assertEqual(other_path.read_bytes(), original_other)
 
     def test_hook_command_is_isolated_and_preflighted_before_managed_writes(self):
         from codex_router.state import RouterStateError
@@ -196,7 +290,7 @@ class GlobalInstallTests(unittest.TestCase):
         )
 
     def test_interrupted_install_resumes_after_each_managed_write(self):
-        for write_number in (1, 2):
+        for write_number in (1, 2, 3):
             with self.subTest(write_number=write_number):
                 self.reset_case(f"resume-after-{write_number}")
                 hooks_path = self.codex_home / "hooks.json"
@@ -222,7 +316,7 @@ class GlobalInstallTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), 0o644)
 
     def test_interrupted_install_can_roll_back_without_completing(self):
-        for write_number in (1, 2):
+        for write_number in (1, 2, 3):
             with self.subTest(write_number=write_number):
                 self.reset_case(f"rollback-after-{write_number}")
                 hooks_path = self.codex_home / "hooks.json"
@@ -272,29 +366,300 @@ class GlobalInstallTests(unittest.TestCase):
         agents_path = self.codex_home / "AGENTS.md"
         self.assertTrue(hooks_path.is_file())
         self.assertTrue(agents_path.is_file())
+        luna_path = self.codex_home / "agents" / "luna-worker.toml"
+        self.assertTrue(luna_path.is_file())
 
         self.uninstall()
 
         self.assertFalse(hooks_path.exists())
         self.assertFalse(agents_path.exists())
+        self.assertFalse(luna_path.exists())
         self.assertTrue((self.codex_home / ".codex-router-policy-v1").is_dir())
 
     def test_repeated_install_and_uninstall_are_idempotent(self):
         first = self.install()
         hooks_once = (self.codex_home / "hooks.json").read_bytes()
         agents_once = (self.codex_home / "AGENTS.md").read_bytes()
+        luna_once = (self.codex_home / "agents" / "luna-worker.toml").read_bytes()
 
         second = self.install()
 
         self.assertEqual(second.state, "installed")
         self.assertEqual((self.codex_home / "hooks.json").read_bytes(), hooks_once)
         self.assertEqual((self.codex_home / "AGENTS.md").read_bytes(), agents_once)
+        self.assertEqual(
+            (self.codex_home / "agents" / "luna-worker.toml").read_bytes(),
+            luna_once,
+        )
         hooks = json.loads(hooks_once)
         self.assertEqual(len(hooks["hooks"]["UserPromptSubmit"]), 1)
         self.assertEqual((first.hook_configured, second.hook_configured), (True, True))
 
         self.assertEqual(self.uninstall().state, "uninstalled")
         self.assertEqual(self.uninstall().state, "uninstalled")
+
+    def test_installed_policy_refresh_preserves_user_agents_content_and_restores_it(self):
+        import codex_router.global_install as global_install_module
+
+        agents_path = self.codex_home / "AGENTS.md"
+        agents_original = b"# User guidance before refresh\nKeep this line.\n"
+        agents_path.write_bytes(agents_original)
+        agents_path.chmod(0o644)
+        self.install_legacy_policy_fixture()
+
+        user_agents = b"# User guidance after refresh\nKeep this edited line.\n"
+        installed_agents = agents_path.read_bytes()
+        marker = installed_agents.index(
+            global_install_module.AGENTS_BEGIN.encode("utf-8")
+        )
+        agents_path.write_bytes(
+            user_agents
+            + b"\n"
+            + installed_agents[marker:]
+        )
+        user_mode = stat.S_IMODE(agents_path.stat().st_mode)
+
+        refreshed = self.install()
+
+        self.assertEqual(refreshed.state, "installed")
+        self.assertEqual(
+            agents_path.read_bytes(),
+            user_agents
+            + b"\n"
+            + global_install_module.AGENTS_BLOCK.encode("utf-8"),
+        )
+        self.assertIn(
+            global_install_module.AGENTS_BLOCK.strip(),
+            agents_path.read_text(encoding="utf-8"),
+        )
+        self.assertTrue(
+            agents_path.read_text(encoding="utf-8").startswith(
+                user_agents.decode("utf-8")
+            )
+        )
+        luna = tomllib.loads(
+            (self.codex_home / "agents" / "luna-worker.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIn(
+            global_install_module._LUNA_DEVELOPER_INSTRUCTIONS,
+            luna["developer_instructions"],
+        )
+        state = json.loads(
+            (
+                self.codex_home
+                / ".codex-router-policy-v1"
+                / "install-state.json"
+            ).read_text(encoding="utf-8")
+        )
+        for record in state["targets"].values():
+            self.assertFalse(any(key.startswith("upgrade_") for key in record))
+
+        self.assertEqual(self.uninstall().state, "uninstalled")
+        self.assertEqual(agents_path.read_bytes(), user_agents)
+        self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), user_mode)
+
+    def test_installed_policy_refreshes_unchanged_targets_when_strategy_changes(self):
+        import codex_router.global_install as global_install_module
+
+        agents_path = self.codex_home / "AGENTS.md"
+        agents_original = b"# Unchanged target original\n"
+        agents_path.write_bytes(agents_original)
+        self.install_legacy_policy_fixture()
+        old_agents = agents_path.read_bytes()
+        old_luna = (self.codex_home / "agents" / "luna-worker.toml").read_bytes()
+
+        refreshed = self.install()
+
+        self.assertEqual(refreshed.state, "installed")
+        self.assertNotEqual(agents_path.read_bytes(), old_agents)
+        self.assertIn(
+            global_install_module.AGENTS_BLOCK.strip(),
+            agents_path.read_text(encoding="utf-8"),
+        )
+        self.assertNotIn(
+            "Legacy Router policy before refresh.",
+            agents_path.read_text(encoding="utf-8"),
+        )
+        luna_path = self.codex_home / "agents" / "luna-worker.toml"
+        self.assertNotEqual(luna_path.read_bytes(), old_luna)
+        luna = tomllib.loads(luna_path.read_text(encoding="utf-8"))
+        self.assertIn(
+            global_install_module._LUNA_DEVELOPER_INSTRUCTIONS,
+            luna["developer_instructions"],
+        )
+
+        self.assertEqual(self.uninstall().state, "uninstalled")
+        self.assertEqual(agents_path.read_bytes(), agents_original)
+        self.assertFalse(luna_path.exists())
+
+    def test_refresh_rejects_non_reversible_agents_separator_boundary(self):
+        from codex_router.state import RouterStateError
+
+        agents_path = self.codex_home / "AGENTS.md"
+        agents_original = b"# Separator original\n"
+        agents_path.write_bytes(agents_original)
+        self.install_legacy_policy_fixture()
+        installed_agents = agents_path.read_bytes()
+        marker = installed_agents.index(b"# BEGIN CODEX ROUTER GLOBAL POLICY V1")
+        # The old original ends in a newline, but this edited prefix provides
+        # only that one newline before the old Router block. Re-appending the
+        # block with the canonical installer rule would require two newlines.
+        agents_path.write_bytes(b"# Edited prefix\n" + installed_agents[marker:])
+        hooks_before = (self.codex_home / "hooks.json").read_bytes()
+        agents_before = agents_path.read_bytes()
+        luna_path = self.codex_home / "agents" / "luna-worker.toml"
+        luna_before = luna_path.read_bytes()
+        state_path = self.codex_home / ".codex-router-policy-v1" / "install-state.json"
+        state_before = state_path.read_bytes()
+
+        with self.assertRaises(RouterStateError) as raised:
+            self.install()
+
+        self.assertEqual(raised.exception.code, "conflict")
+        self.assertEqual((self.codex_home / "hooks.json").read_bytes(), hooks_before)
+        self.assertEqual(agents_path.read_bytes(), agents_before)
+        self.assertEqual(luna_path.read_bytes(), luna_before)
+        self.assertEqual(state_path.read_bytes(), state_before)
+
+    def test_interrupted_installed_policy_refresh_resumes_and_uninstalls_exactly(self):
+        agents_path = self.codex_home / "AGENTS.md"
+        agents_path.write_bytes(b"# Refresh interruption user content\n")
+        agents_path.chmod(0o640)
+        self.install_legacy_policy_fixture()
+        user_agents = b"# Refresh interruption edited content\n"
+        installed_agents = agents_path.read_bytes()
+        marker = installed_agents.index(b"# BEGIN CODEX ROUTER GLOBAL POLICY V1")
+        agents_path.write_bytes(user_agents + b"\n" + installed_agents[marker:])
+        user_mode = stat.S_IMODE(agents_path.stat().st_mode)
+
+        self.crash_install_after_managed_write(1)
+
+        self.assertEqual(self.status().state, "partial")
+        resumed = self.install()
+        self.assertEqual(resumed.state, "installed")
+        self.assertEqual(self.uninstall().state, "uninstalled")
+        self.assertEqual(agents_path.read_bytes(), user_agents)
+        self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), user_mode)
+
+    def test_interrupted_installed_policy_refresh_can_uninstall_without_resume(self):
+        agents_path = self.codex_home / "AGENTS.md"
+        agents_path.write_bytes(b"# Refresh rollback user content\n")
+        agents_path.chmod(0o640)
+        self.install_legacy_policy_fixture()
+        user_agents = b"# Refresh rollback edited content\n"
+        installed_agents = agents_path.read_bytes()
+        marker = installed_agents.index(b"# BEGIN CODEX ROUTER GLOBAL POLICY V1")
+        agents_path.write_bytes(user_agents + b"\n" + installed_agents[marker:])
+        user_mode = stat.S_IMODE(agents_path.stat().st_mode)
+        luna_path = self.codex_home / "agents" / "luna-worker.toml"
+
+        self.crash_install_after_managed_write(1)
+
+        self.assertEqual(self.status().state, "partial")
+        uninstalled = self.uninstall()
+        self.assertEqual(uninstalled.state, "uninstalled")
+        self.assertEqual(agents_path.read_bytes(), user_agents)
+        self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), user_mode)
+        self.assertFalse(luna_path.exists())
+        state = json.loads(
+            (
+                self.codex_home
+                / ".codex-router-policy-v1"
+                / "install-state.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["phase"], "uninstalled")
+        for record in state["targets"].values():
+            self.assertFalse(any(key.startswith("upgrade_") for key in record))
+
+    def test_installed_user_edit_without_strategy_change_still_fails_closed(self):
+        from codex_router.state import RouterStateError
+
+        agents_path = self.codex_home / "AGENTS.md"
+        agents_path.write_bytes(b"# Stable strategy user content\n")
+        self.install()
+        installed_agents = agents_path.read_bytes()
+        marker = installed_agents.index(b"# BEGIN CODEX ROUTER GLOBAL POLICY V1")
+        agents_path.write_bytes(
+            b"# Stable strategy user edit\n\n" + installed_agents[marker:]
+        )
+        before_state = (
+            self.codex_home
+            / ".codex-router-policy-v1"
+            / "install-state.json"
+        ).read_bytes()
+
+        with self.assertRaises(RouterStateError) as raised:
+            self.install()
+
+        self.assertEqual(raised.exception.code, "conflict")
+        self.assertEqual(
+            (
+                self.codex_home
+                / ".codex-router-policy-v1"
+                / "install-state.json"
+            ).read_bytes(),
+            before_state,
+        )
+
+    def test_installed_policy_refresh_rejects_tampered_old_management_targets(self):
+        import codex_router.global_install as global_install_module
+        from codex_router.state import RouterStateError
+
+        for target in ("agents", "luna"):
+            with self.subTest(target=target):
+                self.reset_case(f"refresh-tamper-{target}")
+                agents_path = self.codex_home / "AGENTS.md"
+                agents_path.write_bytes(b"# Tamper test user content\n")
+                luna_path = self.codex_home / "agents" / "luna-worker.toml"
+                self.install_legacy_policy_fixture()
+                hooks_before = (self.codex_home / "hooks.json").read_bytes()
+                agents_before = agents_path.read_bytes()
+                luna_before = luna_path.read_bytes()
+                state_before = (
+                    self.codex_home
+                    / ".codex-router-policy-v1"
+                    / "install-state.json"
+                ).read_bytes()
+
+                if target == "agents":
+                    agents_path.write_bytes(
+                        agents_before.replace(
+                            b"Legacy Router policy before refresh.",
+                            b"Tampered Router policy before refresh.",
+                        )
+                    )
+                else:
+                    luna_path.write_bytes(
+                        luna_before.replace(
+                            b"Legacy Luna developer instructions before refresh.",
+                            b"Tampered Luna developer instructions before refresh.",
+                        )
+                    )
+
+                hooks_before_attempt = (self.codex_home / "hooks.json").read_bytes()
+                agents_before_attempt = agents_path.read_bytes()
+                luna_before_attempt = luna_path.read_bytes()
+                with self.assertRaises(RouterStateError) as raised:
+                    self.install()
+
+                self.assertEqual(raised.exception.code, "conflict")
+                self.assertEqual(
+                    (self.codex_home / "hooks.json").read_bytes(),
+                    hooks_before_attempt,
+                )
+                self.assertEqual(agents_path.read_bytes(), agents_before_attempt)
+                self.assertEqual(luna_path.read_bytes(), luna_before_attempt)
+                self.assertEqual(
+                    (
+                        self.codex_home
+                        / ".codex-router-policy-v1"
+                        / "install-state.json"
+                    ).read_bytes(),
+                    state_before,
+                )
 
     def test_malformed_symlink_and_conflicting_markers_fail_without_overwrite(self):
         from codex_router.state import RouterStateError
@@ -380,11 +745,13 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(installed_payload["state"], "installed")
         self.assertEqual(installed_payload["hook_trust"], "requires-user-check")
         self.assertTrue(installed_payload["new_session_required"])
+        self.assertTrue(installed_payload["luna_agent_configured"])
         self.assertNotIn("secret", installed.stdout.lower())
 
         status = self.cli("global-status", "--codex-home", str(self.codex_home))
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertEqual(json.loads(status.stdout)["state"], "installed")
+        self.assertTrue(json.loads(status.stdout)["luna_agent_configured"])
 
         uninstalled = self.cli(
             "global-uninstall", "--codex-home", str(self.codex_home)
@@ -402,6 +769,48 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(config["role_config"]["local_sol"]["requested_reasoning"], "max")
         self.assertEqual(config["role_config"]["web_sol"]["reasoning_claimed"], "xhigh")
         self.assertEqual(config["role_config"]["luna"]["requested_reasoning"], "max")
+
+    def test_uninstalled_legacy_two_target_state_reinstalls_with_luna_agent(self):
+        self.install()
+        self.uninstall()
+        state_path = (
+            self.codex_home / ".codex-router-policy-v1" / "install-state.json"
+        )
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["targets"].pop("agents/luna-worker.toml")
+        state_path.write_text(
+            json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            + "\n",
+            encoding="utf-8",
+        )
+        state_path.chmod(0o600)
+
+        reinstalled = self.install()
+
+        self.assertEqual(reinstalled.state, "installed")
+        self.assertTrue(reinstalled.luna_agent_configured)
+        self.assertTrue((self.codex_home / "agents" / "luna-worker.toml").is_file())
+
+    def test_modified_luna_agent_blocks_uninstall_before_any_restore(self):
+        hooks_path = self.codex_home / "hooks.json"
+        agents_path = self.codex_home / "AGENTS.md"
+        hooks_path.write_bytes(b"{}\n")
+        agents_path.write_bytes(b"original agents\n")
+        self.install()
+        installed_hooks = hooks_path.read_bytes()
+        installed_agents = agents_path.read_bytes()
+        luna_path = self.codex_home / "agents" / "luna-worker.toml"
+        luna_path.write_text('name = "changed"\n', encoding="utf-8")
+
+        from codex_router.state import RouterStateError
+
+        with self.assertRaises(RouterStateError) as raised:
+            self.uninstall()
+
+        self.assertEqual(raised.exception.code, "conflict")
+        self.assertEqual(hooks_path.read_bytes(), installed_hooks)
+        self.assertEqual(agents_path.read_bytes(), installed_agents)
+        self.assertEqual(luna_path.read_text(encoding="utf-8"), 'name = "changed"\n')
 
     def test_modified_installed_file_blocks_uninstall_before_any_restore(self):
         from codex_router.state import RouterStateError
@@ -475,6 +884,25 @@ class GlobalInstallTests(unittest.TestCase):
                 with self.assertRaises(RouterStateError):
                     global_install(**arguments)
                 self.assertFalse((self.codex_home / ".codex-router-policy-v1").exists())
+
+    def test_symlinked_agents_directory_is_rejected_without_external_writes(self):
+        from codex_router.state import RouterStateError
+
+        external_agents = self.root / "external-agents"
+        external_agents.mkdir()
+        sentinel = external_agents / "keep.toml"
+        sentinel.write_bytes(b'name = "keep"\n')
+        (self.codex_home / "agents").symlink_to(
+            external_agents, target_is_directory=True
+        )
+
+        with self.assertRaises(RouterStateError) as raised:
+            self.install()
+
+        self.assertEqual(raised.exception.code, "conflict")
+        self.assertEqual(sentinel.read_bytes(), b'name = "keep"\n')
+        self.assertFalse((external_agents / "luna-worker.toml").exists())
+        self.assertFalse((self.codex_home / ".codex-router-policy-v1").exists())
 
 
 if __name__ == "__main__":
