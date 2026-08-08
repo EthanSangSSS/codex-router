@@ -161,6 +161,17 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertIn("Capacity exhaustion does not authorize Sol takeover", managed_agents)
         self.assertIn("completed non-Luna", managed_agents)
         self.assertIn("BLOCKED_LUNA_CAPACITY", managed_agents)
+        for required_policy in (
+            "Only the primary Codex task may create agents",
+            "Luna and all other child agents must not create descendants",
+            "create the initial Luna with a self-contained packet and no conversation history",
+            "reuse the same Luna for all later packets",
+            "Never use a relay for Luna capacity recovery",
+        ):
+            with self.subTest(required_policy=required_policy):
+                self.assertIn(required_policy, managed_agents)
+        with self.subTest(required_policy="no pure relay"):
+            self.assertNotIn("pure relay", managed_agents)
         self.assertIn("packet id", managed_agents)
         self.assertIn("latest explicit boundary", managed_agents)
         luna_path = self.codex_home / "agents" / "luna-worker.toml"
@@ -179,6 +190,8 @@ class GlobalInstallTests(unittest.TestCase):
         )
         self.assertIsInstance(luna["description"], str)
         self.assertIsInstance(luna["developer_instructions"], str)
+        with self.subTest(luna_contract="recursive delegation disabled"):
+            self.assertIs(luna.get("agents", {}).get("enabled"), False)
         self.assertIn("default execution worker", luna["description"])
         self.assertIn(
             "multi-step work across the explicitly allowed paths",
@@ -190,7 +203,18 @@ class GlobalInstallTests(unittest.TestCase):
         )
         self.assertIn("persistent execution worker for each parent task", luna["developer_instructions"])
         self.assertIn("New packets do not inherit the previous packet's write permissions", luna["developer_instructions"])
-        self.assertIn("Do not create child agents for ordinary packets", luna["developer_instructions"])
+        with self.subTest(luna_contract="absolute descendant prohibition"):
+            self.assertIn(
+                "Never create, spawn, fork, relay, resume, or delegate any child or descendant agent",
+                luna["developer_instructions"],
+            )
+        with self.subTest(luna_contract="bounded recursive delegation blocker"):
+            self.assertIn(
+                "BLOCKED_LUNA_RECURSIVE_DELEGATION",
+                luna["developer_instructions"],
+            )
+        with self.subTest(luna_contract="no soft ordinary-packet qualifier"):
+            self.assertNotIn("ordinary packets", luna["developer_instructions"])
         self.assertNotIn("sandbox_mode", luna)
         self.assertNotIn("approval_policy", luna)
         self.assertEqual(config_toml.read_bytes(), b"[features]\nhooks = true\n")
