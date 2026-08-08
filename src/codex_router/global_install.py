@@ -71,10 +71,10 @@ Honor `[CODEX_ROUTER_POLICY_V1]` hook context exactly:
 - `direct` and `bypass` run only the current turn locally.
 - For `route`, show `Router: active`. Sol plans, decomposes, and reviews; delegate every executable work packet with explicit scope and acceptance criteria to `luna_worker` by default.
 - Sol may send multiple sequential work packets or bounded correction packets to Luna. Keep one writable executor per file set and never run conflicting writes concurrently.
-- Each parent Codex task may create at most one persistent `luna_worker`; query the task tree before every packet and reuse that same Luna, including when it is completed or idle, instead of spawning a new Luna per packet.
-- Before creating any helper non-Luna child Agent, ensure the persistent Luna exists and preserve capacity for it.
-- Capacity exhaustion does not authorize Sol takeover. On Luna capacity exhaustion, reuse the existing Luna; if the interface supports it, close an unused completed non-Luna Agent; then try a completed Agent as a pure relay to create the real Luna descendant; if that still fails, return `BLOCKED_LUNA_CAPACITY`.
-- A relay is only a capacity handoff and must not execute project work.
+- Only the primary Codex task may create agents. Luna and all other child agents must not create descendants.
+- Each parent Codex task may create at most one persistent `luna_worker`; query the task tree before every packet. When the interface supports it, create the initial Luna with a self-contained packet and no conversation history; reuse the same Luna for all later packets, including when it is completed or idle.
+- Before creating any helper non-Luna child Agent, the primary Codex task must ensure the persistent Luna exists and preserve capacity for it.
+- Capacity exhaustion does not authorize Sol takeover. On Luna capacity exhaustion, reuse the existing Luna; if the interface supports it, close an unused completed non-Luna Agent; otherwise return `BLOCKED_LUNA_CAPACITY`. Never use a relay for Luna capacity recovery.
 - Every new Luna delegation must restate its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output; the previous packet's path authorization expires automatically, and Luna obeys only the latest explicit boundary. Keep one writable executor for that file set.
 - Sol takes over writable execution only for `direct`/`bypass`, an architecture decision that cannot yet be safely decomposed, or a non-capacity Luna execution blocker; capacity exhaustion is never a takeover reason and every permitted takeover must disclose its reason.
 - Luna must not browse, operate Web Sol, access authentication or secrets, or commit, push, open a PR, install, deploy, or broaden scope.
@@ -92,9 +92,10 @@ _LUNA_DEVELOPER_INSTRUCTIONS = """You are the default execution worker for plann
 
 Operating rules:
 - Remain the persistent execution worker for each parent task and accept multiple sequential follow-up or correction packets through the same Luna identity.
-- Before each packet, the parent must query the task tree and reuse this Luna when it is already present, including completed or idle states; do not spawn a new Luna for an ordinary packet.
+- Before each packet, the parent must query the task tree and reuse this Luna when it is already present, including completed or idle states; never create a replacement Luna.
 - New packets do not inherit the previous packet's write permissions. Obey only the latest explicit boundary, including its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output.
-- Do not create child agents for ordinary packets. The parent must reserve Luna capacity before creating any helper non-Luna Agent.
+- Never create, spawn, fork, relay, resume, or delegate any child or descendant agent. Do not ask or instruct another agent to do so on your behalf.
+- If a packet requires recursive delegation or cannot be completed independently without it, stop and return `BLOCKED_LUNA_RECURSIVE_DELEGATION`.
 - Inherit the parent task's effective sandbox and approval controls; never request or add overrides.
 - Work only on the exact task delegated by the parent agent.
 - Treat the parent's allowed paths as a hard write boundary and preserve every unrelated file and behavior.
@@ -480,14 +481,17 @@ def _luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
     rendered = "".join(
         f"{key} = {json.dumps(value, ensure_ascii=False)}\n"
         for key, value in values.items()
-    ).encode("utf-8")
+    )
+    rendered += "\n[agents]\nenabled = false\n"
+    encoded = rendered.encode("utf-8")
     try:
-        parsed = tomllib.loads(rendered.decode("utf-8"))
+        parsed = tomllib.loads(encoded.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise _error("conflict", "generated Luna agent configuration is invalid") from error
-    if parsed != values:
+    expected = {**values, "agents": {"enabled": False}}
+    if parsed != expected:
         raise _error("conflict", "generated Luna agent configuration is unstable")
-    return rendered
+    return encoded
 
 
 def _luna_agent_matches(content: bytes | None, role: Mapping[str, Any]) -> bool:
@@ -1882,7 +1886,9 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
                 "requested_reasoning"
             ],
             "luna_lifecycle": "persistent_per_parent_task",
-            "capacity_failure_policy": "reuse_close_relay_or_block",
+            "capacity_failure_policy": "reuse_close_or_block",
+            "luna_descendant_policy": "forbidden",
+            "initial_context_mode": "packet_only",
             "web_mode": "manual_operator",
         }
 

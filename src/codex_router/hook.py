@@ -171,7 +171,9 @@ def handle_user_prompt(
             "luna_model": luna["requested_model"],
             "luna_reasoning": luna["requested_reasoning"],
             "luna_lifecycle": "persistent_per_parent_task",
-            "capacity_failure_policy": "reuse_close_relay_or_block",
+            "capacity_failure_policy": "reuse_close_or_block",
+            "luna_descendant_policy": "forbidden",
+            "initial_context_mode": "packet_only",
             "web_mode": "manual_operator",
         }
     )

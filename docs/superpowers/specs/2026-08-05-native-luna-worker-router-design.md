@@ -31,18 +31,28 @@ Its identity and model contract are:
 name = "luna_worker"
 model = "gpt-5.6-luna"
 model_reasoning_effort = "max"
+
+[agents]
+enabled = false
 ```
 
 The file intentionally omits `sandbox_mode`, approval policy, MCP, and skill
 overrides so the child inherits the parent task's effective controls. Its
 instructions require bounded scope, evidence-first work, no browser or Web Sol
 operation, no authentication access, and no GitHub/install/release mutations.
+The `[agents]` gate mechanically disables Luna's multi-Agent tools. Luna must
+never create, spawn, fork, relay, resume, or delegate a child or descendant; a
+packet that requires recursive delegation returns
+`BLOCKED_LUNA_RECURSIVE_DELEGATION`.
 
 Luna is the default execution owner for every routed work packet that Sol can
 state with explicit scope and acceptance criteria. Each parent Codex task has
-at most one persistent `luna_worker`; Sol queries the task tree before every
-packet and follows up with the existing Luna, including when it is completed or
-idle. It may inspect, edit, test, and correct multiple files inside the
+at most one persistent `luna_worker`; only the primary Codex task may create an
+Agent, and Luna or any other child may not create descendants. Sol queries the
+task tree before every packet. When the interface supports it, the initial Luna
+is created from a self-contained packet with no conversation history; later
+packets follow up with the same Luna, including when it is completed or idle.
+It may inspect, edit, test, and correct multiple files inside the
 delegated boundary. During execution, Luna is the sole writer for that file set
 until it returns. Sol remains the coordinator and final decision-maker.
 
@@ -65,7 +75,9 @@ expires automatically, and Luna obeys only the latest explicit boundary.
   "luna_model": "gpt-5.6-luna",
   "luna_reasoning": "max",
   "luna_lifecycle": "persistent_per_parent_task",
-  "capacity_failure_policy": "reuse_close_relay_or_block",
+  "capacity_failure_policy": "reuse_close_or_block",
+  "luna_descendant_policy": "forbidden",
+  "initial_context_mode": "packet_only",
   "web_mode": "manual_operator"
 }
 ```
@@ -84,9 +96,8 @@ sends a bounded correction packet back to the same Luna.
 
 Luna capacity exhaustion never authorizes Sol to take over. The ordered
 fallback is: reuse the existing Luna; if the interface supports it, close an
-unused completed non-Luna Agent; try a completed Agent as a pure relay to create
-the real Luna descendant; and, if that still fails, return
-`BLOCKED_LUNA_CAPACITY`. A relay performs no project work. Only `direct` or
+unused completed non-Luna Agent; otherwise return `BLOCKED_LUNA_CAPACITY`.
+Relay-based recovery is forbidden. Only `direct` or
 `bypass`, an unresolved architecture decision that cannot be safely decomposed,
 or a non-capacity Luna execution blocker permits a bounded Sol takeover, which
 must disclose its reason.
@@ -99,12 +110,15 @@ concurrent writes to the same file set are not.
 
 Every delegation packet states objective, readable and writable paths,
 forbidden actions, validation, stop conditions, and required output. Luna never
-decides workflow transitions, creates child Agents for ordinary packets, or
-performs Web work. The Hook context records `sol_role=plan_review`,
+decides workflow transitions, creates descendants, or performs Web work. Its
+multi-Agent tools are mechanically disabled, and recursive work fails with
+`BLOCKED_LUNA_RECURSIVE_DELEGATION`. The Hook context records `sol_role=plan_review`,
 `luna_role=default_execution`, `delegation_mode=sequential_work_packets`,
 `luna_lifecycle=persistent_per_parent_task`, and
-`capacity_failure_policy=reuse_close_relay_or_block` so a new task does not
-depend on conversation memory for this ownership split.
+`capacity_failure_policy=reuse_close_or_block`,
+`luna_descendant_policy=forbidden`, and `initial_context_mode=packet_only` so
+the initial packet is self-contained and this ownership split does not depend
+on conversation memory.
 
 ## Installer ownership and recovery
 
@@ -130,8 +144,9 @@ No live migration is performed during this code implementation pass.
 
 Offline tests must prove Hook statelessness, exact Luna TOML semantics,
 preservation and recovery of pre-existing user files, subprocess Hook protocol,
-the persistent-per-parent and relay-or-block policy, no configured-state
-pollution, and legacy CLI/fake compatibility.
+the persistent-per-parent reuse/close/block policy, mechanical descendant-agent
+disablement, packet-only initial context, no configured-state pollution, and
+legacy CLI/fake compatibility.
 
 The current account is deactivated. Offline configuration can be validated,
 but actual Luna availability, account authorization, token consumption, and a

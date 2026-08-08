@@ -92,10 +92,10 @@
 - [x] Add failing Hook assertions for `sol_role=plan_review`, `luna_role=default_execution`, and `delegation_mode=sequential_work_packets`.
 - [x] Add failing installer assertions that Sol delegates executable work by default, may send multiple sequential packets, and takes over only under bounded exceptions.
 - [x] Run focused tests and confirm they fail because the new ownership contract is absent.
-- [x] Add the minimal Hook fields and update the managed AGENTS and Luna instructions without adding sandbox or approval overrides.
-- [x] Encode `luna_lifecycle=persistent_per_parent_task` and `capacity_failure_policy=reuse_close_relay_or_block` in routed Hook context.
-- [x] Require task-tree reuse of an existing Luna, fresh packet boundaries, and no ordinary Luna child spawning.
-- [x] Require capacity reuse, optional completed non-Luna closure, pure relay, or `BLOCKED_LUNA_CAPACITY`; never allow capacity exhaustion to authorize Sol takeover.
+- [x] Add the minimal Hook fields and update the managed AGENTS and Luna instructions, including `[agents].enabled=false`, without adding sandbox or approval overrides.
+- [x] Encode `luna_lifecycle=persistent_per_parent_task`, `capacity_failure_policy=reuse_close_or_block`, `luna_descendant_policy=forbidden`, and `initial_context_mode=packet_only` in routed Hook context.
+- [x] Require only the primary Codex task to create agents; create the initial Luna from a self-contained packet with no conversation history, then reuse the same Luna across packets; forbid Luna and other child-agent descendants.
+- [x] Require capacity reuse, optional completed non-Luna closure, or `BLOCKED_LUNA_CAPACITY`; forbid relay recovery and never allow capacity exhaustion to authorize Sol takeover.
 - [x] Update the README description and acceptance checks.
 - [x] Run focused tests, the complete Python 3.12 suite, `compileall`, and `git diff --check`.
 - [x] Reinstall through the project installer, then verify the live Hook, managed AGENTS block, and Luna TOML without starting a model or browser.
