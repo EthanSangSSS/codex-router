@@ -21,6 +21,7 @@ from .hook import (
     GLOBAL_CONFIG_PROTOCOL,
     HOOK_CONTEXT_PREFIX,
     HOOK_CONTEXT_PROTOCOL,
+    agent_spawn_denial,
 )
 from .protocol import canonical_json_bytes
 from .state import RouterStateError
@@ -30,6 +31,11 @@ from .types import GlobalStatus
 INSTALL_DIRECTORY_NAME = ".codex-router-policy-v1"
 INSTALL_STATE_PROTOCOL = "codex-router/global-install-state/v1"
 HOOK_MARKER = "codex-router-global-policy-v1"
+AGENT_SPAWN_MATCHER = "^(Agent|spawn_agent)$"
+_PROMPT_HOOK_COMMAND = "hook-user-prompt"
+_AGENT_SPAWN_HOOK_COMMAND = "hook-agent-spawn"
+_PROMPT_STATUS_MESSAGE = f"Routing with Codex Router [{HOOK_MARKER}]"
+_AGENT_SPAWN_STATUS_MESSAGE = f"Guarding Agent spawn with Codex Router [{HOOK_MARKER}]"
 AGENTS_BEGIN = "# BEGIN CODEX ROUTER GLOBAL POLICY V1"
 AGENTS_END = "# END CODEX ROUTER GLOBAL POLICY V1"
 _IDENTITY_FILE_NAME = "installation-" + "sec" + "ret"
@@ -73,8 +79,11 @@ Honor `[CODEX_ROUTER_POLICY_V1]` hook context exactly:
 - Sol may send multiple sequential work packets or bounded correction packets to Luna. Keep one writable executor per file set and never run conflicting writes concurrently.
 - Only the primary Codex task may create agents. Luna and all other child agents must not create descendants.
 - Each parent Codex task may create at most one persistent `luna_worker`; query the task tree before every packet. When the interface supports it, create the initial Luna with a self-contained packet and no conversation history; reuse the same Luna for all later packets, including when it is completed or idle.
-- Before creating any helper non-Luna child Agent, the primary Codex task must ensure the persistent Luna exists and preserve capacity for it.
-- Capacity exhaustion does not authorize Sol takeover. On Luna capacity exhaustion, reuse the existing Luna; if the interface supports it, close an unused completed non-Luna Agent; otherwise return `BLOCKED_LUNA_CAPACITY`. Never use a relay for Luna capacity recovery.
+- The first and only child Agent permitted by Router policy is one persistent `luna_worker`.
+- Capacity exhaustion does not authorize Sol takeover. On Luna capacity exhaustion, reuse the existing Luna; no recovery may depend on creating, closing, or relaying through a completed non-Luna child. Never use a relay for Luna capacity recovery.
+- Use `BLOCKED_LUNA_CAPACITY` only when visible open blockers exist.
+- Use `BLOCKED_LUNA_RUNTIME_CAPACITY_DESYNC` only when the Agent tree has no reusable Luna, a known Luna cannot be addressed, but `spawn_agent` reports capacity full.
+- Neither state authorizes Sol writable takeover or relay. Never archive the task as recovery. Router cannot repair Codex runtime capacity accounting.
 - Every new Luna delegation must restate its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output; the previous packet's path authorization expires automatically, and Luna obeys only the latest explicit boundary. Keep one writable executor for that file set.
 - Sol takes over writable execution only for `direct`/`bypass`, an architecture decision that cannot yet be safely decomposed, or a non-capacity Luna execution blocker; capacity exhaustion is never a takeover reason and every permitted takeover must disclose its reason.
 - Luna must not browse, operate Web Sol, access authentication or secrets, or commit, push, open a PR, install, deploy, or broaden scope.
@@ -561,7 +570,7 @@ def _hook_argv(installation_dir: Path) -> list[str]:
         "-P",
         "-m",
         "codex_router",
-        "hook-user-prompt",
+        _PROMPT_HOOK_COMMAND,
         "--installation-dir",
         str(installation_dir),
     ]
@@ -573,13 +582,39 @@ def _hook_handler(installation_dir: Path) -> dict[str, Any]:
         "type": "command",
         "command": command,
         "timeout": 10,
-        "statusMessage": f"Routing with Codex Router [{HOOK_MARKER}]",
+        "statusMessage": _PROMPT_STATUS_MESSAGE,
         "additionalContextLimit": 2500,
     }
 
 
+def _agent_spawn_argv() -> list[str]:
+    python_path = Path(sys.executable)
+    if not python_path.is_absolute():
+        raise _error("conflict", "Router hook Python must be absolute")
+    return [
+        str(python_path),
+        "-E",
+        "-P",
+        "-m",
+        "codex_router",
+        _AGENT_SPAWN_HOOK_COMMAND,
+    ]
+
+
+def _agent_spawn_hook_handler() -> dict[str, Any]:
+    return {
+        "type": "command",
+        "command": shlex.join(_agent_spawn_argv()),
+        "timeout": 10,
+        "statusMessage": _AGENT_SPAWN_STATUS_MESSAGE,
+    }
+
+
 def _handler_argv(
-    handler: Mapping[str, Any], *, expected_installation_dir: Path
+    handler: Mapping[str, Any],
+    *,
+    expected_installation_dir: Path,
+    expected_command: str = _PROMPT_HOOK_COMMAND,
 ) -> list[str]:
     command = handler.get("command")
     if not isinstance(command, str):
@@ -588,16 +623,27 @@ def _handler_argv(
         arguments = shlex.split(command, posix=True)
     except ValueError as error:
         raise _error("conflict", "Router hook command is invalid") from error
-    expected_tail = [
-        "-E",
-        "-P",
-        "-m",
-        "codex_router",
-        "hook-user-prompt",
-        "--installation-dir",
-        str(expected_installation_dir),
-    ]
-    if len(arguments) != 8 or arguments[1:] != expected_tail:
+    if expected_command == _PROMPT_HOOK_COMMAND:
+        expected_tail = [
+            "-E",
+            "-P",
+            "-m",
+            "codex_router",
+            _PROMPT_HOOK_COMMAND,
+            "--installation-dir",
+            str(expected_installation_dir),
+        ]
+    elif expected_command == _AGENT_SPAWN_HOOK_COMMAND:
+        expected_tail = [
+            "-E",
+            "-P",
+            "-m",
+            "codex_router",
+            _AGENT_SPAWN_HOOK_COMMAND,
+        ]
+    else:
+        raise _error("conflict", "Router hook command contract is unknown")
+    if len(arguments) != len(expected_tail) + 1 or arguments[1:] != expected_tail:
         raise _error("conflict", "Router hook command does not match its contract")
     python = Path(arguments[0])
     if not python.is_absolute():
@@ -617,10 +663,14 @@ def _handler_argv(
 
 
 def _invoke_hook_argv(
-    arguments: list[str], *, event: Mapping[str, Any], cwd: Path
+    arguments: list[str],
+    *,
+    event: Any,
+    cwd: Path,
+    require_empty: bool = False,
 ) -> dict[str, Any]:
     try:
-        encoded_event = canonical_json_bytes(dict(event)) + b"\n"
+        encoded_event = canonical_json_bytes(event) + b"\n"
         completed = subprocess.run(
             arguments,
             input=encoded_event,
@@ -641,9 +691,14 @@ def _invoke_hook_argv(
     if (
         completed.returncode != 0
         or completed.stderr
-        or not completed.stdout
         or len(completed.stdout) > _MAX_HOOK_PROBE_BYTES
     ):
+        raise _error("conflict", "Router hook command failed preflight")
+    if require_empty:
+        if completed.stdout != b"":
+            raise _error("conflict", "Router hook command failed preflight")
+        return {}
+    if not completed.stdout:
         raise _error("conflict", "Router hook command failed preflight")
     try:
         output = json.loads(completed.stdout)
@@ -654,8 +709,32 @@ def _invoke_hook_argv(
     return output
 
 
+def _agent_spawn_probe_event(*, agent_type: str = "luna_worker") -> dict[str, Any]:
+    return {
+        "hook_event_name": "PreToolUse",
+        "session_id": "synthetic-install-probe-session",
+        "transcript_path": None,
+        "cwd": "/private/tmp/codex-router-install-probe",
+        "model": "gpt-5.6-luna",
+        "permission_mode": "default",
+        "turn_id": "synthetic-install-probe-turn",
+        "tool_name": "spawn_agent",
+        "tool_use_id": "synthetic-install-probe-tool-use",
+        "tool_input": {
+            "agent_type": agent_type,
+            "message": "synthetic install probe",
+            "task_name": "synthetic_install_probe",
+            "fork_turns": "none",
+        },
+    }
+
+
 def _preflight_hook_handler(
-    handler: Mapping[str, Any], *, installation_dir: Path, cwd: Path
+    handler: Mapping[str, Any],
+    agent_handler: Mapping[str, Any],
+    *,
+    installation_dir: Path,
+    cwd: Path,
 ) -> None:
     arguments = _handler_argv(
         handler, expected_installation_dir=installation_dir
@@ -685,8 +764,42 @@ def _preflight_hook_handler(
     ):
         raise _error("conflict", "Router hook command failed preflight")
 
+    agent_arguments = _handler_argv(
+        agent_handler,
+        expected_installation_dir=installation_dir,
+        expected_command=_AGENT_SPAWN_HOOK_COMMAND,
+    )
+    allowed = _invoke_hook_argv(
+        agent_arguments,
+        event=_agent_spawn_probe_event(),
+        cwd=cwd,
+        require_empty=True,
+    )
+    if allowed != {}:
+        raise _error("conflict", "Router agent spawn hook failed preflight")
 
-def _install_hook(original: bytes | None, handler: Mapping[str, Any]) -> bytes:
+    denied = _invoke_hook_argv(
+        agent_arguments,
+        event=_agent_spawn_probe_event(agent_type="worker"),
+        cwd=cwd,
+    )
+    if denied != agent_spawn_denial():
+        raise _error("conflict", "Router agent spawn hook failed preflight")
+
+    malformed = _invoke_hook_argv(
+        agent_arguments,
+        event=[],
+        cwd=cwd,
+    )
+    if malformed != agent_spawn_denial():
+        raise _error("conflict", "Router agent spawn hook failed preflight")
+
+
+def _install_hook(
+    original: bytes | None,
+    handler: Mapping[str, Any],
+    agent_handler: Mapping[str, Any],
+) -> bytes:
     if original is None:
         document: dict[str, Any] = {}
     else:
@@ -698,10 +811,16 @@ def _install_hook(original: bytes | None, handler: Mapping[str, Any]) -> bytes:
             raise _error("conflict", "hooks.json must contain a JSON object")
     if any(
         HOOK_MARKER in value
-        or ("codex_router" in value and "hook-user-prompt" in value)
+        or (
+            "codex_router" in value
+            and any(
+                command in value
+                for command in (_PROMPT_HOOK_COMMAND, _AGENT_SPAWN_HOOK_COMMAND)
+            )
+        )
         for value in _walk_strings(document)
     ):
-        raise _error("conflict", "a conflicting Router hook marker already exists")
+        raise _error("conflict", "a conflicting Router hook marker or command exists")
     hooks = document.get("hooks")
     if hooks is None:
         hooks = {}
@@ -719,7 +838,26 @@ def _install_hook(original: bytes | None, handler: Mapping[str, Any]) -> bytes:
             raise _error("conflict", "UserPromptSubmit hook group is invalid")
         if any(not isinstance(item, Mapping) for item in group["hooks"]):
             raise _error("conflict", "UserPromptSubmit hook handler is invalid")
+
+    agent_groups = hooks.get("PreToolUse")
+    if agent_groups is None:
+        agent_groups = []
+        hooks["PreToolUse"] = agent_groups
+    if not isinstance(agent_groups, list):
+        raise _error("conflict", "PreToolUse hook groups are invalid")
+    for group in agent_groups:
+        if not isinstance(group, Mapping) or not isinstance(group.get("hooks"), list):
+            raise _error("conflict", "PreToolUse hook group is invalid")
+        if any(not isinstance(item, Mapping) for item in group["hooks"]):
+            raise _error("conflict", "PreToolUse hook handler is invalid")
+
     prompt_groups.append({"hooks": [deepcopy(dict(handler))]})
+    agent_groups.append(
+        {
+            "matcher": AGENT_SPAWN_MATCHER,
+            "hooks": [deepcopy(dict(agent_handler))],
+        }
+    )
     return (
         json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
         + b"\n"
@@ -960,8 +1098,9 @@ def _installed_state_matches(
 
 def _install_plan(
     *, home: Path, installation_dir: Path, state: Mapping[str, Any]
-) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, dict[str, Any]]]:
     handler = _hook_handler(installation_dir)
+    agent_handler = _agent_spawn_hook_handler()
     config = _private_json(installation_dir / "config.json")
     role_config = _validate_defaults(config.get("role_config"))
     plan: dict[str, dict[str, Any]] = {}
@@ -972,7 +1111,7 @@ def _install_plan(
         original = _target_original(installation_dir, name, record)
         raw_original = None if original is _MISSING else original
         if name == "hooks.json":
-            installed = _install_hook(raw_original, handler)
+            installed = _install_hook(raw_original, handler, agent_handler)
         elif name == "AGENTS.md":
             installed = _install_agents(raw_original)
         else:
@@ -994,7 +1133,7 @@ def _install_plan(
                 migration_source[1] if migration_source is not None else None
             ),
         }
-    return handler, plan
+    return handler, agent_handler, plan
 
 
 def _apply_prepared_install(
@@ -1005,7 +1144,7 @@ def _apply_prepared_install(
 ) -> GlobalStatus:
     if state.get("phase") != "prepared":
         raise _error("conflict", "Router installation is not resumable")
-    handler, plan = _install_plan(
+    handler, agent_handler, plan = _install_plan(
         home=home, installation_dir=installation_dir, state=state
     )
     target_names = tuple(name for name in _TARGET_NAMES if name in state["targets"])
@@ -1036,7 +1175,10 @@ def _apply_prepared_install(
             raise _error("conflict", "managed user file changed during installation")
 
     _preflight_hook_handler(
-        handler, installation_dir=installation_dir, cwd=home
+        handler,
+        agent_handler,
+        installation_dir=installation_dir,
+        cwd=home,
     )
     if LUNA_AGENT_RELATIVE_PATH in target_names:
         _validate_agents_directory(home, create=True)
@@ -1099,6 +1241,7 @@ def _build_target_records(
     config: Mapping[str, Any],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, bytes | None]]:
     handler = _hook_handler(installation_dir)
+    agent_handler = _agent_spawn_hook_handler()
     originals: dict[str, bytes | None] = {}
     evidence: dict[str, tuple[bool, int | None]] = {}
     for name in _TARGET_NAMES:
@@ -1106,7 +1249,9 @@ def _build_target_records(
         originals[name] = original
         evidence[name] = (exists, mode)
     installed = {
-        "hooks.json": _install_hook(originals["hooks.json"], handler),
+        "hooks.json": _install_hook(
+            originals["hooks.json"], handler, agent_handler
+        ),
         "AGENTS.md": _install_agents(originals["AGENTS.md"]),
         LUNA_AGENT_RELATIVE_PATH: _luna_agent_bytes(
             config["role_config"]["luna"]
@@ -1279,6 +1424,7 @@ def _prepare_installed_refresh(
     ):
         raise _error("conflict", "Router installation is not refreshable")
     handler = _hook_handler(installation_dir)
+    agent_handler = _agent_spawn_hook_handler()
     config = _private_json(installation_dir / "config.json")
     role_config = _validate_defaults(config.get("role_config"))
     sources: dict[str, tuple[bytes, int]] = {}
@@ -1295,7 +1441,9 @@ def _prepare_installed_refresh(
             sources[name] = _read_exact_installed_target(
                 home=home, name=name, record=record
             )
-            strategy_generated[name] = _install_hook(raw_original, handler)
+            strategy_generated[name] = _install_hook(
+                raw_original, handler, agent_handler
+            )
             installed_outputs[name] = strategy_generated[name]
             new_originals[name] = old_original
             new_original_modes[name] = record.get("original_mode")
@@ -1533,10 +1681,13 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
         if name == "hooks.json" and installed_match:
             try:
                 parsed = json.loads(content)
-                hook_configured = sum(
-                    HOOK_MARKER in value for value in _walk_strings(parsed)
-                ) == 1
-            except (UnicodeDecodeError, json.JSONDecodeError):
+                prompt_handlers, agent_handlers = _router_hook_handlers(
+                    parsed, installation_dir=installation_dir
+                )
+                hook_configured = (
+                    len(prompt_handlers) == 1 and len(agent_handlers) == 1
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
                 hook_configured = False
         elif name == "AGENTS.md" and installed_match:
             try:
@@ -1736,38 +1887,89 @@ def _managed_fingerprints(home: Path) -> dict[str, str]:
     return fingerprints
 
 
-def _configured_hook_handler(home: Path) -> dict[str, Any]:
+def _router_hook_handlers(
+    document: Any, *, installation_dir: Path
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not isinstance(document, Mapping):
+        return [], []
+    hooks = document.get("hooks")
+    if not isinstance(hooks, Mapping):
+        return [], []
+
+    def matching_handlers(
+        groups: Any,
+        *,
+        expected_command: str,
+        expected_status: str,
+        matcher: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(groups, list):
+            return []
+        matches: list[dict[str, Any]] = []
+        for group in groups:
+            if not isinstance(group, Mapping):
+                continue
+            if matcher is not None and group.get("matcher") != matcher:
+                continue
+            items = group.get("hooks")
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                if (
+                    item.get("type") != "command"
+                    or item.get("statusMessage") != expected_status
+                ):
+                    continue
+                try:
+                    _handler_argv(
+                        item,
+                        expected_installation_dir=installation_dir,
+                        expected_command=expected_command,
+                    )
+                except RouterStateError:
+                    continue
+                matches.append(deepcopy(dict(item)))
+        return matches
+
+    return (
+        matching_handlers(
+            hooks.get("UserPromptSubmit"),
+            expected_command=_PROMPT_HOOK_COMMAND,
+            expected_status=_PROMPT_STATUS_MESSAGE,
+        ),
+        matching_handlers(
+            hooks.get("PreToolUse"),
+            expected_command=_AGENT_SPAWN_HOOK_COMMAND,
+            expected_status=_AGENT_SPAWN_STATUS_MESSAGE,
+            matcher=AGENT_SPAWN_MATCHER,
+        ),
+    )
+
+
+def _configured_hook_handlers(home: Path) -> dict[str, dict[str, Any]]:
     exists, raw_hooks, _ = _read_user_file(home / "hooks.json")
     if not exists or raw_hooks is None:
         raise _error("conflict", "configured Router hook is unavailable")
     try:
         document = json.loads(raw_hooks)
-        groups = document["hooks"]["UserPromptSubmit"]
     except (
         UnicodeDecodeError,
         json.JSONDecodeError,
-        KeyError,
         TypeError,
     ) as error:
         raise _error("conflict", "configured Router hook is invalid") from error
-    matches: list[dict[str, Any]] = []
-    if isinstance(groups, list):
-        for group in groups:
-            if not isinstance(group, Mapping) or not isinstance(
-                group.get("hooks"), list
-            ):
-                continue
-            for item in group["hooks"]:
-                if (
-                    isinstance(item, Mapping)
-                    and item.get("type") == "command"
-                    and item.get("statusMessage")
-                    == f"Routing with Codex Router [{HOOK_MARKER}]"
-                ):
-                    matches.append(deepcopy(dict(item)))
-    if len(matches) != 1:
+    prompt_handlers, agent_handlers = _router_hook_handlers(
+        document,
+        installation_dir=home / INSTALL_DIRECTORY_NAME,
+    )
+    if len(prompt_handlers) != 1 or len(agent_handlers) != 1:
         raise _error("conflict", "configured Router hook is invalid")
-    return matches[0]
+    return {
+        "prompt": prompt_handlers[0],
+        "agent_spawn": agent_handlers[0],
+    }
 
 
 def global_self_test(codex_home: Path | str) -> dict[str, Any]:
@@ -1781,9 +1983,15 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
 
     installation_dir = home / INSTALL_DIRECTORY_NAME
     config = _private_json(installation_dir / "config.json")
-    configured_handler = _configured_hook_handler(home)
+    configured_handlers = _configured_hook_handlers(home)
     configured_arguments = _handler_argv(
-        configured_handler, expected_installation_dir=installation_dir
+        configured_handlers["prompt"],
+        expected_installation_dir=installation_dir,
+    )
+    agent_arguments = _handler_argv(
+        configured_handlers["agent_spawn"],
+        expected_installation_dir=installation_dir,
+        expected_command=_AGENT_SPAWN_HOOK_COMMAND,
     )
     before_fingerprints = _managed_fingerprints(home)
     configured_state_root = Path(config["state_root"])
@@ -1795,7 +2003,19 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
     route_prompt = "修改 synthetic-self-test-route artifact"
     direct_prompt = "你好"
     bypass_prompt = "仅本地执行\n" + route_prompt
-    raw_values = (session_a, session_b, turn_a, turn_b, route_prompt)
+    agent_message = "synthetic-self-test-agent-message"
+    agent_task_name = "synthetic_self_test_agent"
+    agent_tool_use_id = "synthetic-self-test-tool-use"
+    raw_values = (
+        session_a,
+        session_b,
+        turn_a,
+        turn_b,
+        route_prompt,
+        agent_message,
+        agent_task_name,
+        agent_tool_use_id,
+    )
     ephemeral_path: Path | None = None
 
     with tempfile.TemporaryDirectory(prefix="codex-router-self-test-") as temporary:
@@ -1809,6 +2029,25 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
                 "turn_id": turn,
                 "prompt": prompt,
                 "cwd": str(ephemeral_path),
+            }
+
+        def agent_event(*, agent_type: str = "luna_worker") -> dict[str, Any]:
+            return {
+                "hook_event_name": "PreToolUse",
+                "session_id": session_a,
+                "transcript_path": None,
+                "cwd": str(ephemeral_path),
+                "model": "gpt-5.6-luna",
+                "permission_mode": "default",
+                "turn_id": turn_a,
+                "tool_name": "spawn_agent",
+                "tool_use_id": agent_tool_use_id,
+                "tool_input": {
+                    "agent_type": agent_type,
+                    "message": agent_message,
+                    "task_name": agent_task_name,
+                    "fork_turns": "none",
+                },
             }
 
         direct = _self_test_context(
@@ -1862,12 +2101,36 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             )
         )
 
+        agent_allowed_output = _invoke_hook_argv(
+            agent_arguments,
+            event=agent_event(),
+            cwd=ephemeral_path,
+            require_empty=True,
+        )
+        agent_non_luna_output = _invoke_hook_argv(
+            agent_arguments,
+            event=agent_event(agent_type="worker"),
+            cwd=ephemeral_path,
+        )
+        malformed_agent_event = agent_event()
+        del malformed_agent_event["tool_input"]
+        agent_malformed_output = _invoke_hook_argv(
+            agent_arguments,
+            event=malformed_agent_event,
+            cwd=ephemeral_path,
+        )
+
         route_contexts = (route, duplicate, changed_session, changed_turn)
         output_text = json.dumps(
             {
                 "direct": direct,
                 "bypass": bypass,
                 "routes": route_contexts,
+                "agent_spawn": {
+                    "allowed": agent_allowed_output,
+                    "non_luna": agent_non_luna_output,
+                    "malformed": agent_malformed_output,
+                },
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1911,6 +2174,17 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "raw_values_not_returned": all(value not in output_text for value in raw_values),
             "luna_agent_configured": status.luna_agent_configured,
             "hook_command_subprocess": True,
+            "agent_spawn_luna_allowed": agent_allowed_output == {},
+            "agent_spawn_non_luna_denied": (
+                agent_non_luna_output == agent_spawn_denial()
+            ),
+            "agent_spawn_malformed_denied": (
+                agent_malformed_output == agent_spawn_denial()
+            ),
+            "agent_spawn_guard_subprocess": (
+                agent_arguments[-1:] == [_AGENT_SPAWN_HOOK_COMMAND]
+                and agent_allowed_output == {}
+            ),
         }
 
     checks["ephemeral_artifacts_removed"] = (

@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from typing import Any, Mapping
 
@@ -24,6 +25,10 @@ _BLOCK_REASON = (
     "Router could not initialize this routed turn. "
     "To proceed locally for this turn, begin the prompt with 仅本地执行."
 )
+AGENT_SPAWN_DENY_REASON = "Only persistent luna_worker spawns are permitted"
+_AGENT_SPAWN_TOOL_NAMES = frozenset(("spawn_agent", "Agent"))
+_AGENT_SPAWN_TASK_NAME = re.compile(r"[a-z0-9_]+\Z")
+_AGENT_SPAWN_FORK_TURNS = re.compile(r"[1-9][0-9]*\Z")
 
 
 def _invalid(message: str) -> RouterStateError:
@@ -177,6 +182,52 @@ def handle_user_prompt(
             "web_mode": "manual_operator",
         }
     )
+
+
+def agent_spawn_denial() -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": AGENT_SPAWN_DENY_REASON,
+        }
+    }
+
+
+def handle_agent_spawn(event: Any) -> dict[str, Any] | None:
+    if not isinstance(event, Mapping):
+        return agent_spawn_denial()
+    if event.get("hook_event_name") != "PreToolUse":
+        return agent_spawn_denial()
+    tool_name = event.get("tool_name")
+    if not isinstance(tool_name, str) or tool_name not in _AGENT_SPAWN_TOOL_NAMES:
+        return agent_spawn_denial()
+    tool_use_id = event.get("tool_use_id")
+    if not isinstance(tool_use_id, str) or not tool_use_id.strip():
+        return agent_spawn_denial()
+
+    tool_input = event.get("tool_input")
+    if not isinstance(tool_input, Mapping):
+        return agent_spawn_denial()
+    if tool_input.get("agent_type") != "luna_worker":
+        return agent_spawn_denial()
+    message = tool_input.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return agent_spawn_denial()
+    task_name = tool_input.get("task_name")
+    if (
+        not isinstance(task_name, str)
+        or _AGENT_SPAWN_TASK_NAME.fullmatch(task_name) is None
+    ):
+        return agent_spawn_denial()
+    if "fork_turns" in tool_input:
+        fork_turns = tool_input.get("fork_turns")
+        if not isinstance(fork_turns, str) or not (
+            fork_turns in {"none", "all"}
+            or _AGENT_SPAWN_FORK_TURNS.fullmatch(fork_turns) is not None
+        ):
+            return agent_spawn_denial()
+    return None
 
 
 def read_hook_event(stream) -> dict[str, Any]:

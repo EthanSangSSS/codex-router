@@ -244,6 +244,126 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertFalse(luna_path.exists())
         self.assertTrue(install_dir.is_dir())
 
+    def test_install_adds_pretool_spawn_guard_and_restores_unrelated_hooks(self):
+        hooks_path = self.codex_home / "hooks.json"
+        hooks_original = (
+            b'{\n'
+            b'  "description": "keep formatting",\n'
+            b'  "hooks": {\n'
+            b'    "PreToolUse": [{\n'
+            b'      "matcher": "^(Agent|spawn_agent)$",\n'
+            b'      "hooks": [{"type": "command", "command": "keep-tool"}]\n'
+            b'    }],\n'
+            b'    "SessionStart": [{"hooks": [{"type": "command", "command": "keep-session"}]}],\n'
+            b'    "PostToolUse": [{"hooks": [{"type": "command", "command": "keep-post-tool"}]}]\n'
+            b'  },\n'
+            b'  "unrelated": {"keep": true}\n'
+            b'}\n'
+        )
+        hooks_path.write_bytes(hooks_original)
+        hooks_path.chmod(0o640)
+        original_mode = stat.S_IMODE(hooks_path.stat().st_mode)
+        original_document = json.loads(hooks_original)
+
+        try:
+            installed = self.install()
+        except Exception as error:
+            self.fail(f"installer rejected the preserved same-matcher group: {error}")
+
+        self.assertEqual(installed.state, "installed")
+        self.assertEqual(self.status().state, "installed")
+        hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
+        self.assertEqual(hooks["description"], original_document["description"])
+        self.assertEqual(hooks["unrelated"], original_document["unrelated"])
+        for hook_name in ("SessionStart", "PostToolUse"):
+            with self.subTest(unrelated_hook=hook_name):
+                self.assertEqual(
+                    hooks["hooks"][hook_name], original_document["hooks"][hook_name]
+                )
+        pretool_groups = hooks["hooks"].get("PreToolUse")
+        self.assertIsInstance(pretool_groups, list)
+        if not isinstance(pretool_groups, list):
+            return
+        self.assertGreaterEqual(len(pretool_groups), 1)
+        self.assertEqual(
+            pretool_groups[0], original_document["hooks"]["PreToolUse"][0]
+        )
+        router_groups = [
+            group
+            for group in pretool_groups
+            if isinstance(group, dict)
+            and group.get("matcher") == "^(Agent|spawn_agent)$"
+            and any(
+                isinstance(item, dict)
+                and item.get("type") == "command"
+                and "hook-agent-spawn" in item.get("command", "")
+                and "codex-router-global-policy-v1"
+                in item.get("statusMessage", "")
+                for item in group.get("hooks", [])
+            )
+        ]
+        self.assertEqual(len(router_groups), 1)
+        router_group = router_groups[0] if router_groups else {}
+        handlers = router_group.get("hooks", [])
+        self.assertIsInstance(handlers, list)
+        if not isinstance(handlers, list):
+            return
+        self.assertEqual(len(handlers), 1)
+        handler = handlers[0] if handlers else {}
+        self.assertIsInstance(handler, dict)
+        if not isinstance(handler, dict):
+            return
+        self.assertEqual(handler.get("type"), "command")
+        self.assertIn("hook-agent-spawn", handler.get("command", ""))
+
+        from codex_router.global_install import global_self_test
+
+        self_test = global_self_test(self.codex_home)
+        self.assertEqual(self_test.get("status"), "pass")
+        checks = self_test.get("checks", {})
+        self.assertIsInstance(checks, dict)
+        if not isinstance(checks, dict):
+            return
+        for check_name in (
+            "agent_spawn_luna_allowed",
+            "agent_spawn_non_luna_denied",
+            "agent_spawn_malformed_denied",
+            "agent_spawn_guard_subprocess",
+        ):
+            with self.subTest(self_test_check=check_name):
+                self.assertTrue(checks.get(check_name), checks)
+
+        uninstalled = self.uninstall()
+
+        self.assertEqual(uninstalled.state, "uninstalled")
+        self.assertEqual(hooks_path.read_bytes(), hooks_original)
+        self.assertEqual(stat.S_IMODE(hooks_path.stat().st_mode), original_mode)
+
+    def test_agents_policy_defines_only_luna_capacity_recovery_states(self):
+        self.install()
+
+        agents_path = self.codex_home / "AGENTS.md"
+        managed_agents = agents_path.read_text(encoding="utf-8")
+        required_policy = (
+            "The first and only child Agent permitted by Router policy is one persistent `luna_worker`.",
+            "Use `BLOCKED_LUNA_CAPACITY` only when visible open blockers exist.",
+            "Use `BLOCKED_LUNA_RUNTIME_CAPACITY_DESYNC` only when the Agent tree has no reusable Luna, a known Luna cannot be addressed, but `spawn_agent` reports capacity full.",
+            "Neither state authorizes Sol writable takeover or relay",
+            "Never archive the task as recovery",
+            "Router cannot repair Codex runtime capacity accounting",
+        )
+        for required in required_policy:
+            with self.subTest(required_policy=required):
+                self.assertIn(required, managed_agents)
+        self.assertNotIn(
+            "Before creating any helper non-Luna",
+            managed_agents,
+        )
+        self.assertNotIn(
+            "otherwise return `BLOCKED_LUNA_CAPACITY`",
+            managed_agents,
+        )
+
     def test_existing_luna_agent_and_unrelated_agents_are_preserved_and_restored(self):
         agents_dir = self.codex_home / "agents"
         agents_dir.mkdir(mode=0o750)
@@ -296,6 +416,66 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), 0o644)
         self.assertEqual(self.status().state, "partial")
 
+    def test_install_preflight_rejects_nonempty_json_for_allowed_luna(self):
+        import codex_router.global_install as global_install_module
+        from codex_router.state import RouterStateError
+
+        hooks_path = self.codex_home / "hooks.json"
+        agents_path = self.codex_home / "AGENTS.md"
+        hooks_original = b'{"keep":"hooks"}\n'
+        agents_original = b"keep agents\n"
+        hooks_path.write_bytes(hooks_original)
+        agents_path.write_bytes(agents_original)
+        hooks_path.chmod(0o640)
+        agents_path.chmod(0o644)
+        hooks_mode = stat.S_IMODE(hooks_path.stat().st_mode)
+        agents_mode = stat.S_IMODE(agents_path.stat().st_mode)
+        denial = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Only persistent luna_worker spawns are permitted"
+                ),
+            }
+        }
+        real_run = global_install_module.subprocess.run
+
+        def fake_run(arguments, **kwargs):
+            if "hook-user-prompt" in arguments:
+                return real_run(arguments, **kwargs)
+            self.assertEqual(arguments[-1], "hook-agent-spawn")
+            event = json.loads(kwargs["input"])
+            tool_input = event.get("tool_input") if isinstance(event, dict) else None
+            if (
+                isinstance(tool_input, dict)
+                and tool_input.get("agent_type") == "luna_worker"
+            ):
+                return subprocess.CompletedProcess(
+                    arguments, 0, b"{}\n", b""
+                )
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                json.dumps(denial, sort_keys=True).encode("utf-8") + b"\n",
+                b"",
+            )
+
+        with patch.object(
+            global_install_module.subprocess,
+            "run",
+            side_effect=fake_run,
+        ):
+            with self.assertRaises(RouterStateError) as raised:
+                self.install()
+
+        self.assertEqual(raised.exception.code, "conflict")
+        self.assertEqual(hooks_path.read_bytes(), hooks_original)
+        self.assertEqual(agents_path.read_bytes(), agents_original)
+        self.assertEqual(stat.S_IMODE(hooks_path.stat().st_mode), hooks_mode)
+        self.assertEqual(stat.S_IMODE(agents_path.stat().st_mode), agents_mode)
+        self.assertNotEqual(self.status().state, "installed")
+
     def test_installed_hook_uses_exact_absolute_isolated_python_command(self):
         self.install()
 
@@ -311,6 +491,25 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(
             arguments[7],
             str(self.codex_home / ".codex-router-policy-v1"),
+        )
+        agent_groups = [
+            group
+            for group in hooks["hooks"]["PreToolUse"]
+            if group.get("matcher") == "^(Agent|spawn_agent)$"
+        ]
+        self.assertEqual(len(agent_groups), 1)
+        agent_handler = agent_groups[0]["hooks"][0]
+        agent_arguments = shlex.split(agent_handler["command"])
+        self.assertEqual(
+            agent_arguments,
+            [
+                str(Path(sys.executable)),
+                "-E",
+                "-P",
+                "-m",
+                "codex_router",
+                "hook-agent-spawn",
+            ],
         )
 
     def test_interrupted_install_resumes_after_each_managed_write(self):
@@ -690,7 +889,13 @@ class GlobalInstallTests(unittest.TestCase):
 
         hooks_path = self.codex_home / "hooks.json"
         agents_path = self.codex_home / "AGENTS.md"
-        cases = ("malformed", "symlink", "agent-marker", "hook-marker")
+        cases = (
+            "malformed",
+            "symlink",
+            "agent-marker",
+            "hook-marker",
+            "agent-command",
+        )
 
         for case in cases:
             with self.subTest(case=case):
@@ -709,6 +914,28 @@ class GlobalInstallTests(unittest.TestCase):
                     hooks_path.write_bytes(b"{}")
                     agents_path.write_text(
                         "# BEGIN CODEX ROUTER GLOBAL POLICY V1\nconflict\n",
+                        encoding="utf-8",
+                    )
+                elif case == "agent-command":
+                    hooks_path.write_text(
+                        json.dumps(
+                            {
+                                "hooks": {
+                                    "PreToolUse": [
+                                        {
+                                            "matcher": "unrelated-tool",
+                                            "hooks": [
+                                                {
+                                                    "type": "command",
+                                                    "command": "/usr/bin/python -E -P -m codex_router hook-agent-spawn",
+                                                    "statusMessage": "unrelated hook",
+                                                }
+                                            ],
+                                        }
+                                    ]
+                                }
+                            }
+                        ),
                         encoding="utf-8",
                     )
                 else:

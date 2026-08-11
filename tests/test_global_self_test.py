@@ -94,13 +94,47 @@ class GlobalSelfTestTests(unittest.TestCase):
 
     def test_self_test_accepts_current_source_hook_contract(self):
         import codex_router.global_install as global_install_module
-        from codex_router.hook import handle_user_prompt
+        import codex_router.hook as hook_module
 
         installation_dir = self.codex_home / ".codex-router-policy-v1"
+        handle_user_prompt = getattr(hook_module, "handle_user_prompt", None)
+        self.assertTrue(
+            callable(handle_user_prompt),
+            "current UserPromptSubmit handler is unavailable",
+        )
+        handle_agent_spawn = getattr(hook_module, "handle_agent_spawn", None)
+        self.assertTrue(
+            callable(handle_agent_spawn),
+            "current PreToolUse agent-spawn handler is unavailable",
+        )
+        if not callable(handle_user_prompt) or not callable(handle_agent_spawn):
+            return
 
-        def invoke_current_source(_arguments, *, event, cwd):
-            del cwd
-            return handle_user_prompt(event, installation_dir)
+        seen_events = []
+
+        def invoke_current_source(_arguments, **kwargs):
+            event = kwargs.get("event")
+            self.assertIsInstance(event, dict)
+            if not isinstance(event, dict):
+                return {}
+            seen_events.append(event.get("hook_event_name"))
+            if event.get("hook_event_name") == "UserPromptSubmit":
+                result = handle_user_prompt(event, installation_dir)
+            elif event.get("hook_event_name") == "PreToolUse":
+                result = handle_agent_spawn(event)
+            else:
+                self.fail("unexpected hook event type")
+                return {}
+            if result is None:
+                return {}
+            if isinstance(result, dict):
+                nested = result.get("hookSpecificOutput")
+                if result.get("permissionDecision") == "allow" or (
+                    isinstance(nested, dict)
+                    and nested.get("permissionDecision") == "allow"
+                ):
+                    return {}
+            return result
 
         with patch.object(
             global_install_module,
@@ -114,6 +148,89 @@ class GlobalSelfTestTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "pass")
         self.assertTrue(result["checks"]["stateless_native_luna_route"])
+        self.assertIn("UserPromptSubmit", seen_events)
+        self.assertIn("PreToolUse", seen_events)
+
+    def test_self_test_rejects_nonempty_json_for_allowed_luna(self):
+        import codex_router.global_install as global_install_module
+        from codex_router.state import RouterStateError
+
+        before = self.snapshot()
+        denial = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Only persistent luna_worker spawns are permitted"
+                ),
+            }
+        }
+        real_run = global_install_module.subprocess.run
+
+        def fake_run(arguments, **kwargs):
+            if "hook-user-prompt" in arguments:
+                return real_run(arguments, **kwargs)
+            self.assertEqual(arguments[-1], "hook-agent-spawn")
+            event = json.loads(kwargs["input"])
+            tool_input = event.get("tool_input") if isinstance(event, dict) else None
+            if (
+                isinstance(tool_input, dict)
+                and tool_input.get("agent_type") == "luna_worker"
+            ):
+                return subprocess.CompletedProcess(
+                    arguments, 0, b"{}\n", b""
+                )
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                json.dumps(denial, sort_keys=True).encode("utf-8") + b"\n",
+                b"",
+            )
+
+        with patch.object(
+            global_install_module.subprocess,
+            "run",
+            side_effect=fake_run,
+        ):
+            with self.assertRaises(RouterStateError) as raised:
+                global_install_module.global_self_test(self.codex_home)
+
+        self.assertEqual(raised.exception.code, "conflict")
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.state_root.exists())
+
+    def test_offline_self_test_exercises_luna_spawn_guard_without_activation(self):
+        import codex_router.global_install as global_install_module
+
+        before = self.snapshot()
+        with patch.object(
+            socket,
+            "socket",
+            side_effect=AssertionError("network forbidden"),
+        ), patch(
+            "webbrowser.open",
+            side_effect=AssertionError("browser forbidden"),
+        ):
+            result = global_install_module.global_self_test(self.codex_home)
+
+        self.assertEqual(result.get("status"), "pass")
+        checks = result.get("checks", {})
+        self.assertIsInstance(checks, dict)
+        if not isinstance(checks, dict):
+            return
+        for check_name in (
+            "agent_spawn_luna_allowed",
+            "agent_spawn_non_luna_denied",
+            "agent_spawn_malformed_denied",
+            "agent_spawn_guard_subprocess",
+        ):
+            with self.subTest(self_test_check=check_name):
+                self.assertTrue(checks.get(check_name), checks)
+        self.assertFalse(result.get("network_used", True))
+        self.assertFalse(result.get("browser_used", True))
+        self.assertFalse(result.get("installation_activated", True))
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.state_root.exists())
 
     def test_cli_self_test_outputs_one_safe_json_object(self):
         environment = os.environ.copy()

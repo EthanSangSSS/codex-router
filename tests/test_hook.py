@@ -25,6 +25,36 @@ ROLE_CONFIG = {
     },
 }
 REPO = Path(__file__).resolve().parents[1]
+PRETOOL_USE = "PreToolUse"
+AGENT_DENY_REASON = "Only persistent luna_worker spawns are permitted"
+
+
+def _spawn_event(
+    *,
+    tool_name="spawn_agent",
+    agent_type="luna_worker",
+    tool_use_id="tool-use-private-marker",
+    message="message-private-marker",
+    task_name="task_private_marker",
+    fork_turns="none",
+):
+    return {
+        "hook_event_name": PRETOOL_USE,
+        "session_id": "session-private-marker",
+        "transcript_path": None,
+        "cwd": "/private/tmp/codex-router-spawn-fixture",
+        "model": "gpt-5.6-luna",
+        "permission_mode": "default",
+        "turn_id": "turn-private-marker",
+        "tool_name": tool_name,
+        "tool_use_id": tool_use_id,
+        "tool_input": {
+            "agent_type": agent_type,
+            "message": message,
+            "task_name": task_name,
+            "fork_turns": fork_turns,
+        },
+    }
 
 
 def _concurrent_hook_worker(queue, event, installation_dir):
@@ -240,6 +270,206 @@ class HookCliTests(HookTestCase):
                 payload = json.loads(completed.stderr)
                 self.assertEqual(payload["code"], "invalid-input")
                 self.assertNotIn(private_value, completed.stderr)
+
+
+class HookAgentSpawnCliTests(unittest.TestCase):
+    def cli(self, input_text):
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        return subprocess.run(
+            [sys.executable, "-m", "codex_router", "hook-agent-spawn"],
+            cwd=REPO,
+            env=environment,
+            input=input_text,
+            text=True,
+            capture_output=True,
+        )
+
+    def assert_denied(self, raw_input, private_marker):
+        completed = self.cli(raw_input)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stderr, "")
+        lines = completed.stdout.strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        try:
+            payload = json.loads(lines[0])
+        except (TypeError, json.JSONDecodeError) as error:
+            self.fail(f"guard output was not one JSON object: {error}")
+        self.assertIsInstance(payload, dict)
+        if not isinstance(payload, dict):
+            return
+        self.assertEqual(set(payload), {"hookSpecificOutput"})
+        hook_output = payload.get("hookSpecificOutput")
+        self.assertIsInstance(hook_output, dict)
+        if not isinstance(hook_output, dict):
+            return
+        self.assertEqual(hook_output.get("hookEventName"), PRETOOL_USE)
+        self.assertEqual(hook_output.get("permissionDecision"), "deny")
+        self.assertEqual(
+            hook_output.get("permissionDecisionReason"), AGENT_DENY_REASON
+        )
+        reason = hook_output.get("permissionDecisionReason")
+        self.assertIsInstance(reason, str)
+        if isinstance(reason, str):
+            self.assertLessEqual(len(reason), 200)
+        self.assertNotIn(private_marker, completed.stdout)
+
+    def test_explicit_luna_worker_spawn_is_allowed_without_output(self):
+        event = json.dumps(_spawn_event(), ensure_ascii=False)
+        alias_event = json.dumps(
+            _spawn_event(tool_name="Agent"), ensure_ascii=False
+        )
+        optional_fork_turns_event = _spawn_event()
+        del optional_fork_turns_event["tool_input"]["fork_turns"]
+        optional_fork_turns = json.dumps(
+            optional_fork_turns_event, ensure_ascii=False
+        )
+        for raw_input in (event, alias_event, optional_fork_turns):
+            with self.subTest(raw_input=raw_input):
+                completed = self.cli(raw_input)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout, "")
+                self.assertEqual(completed.stderr, "")
+
+    def test_direct_handler_denies_unhashable_tool_names(self):
+        from codex_router.hook import handle_agent_spawn
+
+        denial = {
+            "hookSpecificOutput": {
+                "hookEventName": PRETOOL_USE,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": AGENT_DENY_REASON,
+            }
+        }
+        for tool_name in ([], {}):
+            with self.subTest(tool_name=tool_name):
+                event = _spawn_event()
+                event["tool_name"] = tool_name
+                try:
+                    result = handle_agent_spawn(event)
+                except Exception as error:
+                    self.fail(f"malformed tool_name raised unexpectedly: {error}")
+                self.assertEqual(result, denial)
+                self.assertNotIn("message-private-marker", json.dumps(result))
+
+    def test_non_luna_and_invalid_spawn_inputs_are_denied_without_echo(self):
+        cases = []
+        for agent_type in ("worker", "default", "explorer", "arbitrary", "other"):
+            cases.append(
+                (
+                    agent_type,
+                    json.dumps(_spawn_event(agent_type=agent_type), ensure_ascii=False),
+                    "message-private-marker",
+                )
+            )
+
+        missing_agent_type = _spawn_event()
+        del missing_agent_type["tool_input"]["agent_type"]
+        cases.append(
+            (
+                "missing-agent-type",
+                json.dumps(missing_agent_type, ensure_ascii=False),
+                "message-private-marker",
+            )
+        )
+
+        non_object_input = _spawn_event()
+        non_object_input["tool_input"] = "tool-input-private-marker"
+        cases.append(
+            (
+                "non-object-tool-input",
+                json.dumps(non_object_input, ensure_ascii=False),
+                "tool-input-private-marker",
+            )
+        )
+
+        for field in ("message", "task_name"):
+            missing_field = _spawn_event()
+            del missing_field["tool_input"][field]
+            private_marker = (
+                "task_private_marker" if field == "message" else "message-private-marker"
+            )
+            cases.append(
+                (
+                    f"missing-{field}",
+                    json.dumps(missing_field, ensure_ascii=False),
+                    private_marker,
+                )
+            )
+
+        for field in ("hook_event_name", "tool_name", "tool_use_id", "tool_input"):
+            missing_field = _spawn_event()
+            del missing_field[field]
+            cases.append(
+                (
+                    f"missing-{field}",
+                    json.dumps(missing_field, ensure_ascii=False),
+                    "message-private-marker",
+                )
+            )
+
+        wrong_hook = _spawn_event()
+        wrong_hook["hook_event_name"] = "UserPromptSubmit"
+        cases.append(
+            (
+                "wrong-hook-event",
+                json.dumps(wrong_hook, ensure_ascii=False),
+                "message-private-marker",
+            )
+        )
+        wrong_tool = _spawn_event(tool_name="not-a-spawn-tool")
+        cases.append(
+            (
+                "wrong-tool-name",
+                json.dumps(wrong_tool, ensure_ascii=False),
+                "message-private-marker",
+            )
+        )
+        wrong_tool_use_id = _spawn_event(tool_use_id=42)
+        cases.append(
+            (
+                "wrong-tool-use-id",
+                json.dumps(wrong_tool_use_id, ensure_ascii=False),
+                "message-private-marker",
+            )
+        )
+        wrong_agent_type = _spawn_event(agent_type=42)
+        cases.append(
+            (
+                "wrong-agent-type",
+                json.dumps(wrong_agent_type, ensure_ascii=False),
+                "message-private-marker",
+            )
+        )
+
+        for label, raw_input, private_marker in cases:
+            with self.subTest(case=label):
+                self.assert_denied(raw_input, private_marker)
+
+    def test_malformed_spawn_input_is_one_denial_on_stdout_with_no_stderr(self):
+        cases = (
+            (
+                '{"hook_event_name":"PreToolUse","tool_use_id":"malformed-private-marker"',
+                "malformed-private-marker",
+            ),
+            ('["malformed-private-marker"]', "malformed-private-marker"),
+            ('"malformed-private-marker"', "malformed-private-marker"),
+            (
+                "x" * (1024 * 1024 + 1) + "oversized-private-marker",
+                "oversized-private-marker",
+            ),
+        )
+        for raw_input, private_marker in cases:
+            with self.subTest(raw_input=raw_input):
+                self.assert_denied(raw_input, private_marker)
+
+    def test_nonstandard_json_constants_are_denied_without_echo(self):
+        for constant in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(constant=constant):
+                event = _spawn_event()
+                event["turn_id"] = constant
+                raw_input = json.dumps(event, allow_nan=True)
+                self.assert_denied(raw_input, "message-private-marker")
 
 
 if __name__ == "__main__":

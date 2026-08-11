@@ -12,7 +12,13 @@ from .global_install import (
     global_status,
     global_uninstall,
 )
-from .hook import handle_user_prompt, read_hook_event
+from .hook import (
+    MAX_HOOK_INPUT_BYTES,
+    agent_spawn_denial,
+    handle_agent_spawn,
+    handle_user_prompt,
+    read_hook_event,
+)
 from .pipeline import Router, RouterRunError
 from .state import RouterStateError, fail_stage, get_status, start_run, submit_stage
 from .types import GlobalStatus, TransitionResult
@@ -88,6 +94,9 @@ def parser() -> argparse.ArgumentParser:
         "hook-user-prompt", help="handle one Codex UserPromptSubmit event"
     )
     hook.add_argument("--installation-dir", type=Path, required=True)
+    subcommands.add_parser(
+        "hook-agent-spawn", help="guard one Codex PreToolUse agent spawn event"
+    )
 
     install = subcommands.add_parser(
         "global-install", help="install the reversible global Router policy"
@@ -228,6 +237,33 @@ def _run_legacy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _reject_nonstandard_json_constant(_value: str) -> None:
+    raise ValueError("non-standard JSON constant")
+
+
+def _run_agent_spawn_hook() -> int:
+    try:
+        raw = sys.stdin.buffer.read(MAX_HOOK_INPUT_BYTES + 1)
+        if not isinstance(raw, bytes) or len(raw) > MAX_HOOK_INPUT_BYTES:
+            output = agent_spawn_denial()
+        else:
+            try:
+                event = json.loads(
+                    raw,
+                    parse_constant=_reject_nonstandard_json_constant,
+                )
+            except (TypeError, UnicodeDecodeError, ValueError):
+                output = agent_spawn_denial()
+            else:
+                output = handle_agent_spawn(event)
+                if output is None:
+                    return 0
+    except Exception:
+        output = agent_spawn_denial()
+    _print_json(output)
+    return 0
+
+
 def main(argv=None) -> int:
     try:
         args = parser().parse_args(argv)
@@ -239,6 +275,8 @@ def main(argv=None) -> int:
             )
             _print_json(output)
             return 0
+        if args.command == "hook-agent-spawn":
+            return _run_agent_spawn_hook()
         if args.command == "global-install":
             global_result = global_install(
                 codex_home=args.codex_home,
