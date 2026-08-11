@@ -1733,7 +1733,7 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
         luna_agent_configured=luna_agent_configured,
         config_valid=config_valid,
         identity_material_valid=identity_valid,
-        hook_trust=("requires-user-check" if status_state == "installed" else "unknown"),
+        hook_trust=("requires-cli-review" if status_state == "installed" else "unknown"),
         new_session_required=status_state in ("installed", "uninstalled"),
     )
 

@@ -134,7 +134,7 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertTrue(installed.hook_configured)
         self.assertTrue(installed.agents_managed)
         self.assertTrue(installed.luna_agent_configured)
-        self.assertEqual(installed.hook_trust, "requires-user-check")
+        self.assertEqual(installed.hook_trust, "requires-cli-review")
         self.assertTrue(installed.new_session_required)
         hooks = json.loads(hooks_path.read_text(encoding="utf-8"))
         self.assertEqual(hooks["description"], "keep formatting")
@@ -994,7 +994,7 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(installed.returncode, 0, installed.stderr)
         installed_payload = json.loads(installed.stdout)
         self.assertEqual(installed_payload["state"], "installed")
-        self.assertEqual(installed_payload["hook_trust"], "requires-user-check")
+        self.assertEqual(installed_payload["hook_trust"], "requires-cli-review")
         self.assertTrue(installed_payload["new_session_required"])
         self.assertTrue(installed_payload["luna_agent_configured"])
         self.assertNotIn("secret", installed.stdout.lower())
@@ -1020,6 +1020,30 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertEqual(config["role_config"]["local_sol"]["requested_reasoning"], "max")
         self.assertEqual(config["role_config"]["web_sol"]["reasoning_claimed"], "xhigh")
         self.assertEqual(config["role_config"]["luna"]["requested_reasoning"], "max")
+
+    def test_documentation_marks_cli_only_hook_trust_and_rejects_app_activation_claims(self):
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("### Manual App acceptance checklist", readme)
+        self.assertIn("Codex CLI/TUI `/hooks`", readme)
+        self.assertIn("Codex desktop App", readme)
+        self.assertNotIn("ChatGPT desktop", readme)
+        self.assertIn("App-only activation is unsupported", readme)
+        self.assertIn("hook_trust=requires-cli-review", readme)
+        self.assertNotIn("hook_trust=requires-user-check", readme)
+        self.assertNotIn("open `/hooks`", readme)
+
+        for relative_path in (
+            "docs/superpowers/specs/2026-08-05-native-luna-worker-router-design.md",
+            "docs/superpowers/specs/2026-08-04-global-auto-router-policy-v1-design.md",
+            "docs/superpowers/plans/2026-08-04-global-auto-router-policy-v1.md",
+        ):
+            with self.subTest(document=relative_path):
+                document = (REPO / relative_path).read_text(encoding="utf-8")
+                self.assertIn("Codex CLI/TUI", document)
+                self.assertIn("Codex desktop App", document)
+                self.assertNotIn("ChatGPT desktop", document)
+                self.assertIn("App-only activation is unsupported", document)
+                self.assertNotIn("open `/hooks`", document)
 
     def test_uninstalled_legacy_two_target_state_reinstalls_with_luna_agent(self):
         self.install()

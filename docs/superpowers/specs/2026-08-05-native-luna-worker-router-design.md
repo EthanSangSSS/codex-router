@@ -167,11 +167,18 @@ initial context, no configured-state pollution, and legacy CLI/fake
 compatibility.
 
 This patch is limited to offline local validation. It does not perform live
-installation, Hook trust, or real model, browser, or network testing. Codex
-runtime-owned capacity accounting desync remains outside Router's repair
-authority. Within its bounded scope, Router can prevent self-induced
-exhaustion, classify the two conditions accurately, and fail safely; it does
-not claim to activate or validate a runtime guard in a live Codex task.
+installation, Hook trust, or real model, browser, or network testing. The
+Codex desktop App has no supported Hook-trust UI; App-only activation is unsupported.
+Installed files, `global-status`, and offline
+`global-self-test` are local configuration and protocol evidence only; they do
+not prove that Codex trusts or dispatches the hooks. Only a separately
+authorized Codex CLI/TUI operator may run `/hooks`, review both exact handlers,
+and trust changed user-hook definitions; renewed CLI/TUI review and a new task
+are required after changes. Codex runtime-owned capacity accounting desync
+remains outside Router's repair authority. Within its bounded scope, Router
+can prevent self-induced exhaustion, classify the two conditions accurately,
+and fail safely; it does not claim to activate or validate a runtime guard in a
+live Codex task.
 
 ## Amendment: 2026-08-11
 

@@ -205,7 +205,9 @@
   Restore exact backups when installed hashes match. Remove only a
   Router-created hooks file when the absence backup proves ownership. Refuse
   concurrent hook edits. Leave install evidence/backups and all run state.
-  Report hook trust conservatively as `unknown`/`requires-user-check`.
+  Report hook trust conservatively as `unknown`/`requires-cli-review`; the
+  installed value records that separately authorized Codex CLI/TUI review is
+  required, not that Router has a trust receipt.
 
 - [ ] **Step 6: Add CLI tests and run focused suite**
 
@@ -252,12 +254,15 @@
 
   Exercise the configured Hook command in child processes against temporary
   roots only. Do not set a trusted/active claim and do not touch the live Codex
-  home or configured state root.
+  home or configured state root. Codex desktop App-only activation is unsupported;
+  only separately authorized Codex CLI/TUI review through `/hooks` can trust
+  changed user hooks.
 
 - [ ] **Step 3: Document installation and manual acceptance**
 
-  Include `/hooks` review, new-session requirement, Router banner, one run per
-  prompt, same/new session behavior, operator-attested Web reuse/no-new-page,
+  Include separately authorized Codex CLI/TUI `/hooks` review, new-session
+  requirement, Router banner, one run per prompt, same/new session behavior,
+  operator-attested Web reuse/no-new-page,
   marker rejection, one-turn bypass, synthetic protected payload block, and
   uninstall/new-session rollback.
 

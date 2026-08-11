@@ -112,12 +112,26 @@ router global-uninstall --codex-home "$ROUTER_TEST_HOME"
 
 The self-test invokes both configured hook commands as child processes instead of calling hook functions in-process. Direct, bypass, repeated route, changed-session, and changed-turn probes use the exact installed prompt command; the guard probes allowed Luna, denied non-Luna, and denied malformed input. It verifies that route output is stateless and bound to the installed Luna configuration. It performs no model, Web, browser, or network action, does not activate Hook trust, and leaves the configured state root untouched.
 
-### Manual App acceptance checklist
+## Hook trust and activation limitations
 
-Automated tests cannot verify Codex UI Hook trust or a real Luna model turn. Before treating a live installation as active:
+Automated tests cannot verify Codex UI Hook trust or a real Luna model turn. The
+Codex desktop App has no supported Hook-trust UI, so App-only activation is
+unsupported. Installed files, `global-status`, and offline `global-self-test`
+are local configuration and protocol evidence only; they do not prove that
+Codex trusts or dispatches the hooks.
 
-1. Confirm the recorded absolute Python interpreter is durable and still imports `codex_router` with the configured `-E -P -m codex_router` command. For a separately authorized live setup, open `/hooks`, review the two exact rendered commands—the `UserPromptSubmit` prompt handler and the `PreToolUse` `hook-agent-spawn` guard—and explicitly trust both. This patch does not perform live installation or Hook trust activation. Never bypass hook trust with an unsafe launch flag.
-2. Start a new Codex task. Confirm `global-status` still reports `hook_trust=requires-user-check`; this conservative value is expected because Router has no supported trust receipt.
+Only a separately authorized operator may use Codex CLI/TUI `/hooks`, review the
+two exact rendered commands—the `UserPromptSubmit` prompt handler and the
+`PreToolUse` `hook-agent-spawn` guard—and explicitly trust both. Changed
+user-hook definitions require renewed CLI/TUI review and a new Codex task. This
+patch does not perform live installation or Hook trust activation. Never bypass
+hook trust with an unsafe launch flag.
+
+After that CLI/TUI review and a new task, before treating a live installation as
+active:
+
+1. Confirm the recorded absolute Python interpreter is durable and still imports `codex_router` with the configured `-E -P -m codex_router` command.
+2. Confirm `global-status` reports `hook_trust=requires-cli-review`; this conservative value records the required CLI/TUI review and is not a Router trust receipt.
 3. Submit a bounded synthetic implementation task. Confirm Codex shows `Router: active`, uses Sol for planning and review, and delegates each executable packet to one persistent `luna_worker` sequentially.
 4. Confirm the Luna task uses `gpt-5.6-luna` with `max` reasoning, accepts follow-up packets with fresh boundaries, and inherits the parent controls. Verify it does not browse, access credentials, or mutate GitHub/install/deployment state.
 5. Confirm no per-prompt Router run is created and the configured state root is untouched.
@@ -235,7 +249,9 @@ production Hook command deliberately ignores `PYTHONPATH`.
 - App-driven stages still require Codex App or the operator to execute the returned packet and supply bounded evidence files.
 - Real `--adapter-mode real` provider wiring is not configured or validated.
 - Web model, reasoning, and context claims are operator-attested rather than browser-verified.
-- Hook trust and new-task activation must be confirmed manually through Codex; `global-status` never claims them as verified.
+- Hook trust and new-task activation require separately authorized Codex CLI/TUI
+  review; Codex desktop App-only activation is unsupported, and `global-status`
+  never claims trust as verified.
 - The Web security gate blocks or redacts detected protected categories but cannot prove that every unknown sensitive value was detected.
 - Fake mode proves Router orchestration and persistence, not model quality.
 - The MVP does not manage Codex archive/delete lifecycle.

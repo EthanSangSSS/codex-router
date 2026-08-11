@@ -21,8 +21,10 @@ turn-scoped command hook. Its JSON input includes common fields
 `session_id`, `cwd`, and `hook_event_name`, plus `turn_id` and `prompt`. JSON
 output may add developer context through
 `hookSpecificOutput.additionalContext`. A hook may block with
-`{"decision":"block","reason":"..."}`. User hooks require explicit review and
-trust through `/hooks`; changed hook definitions require renewed review.
+`{"decision":"block","reason":"..."}`. User hooks require separately
+authorized Codex CLI/TUI review and trust through `/hooks`; Codex desktop
+App-only activation is unsupported, and changed hook definitions require
+renewed CLI/TUI review.
 
 User hooks load from the active Codex home, normally `~/.codex/hooks.json`.
 Global `AGENTS.md` guidance is loaded once at the start of a Codex session, so
@@ -278,7 +280,7 @@ The installer never overwrites full `AGENTS.md`, `AGENTS.override.md`,
 
 `global-status` reports installation presence, hook configuration, managed
 AGENTS block, secret presence/mode, configuration validity, hook trust as
-`unknown` or `requires-user-check`, and `new-session-required`. It never claims
+`unknown` or `requires-cli-review`, and `new-session-required`. It never claims
 trust without a supported Codex trust receipt.
 
 The safe self-test uses synthetic hook events through child processes, makes no
@@ -292,10 +294,11 @@ activate the live installation or touch the configured state root.
 
 ## Rollback and manual acceptance
 
-Installation is not active until the operator reviews `/hooks`, starts a new
-Codex session, and completes the documented manual checklist. Uninstall restores
-manual Router behavior only for new sessions because AGENTS guidance is loaded
-at session start.
+Installation is not active until a separately authorized Codex CLI/TUI operator
+reviews `/hooks`, starts a new Codex session, and completes the documented
+manual checklist. Codex desktop App-only activation is unsupported. Uninstall
+restores manual Router behavior only for new sessions because AGENTS guidance
+is loaded at session start.
 
 Manual acceptance must check same-session context reuse, new-session isolation,
 one run per turn, no new Web page, marker rejection, one-turn bypass, protected
