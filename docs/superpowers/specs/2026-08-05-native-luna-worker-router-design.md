@@ -1,21 +1,32 @@
 # Native Luna Worker Router Design
 
-Status: approved
-Date: 2026-08-05
-Target branch: `feat/global-auto-router-policy-v1`
+Status: approved, amended after 2026-08-14 lifecycle incident
+Date: 2026-08-05; hardening amendment 2026-08-14
+Target branch: `main`
 
 ## Objective
 
-Replace the unusable automatic `Local Sol -> Web Sol -> Luna` per-prompt run
-with a lightweight native Codex delegation policy:
+Keep the native Codex delegation model:
 
 ```text
 Sol plans -> luna_worker executes sequential work packets -> Sol reviews
 ```
 
-Web Sol is entirely operator-managed copy/paste and is outside the automatic
-Router path. The existing canonical state machine and fake pipeline remain
-available only through explicit CLI commands.
+Sol remains the primary coordinator, highest decision authority, and final reviewer. Luna remains the default writable execution owner for bounded delegated work. The hardening amendment preserves that split while preventing a completed parent task from reactivating child work, preventing Luna from starting another Codex runtime through shell or PTY indirection, and failing closed when execution requires interactive user trust or approval.
+
+Web Sol remains entirely operator-managed copy/paste and outside the automatic Router path. The existing canonical state machine and fake pipeline remain available only through explicit CLI commands.
+
+## Authority model
+
+Sol owns planning, decomposition, delegation, review, correction, bounded takeover, termination, and the final response. Ordinary execution policy is intentionally adaptive rather than a fixed decision tree: after a Luna blocker, Sol may narrow the packet, retry with new evidence, take over directly, ask the user, or stop.
+
+Three safety invariants are not overridable by Sol or Luna:
+
+1. A terminal parent task cannot be revived. Once the parent task enters a terminal state, its Luna and any child execution capability are permanently ineligible for reuse by that parent task.
+2. Luna cannot launch, resume, probe, wrap, or indirectly execute another Codex runtime, including Codex CLI, `codex exec`, an embedded ChatGPT Codex binary, or a PTY/shell wrapper whose effective command launches Codex.
+3. Luna cannot bypass or autonomously work around interactive user trust, approval, authentication, or security confirmation. Such a blocker returns control to Sol; Sol may handle it directly only when doing so does not violate the first two invariants or bypass a user-required confirmation.
+
+Everything else remains under Sol's judgment. In particular, capacity, packet count, retry strategy, whether to continue using Luna, whether to take over ordinary execution, and when to stop are Sol decisions with explicit reasoning and observed evidence.
 
 ## Native Luna worker
 
@@ -36,119 +47,114 @@ model_reasoning_effort = "max"
 enabled = false
 ```
 
-The file intentionally omits `sandbox_mode`, approval policy, MCP, and skill
-overrides so the child inherits the parent task's effective controls. Its
-instructions require bounded scope, evidence-first work, no browser or Web Sol
-operation, no authentication access, and no GitHub/install/release mutations.
-The `[agents]` gate mechanically disables Luna's multi-Agent tools. Luna must
-never create, spawn, fork, relay, resume, or delegate a child or descendant; a
-packet that requires recursive delegation returns
-`BLOCKED_LUNA_RECURSIVE_DELEGATION`.
+The file intentionally omits `sandbox_mode`, approval policy, MCP, and skill overrides so the child inherits the parent task's effective controls. Its instructions require bounded scope, evidence-first work, no browser or Web Sol operation, no authentication access, and no GitHub/install/release mutations unless an exact delegated packet explicitly authorizes an otherwise permitted action.
 
-Luna is the default execution owner for every routed work packet that Sol can
-state with explicit scope and acceptance criteria. Each parent Codex task has
-at most one persistent `luna_worker`; only the primary Codex task may create an
-Agent, and Luna or any other child may not create descendants. Sol queries the
-task tree before every packet. When the interface supports it, the initial Luna
-is created from a self-contained packet with no conversation history; later
-packets follow up with the same Luna, including when it is completed or idle.
-It may inspect, edit, test, and correct multiple files inside the
-delegated boundary. During execution, Luna is the sole writer for that file set
-until it returns. Sol remains the coordinator and final decision-maker.
+The `[agents]` gate mechanically disables Luna's multi-Agent tools. Luna must never create, spawn, fork, relay, resume, or delegate a child or descendant; a packet that requires recursive delegation returns `BLOCKED_LUNA_RECURSIVE_DELEGATION`.
 
-Before creating any helper non-Luna child Agent, Sol must ensure that Luna
-exists and reserve capacity for it. A new packet restates its packet id,
-working directory, allowed paths, forbidden operations, validation, stop
-conditions, and required output; the previous packet's path authorization
-expires automatically, and Luna obeys only the latest explicit boundary.
+Luna also has a process-recursion prohibition. It must not use shell, PTY, environment wrappers, scripts, subprocess helpers, or absolute application paths to start or resume Codex itself. A packet that requires another Codex runtime returns `BLOCKED_LUNA_CODEX_RUNTIME` to Sol. The implementation must enforce this at the strongest verified local tool boundary available; policy text alone is not considered sufficient when a verified pre-tool gate exists.
+
+## Parent-scoped persistence
+
+Luna is persistent only while the parent Codex task is active.
+
+The lifecycle distinction is:
+
+```text
+Luna packet completed/idle != parent task completed
+```
+
+While the parent task is active, Sol may reuse the same Luna across multiple sequential work packets and bounded correction packets, including when Luna's previous packet is completed or idle. This preserves cache continuity and avoids unnecessary cold-session context expansion.
+
+When the parent task is about to enter a terminal state, Sol must close the persistent Luna when the runtime exposes a close operation, stop issuing new packets, and invalidate any outstanding delegated work. A late result may be observed for reporting, but it must not cause new model work, a new packet, `send_input`, resume, or inter-agent communication after the parent terminal boundary.
+
+A parent-terminal Luna must never be selected by a later task. A new user task receives a new parent-scoped Luna identity if delegation is needed.
+
+If the runtime cannot prove that a child was closed, the final report must disclose `LUNA_CLOSE_UNVERIFIED`; it must not claim cleanup succeeded merely because an agent message says completed or interrupted.
 
 ## Stateless global Hook
 
-`UserPromptSubmit` continues to classify each prompt as `direct`, `bypass`, or
-`route`. A routed response contains only bounded policy context:
+`UserPromptSubmit` continues to classify each prompt as `direct`, `bypass`, or `route`. A routed response contains bounded policy context such as:
 
 ```json
 {
   "decision": "route",
   "workflow": "native_luna_worker",
+  "sol_role": "plan_review_final_authority",
+  "luna_role": "default_execution",
+  "delegation_mode": "sequential_work_packets",
   "luna_agent": "luna_worker",
   "luna_model": "gpt-5.6-luna",
   "luna_reasoning": "max",
-  "luna_lifecycle": "persistent_per_parent_task",
-  "capacity_failure_policy": "reuse_close_or_block",
+  "luna_lifecycle": "persistent_while_parent_active",
+  "parent_terminal_policy": "close_and_forbid_resume",
+  "capacity_failure_policy": "return_to_sol",
   "luna_descendant_policy": "forbidden",
+  "luna_codex_runtime_policy": "forbidden",
+  "interactive_blocker_policy": "return_to_sol_or_user",
   "initial_context_mode": "packet_only",
   "web_mode": "manual_operator"
 }
 ```
 
-It does not allocate a `run_id`, create state directories, launch a model, or
-touch the browser. Legacy explicit Router CLI runs keep their current state
-authority, transition, digest, and recovery semantics.
+The Hook remains stateless: it does not allocate a `run_id`, create state directories, launch a model, or touch the browser. Parent lifecycle enforcement belongs to verified agent/task and tool boundaries, not to invented Router run state. Legacy explicit Router CLI runs keep their existing state authority, transition, digest, and recovery semantics.
 
 ## Delegation policy
 
-For routed work, Sol plans and decomposes the task, then delegates each
-executable work packet to the persistent `luna_worker` sequentially. Sol may
-perform the read-only inspection needed to plan or review, but does not
-implement the planned changes by default. If Luna's result fails review, Sol
-sends a bounded correction packet back to the same Luna.
+For routed work, Sol plans and decomposes the task, then normally delegates executable work packets to the persistent `luna_worker` sequentially. Sol may perform read-only inspection needed to plan or review. If Luna's result fails review, Sol may send a bounded correction packet to the same Luna while the parent task remains active.
 
-Luna capacity exhaustion never authorizes Sol to take over. The ordered
-fallback is: reuse the existing Luna; if the interface supports it, close an
-unused completed non-Luna Agent; otherwise return `BLOCKED_LUNA_CAPACITY`.
-Relay-based recovery is forbidden. Only `direct` or
-`bypass`, an unresolved architecture decision that cannot be safely decomposed,
-or a non-capacity Luna execution blocker permits a bounded Sol takeover, which
-must disclose its reason.
+Every delegation packet states objective, working directory, readable and writable paths, forbidden actions, validation, stop conditions, required output, and the current parent-task boundary. Previous packet write authorization expires when a new packet is issued.
 
-Sol may take over writable execution only when the user selects `direct` or
-`bypass`, Luna reports a concrete non-capacity blocker, or the work cannot be
-decomposed safely without an unresolved architectural decision. The takeover
-and reason must be disclosed. Multiple sequential Luna packets are allowed;
-concurrent writes to the same file set are not.
+Sol is not prohibited from taking over ordinary writable execution merely because Luna is unavailable. Luna capacity exhaustion or another ordinary execution blocker returns control to Sol. Sol may reuse Luna, close an unused non-Luna agent, narrow work, take over directly, ask the user, or stop. A takeover must disclose its reason and preserve single-writer ownership for the relevant file set.
 
-Every delegation packet states objective, readable and writable paths,
-forbidden actions, validation, stop conditions, and required output. Luna never
-decides workflow transitions, creates descendants, or performs Web work. Its
-multi-Agent tools are mechanically disabled, and recursive work fails with
-`BLOCKED_LUNA_RECURSIVE_DELEGATION`. The Hook context records `sol_role=plan_review`,
-`luna_role=default_execution`, `delegation_mode=sequential_work_packets`,
-`luna_lifecycle=persistent_per_parent_task`, and
-`capacity_failure_policy=reuse_close_or_block`,
-`luna_descendant_policy=forbidden`, and `initial_context_mode=packet_only` so
-the initial packet is self-contained and this ownership split does not depend
-on conversation memory.
+Sol may also decide not to delegate when delegation would predictably violate a hard invariant, cause unnecessary cold-context duplication, or require an unresolved architecture decision. This preserves Sol's highest control authority without allowing lifecycle resurrection or recursive Codex execution.
+
+## Interactive and retry policy
+
+Interactive trust or security blockers are not autonomous retry problems. Examples include Hook trust review, user approval prompts, authentication, or another confirmation that explicitly requires the user.
+
+Luna must return `BLOCKED_USER_INTERACTION_REQUIRED` with the observed blocker and no workaround attempt that launches another Codex runtime or changes terminal emulation merely to force an interactive path. Sol may choose a safe direct action if supported, otherwise it returns the required action to the user.
+
+For non-interactive blockers, retry policy remains adaptive. Repeating the same failed operation without new evidence is discouraged and must return control to Sol rather than creating an unbounded wait/interrupt/retry loop. There is no fixed global turn-count restart rule because forced session replacement can destroy prompt-cache continuity and recreate the cold-context amplification observed in the incident.
+
+## Economic guardrails
+
+Economic controls are advisory to Sol, not fixed quota cutoffs. The Router must not hard-code a weekly token or credit ceiling because plan accounting and model mix can change.
+
+The implementation should expose or preserve bounded telemetry that lets Sol recognize suspicious amplification when available: repeated identical blocker cycles, unexpected new Codex process/session creation, unusually large uncached context, or repeated cold-session initialization. When such a signal appears, Luna stops expanding the execution path and returns evidence to Sol. Sol then decides whether to narrow, take over, ask the user, or stop.
+
+The design explicitly prefers cache continuity inside an active parent task. It must not implement a blanket rule such as "restart Luna every 50 turns". A new Luna is created only for a new parent task or when the active parent deliberately replaces a failed worker without violating lifecycle or single-writer constraints.
+
+## Process-recursion gate
+
+The source-of-truth repository must contain any runtime gate used to block Luna from launching Codex. A live `site-packages` implementation that is absent from the repository is not an acceptable final state.
+
+Before implementation, reconcile the current repository with the installed Router package and `~/.codex/hooks.json` read-only. If the installed package already contains a verified pre-tool handler absent from `main`, port only the minimal relevant mechanism into source with tests. Do not invent hook names, event schemas, or tool payload fields. If no mechanically enforceable pre-tool boundary is available, stop with `BLOCKED_CODEX_RUNTIME_GATE_UNAVAILABLE` rather than claiming the policy is enforced.
+
+The gate must use effective command intent, not only a literal first token. It must reject direct and wrapped attempts including absolute Codex binaries, `env ... codex`, shell `-c` wrappers, PTY/script wrappers, and equivalent command forms that resolve to a Codex runtime. It must not block unrelated commands merely because a filename or text argument contains the word `codex`.
 
 ## Installer ownership and recovery
 
-The installer owns only its Hook entry, bounded AGENTS block, installation
-metadata, and `agents/luna-worker.toml`. Existing unrelated hooks, AGENTS text,
-and agent files are preserved.
+The installer continues to own only its Hook entries, bounded AGENTS block, installation metadata, and `agents/luna-worker.toml`. Existing unrelated hooks, AGENTS text, and agent files are preserved.
 
-For a fresh install, an absent `agents/` directory may be created privately.
-For an existing `luna-worker.toml`, installation records and backs up exact
-bytes and mode before replacement; uninstall restores them. A conflicting
-post-install user edit fails closed.
+If lifecycle or pre-tool hooks are added, they become explicit managed targets inside the same reversible `hooks.json` ownership model; install/uninstall and conflict detection must remain byte/mode safe for unrelated user content.
 
-The current two-target installation is upgraded only through the safe sequence:
+No direct edits to live `site-packages`, `~/.codex/AGENTS.md`, or `~/.codex/hooks.json` are considered source implementation. Live installation happens only through the project's validated installer after repository tests pass.
 
-1. existing installer performs `global-uninstall` and restores its originals;
-2. the new package is installed;
-3. the new installer reuses the uninstalled installation directory, prepares
-   current managed outputs, and installs the Hook, AGENTS block, and Luna agent.
+## Validation invariants
 
-No live migration is performed during this code implementation pass.
+Offline tests must prove at minimum:
 
-## Validation and limitations
+- routed Hook context preserves Sol plan/review/final authority and Luna default execution;
+- Luna is reusable across sequential packets while the parent is active;
+- a parent terminal boundary forbids later Luna resume, `send_input`, new packet, or inter-agent reactivation;
+- close status is reported truthfully and unverified cleanup is not called successful;
+- Luna descendant-agent creation remains mechanically disabled;
+- Luna cannot launch a Codex runtime through direct, absolute-path, environment, shell, or PTY wrappers at the strongest verified tool boundary;
+- interactive user-required blockers return control instead of autonomous PTY/TERM retry loops;
+- Sol may take over ordinary execution after a disclosed non-hard-invariant blocker;
+- no blanket fixed-turn Luna restart is introduced;
+- packet-only initial context and cache-friendly same-parent reuse remain intact;
+- Hook routing remains stateless and legacy CLI/fake behavior remains compatible;
+- installer ownership, recovery, and unrelated user configuration preservation remain exact.
 
-Offline tests must prove Hook statelessness, exact Luna TOML semantics,
-preservation and recovery of pre-existing user files, subprocess Hook protocol,
-the persistent-per-parent reuse/close/block policy, mechanical descendant-agent
-disablement, packet-only initial context, no configured-state pollution, and
-legacy CLI/fake compatibility.
-
-The current account is deactivated. Offline configuration can be validated,
-but actual Luna availability, account authorization, token consumption, and a
-successful spawned model turn remain unverified until the account is restored
-and a new Codex task is started.
+Runtime acceptance must additionally verify from a new Codex task that Sol can plan, delegate to one Luna, review, issue a correction packet, and finish; after the parent task finishes, no old Luna or child session can be reactivated by later inter-agent communication. Runtime acceptance must not intentionally launch a nested Codex process to prove the negative guard; use the verified pre-tool gate's dry/in-process test path instead.
