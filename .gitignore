@@ -2,3 +2,17 @@
 .venv/
 __pycache__/
 *.egg-info/
+
+# Local secrets and signing material
+.env
+.env.*
+!.env.example
+**/.mcp.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+**/service-account*.json
+**/play-service-account*.json
