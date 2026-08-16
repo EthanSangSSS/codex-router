@@ -84,7 +84,14 @@ def parser() -> argparse.ArgumentParser:
     status.add_argument("--run-id", required=True)
     status.add_argument("--state-dir", type=Path, required=True)
 
-    for command, event in (("hook-user-prompt", "UserPromptSubmit"), ("hook-pre-tool", "PreToolUse"), ("hook-post-tool", "PostToolUse"), ("hook-permission-request", "PermissionRequest"), ("hook-stop", "Stop"), ("hook-subagent-start", "SubagentStart"), ("hook-subagent-stop", "SubagentStop")):
+    for command, event in (
+        ("hook-user-prompt", "UserPromptSubmit"),
+        ("hook-pre-tool", "PreToolUse"),
+        ("hook-post-tool", "PostToolUse"),
+        ("hook-permission-request", "PermissionRequest"),
+        ("hook-stop", "Stop"),
+        ("hook-subagent-start", "SubagentStart"),
+    ):
         hook = subcommands.add_parser(command, help=f"handle one Codex {event} event")
         hook.add_argument("--installation-dir", type=Path, required=True)
 
@@ -145,6 +152,9 @@ def _global_status_payload(status: GlobalStatus) -> dict[str, Any]:
         "identity_material_valid": status.identity_material_valid,
         "hook_trust": status.hook_trust,
         "new_session_required": status.new_session_required,
+        "compatibility": status.compatibility,
+        "compatibility_reason": status.compatibility_reason,
+        "luna_execution_mode": status.luna_execution_mode,
     }
 
 
