@@ -208,7 +208,7 @@ def handle_user_prompt(
             "luna_model": luna["requested_model"],
             "luna_reasoning": luna["requested_reasoning"],
             "luna_lifecycle": "persistent_while_root_turn_active",
-            "parent_terminal_policy": "revoke_then_cleanup",
+            "parent_terminal_policy": "revoke_only_security_boundary",
             "capacity_failure_policy": "return_to_sol",
             "luna_descendant_policy": "forbidden",
             "luna_codex_runtime_policy": "forbidden",
@@ -232,10 +232,6 @@ def _event_base(
     if not isinstance(event, Mapping) or event.get("hook_event_name") != expected:
         raise _invalid(f"hook_event_name must be {expected}")
     return {name: _event_text(event, name) for name in required}
-
-
-def _block(reason: str) -> dict[str, Any]:
-    return {"decision": "block", "reason": reason[:500]}
 
 
 def _pretool_output(decision: str, reason: str) -> dict[str, Any]:
@@ -424,7 +420,6 @@ def handle_hook_event(
             )
             if _is_subagent_event(event):
                 return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
-            response = event.get("tool_response")
             if base["tool_name"] == "spawn_agent":
                 native_lifecycle.post_spawn(
                     Path(installation_dir),
@@ -432,15 +427,7 @@ def handle_hook_event(
                     base["session_id"],
                     base["turn_id"],
                     base["tool_use_id"],
-                    response,
-                )
-            elif base["tool_name"] in _PARENT_CLEANUP_TOOLS:
-                native_lifecycle.finish_interrupt(
-                    Path(installation_dir),
-                    secret,
-                    base["session_id"],
-                    base["turn_id"],
-                    response,
+                    event.get("tool_response"),
                 )
             return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
 
@@ -466,18 +453,18 @@ def handle_hook_event(
                 )
             return {"hookSpecificOutput": {"hookEventName": "SubagentStart"}}
 
-        if name in ("Stop", "SubagentStop"):
+        if name == "Stop":
             base = _event_base(event, name, ("session_id", "turn_id"))
-            if name == "Stop" and native_lifecycle.stop_once(
+            native_lifecycle.stop_once(
                 Path(installation_dir),
                 secret,
                 base["session_id"],
                 base["turn_id"],
-            ):
-                return _block(
-                    "Router revoked the active Luna binding; perform at most one "
-                    "native cleanup attempt, then finalize without more Luna work"
-                )
+            )
+            return {}
+
+        if name == "SubagentStop":
+            _event_base(event, name, ("session_id", "turn_id"))
             return {}
 
         raise _invalid("unsupported hook event")
@@ -487,7 +474,7 @@ def handle_hook_event(
         if name == "PermissionRequest":
             return _permission_deny(str(error))
         if name in ("Stop", "SubagentStop"):
-            return _block(str(error))
+            return {}
         return {"continue": False, "stopReason": str(error)[:500]}
 
 
