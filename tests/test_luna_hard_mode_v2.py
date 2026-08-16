@@ -5,7 +5,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from codex_router import global_install
+from codex_router import global_install_adapter as global_install
 from codex_router import native_lifecycle as lifecycle
 from codex_router.hook import handle_hook_event
 
@@ -94,9 +94,7 @@ class LunaHardModeV2Tests(unittest.TestCase):
 
     def test_bound_luna_still_allows_non_process_work(self):
         self.assertEqual(self._luna_tool("Read", {"path": "README.md"}), {})
-        self.assertEqual(
-            self._luna_tool("apply_patch", {"patch": "synthetic"}), {}
-        )
+        self.assertEqual(self._luna_tool("apply_patch", {"patch": "synthetic"}), {})
 
     def test_primary_sol_shell_is_not_restricted_by_luna_hard_mode(self):
         output = handle_hook_event(
