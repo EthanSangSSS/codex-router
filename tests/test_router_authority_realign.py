@@ -106,7 +106,9 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
         self.assertEqual(context["decision"], "route")
         self.assertEqual(context["sol_role"], "plan_review_final_authority")
         self.assertEqual(context["luna_lifecycle"], "persistent_while_root_turn_active")
-        self.assertEqual(context["parent_terminal_policy"], "revoke_then_cleanup")
+        self.assertEqual(
+            context["parent_terminal_policy"], "revoke_only_security_boundary"
+        )
         self.assertEqual(context["capacity_failure_policy"], "return_to_sol")
         self.assertEqual(context["luna_codex_runtime_policy"], "forbidden")
         self.assertEqual(context["interactive_blocker_policy"], "return_to_sol_or_user")
