@@ -51,6 +51,9 @@ class GlobalStatus:
     identity_material_valid: bool
     hook_trust: str
     new_session_required: bool
+    compatibility: str = "UNKNOWN_REQUIRES_CAPABILITY_CHECK"
+    compatibility_reason: str = "effective primary Codex capability is unverified"
+    luna_execution_mode: str = "unknown"
 
 
 class StageAdapter(Protocol):
