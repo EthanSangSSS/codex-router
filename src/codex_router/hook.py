@@ -8,7 +8,6 @@ import stat
 from typing import Any, Mapping
 
 from . import native_lifecycle
-from .command_intent import classify_shell_command
 from .policy import classify_prompt
 from .protocol import canonical_json_bytes
 from .state import RouterStateError
@@ -25,7 +24,7 @@ _BLOCK_REASON = (
     "Repair or re-trust the managed Router Hook before continuing routed work."
 )
 
-_LUNA_SHELL_TOOLS = {"Bash", "shell_command"}
+_LUNA_PROCESS_TOOLS = {"Bash", "shell_command"}
 _LUNA_FORBIDDEN_TOOLS = {
     "spawn_agent",
     "send_input",
@@ -263,8 +262,6 @@ def _looks_like_agent_lifecycle_tool(tool_name: str) -> bool:
 
 def _is_unknown_executor_tool(tool_name: str) -> bool:
     lowered = tool_name.lower()
-    if tool_name in _LUNA_SHELL_TOOLS:
-        return False
     return lowered in {
         "exec",
         "code_mode",
@@ -284,10 +281,8 @@ def _handle_luna_pretool(
     *,
     event: Mapping[str, Any],
     base: Mapping[str, Any],
-    tool_input: Mapping[str, Any],
     installation_dir: Path,
     secret: bytes,
-    config: Mapping[str, Any],
 ) -> dict[str, Any]:
     native_lifecycle.authorize_luna(
         installation_dir, secret, base["session_id"], _event_text(event, "agent_id")
@@ -297,19 +292,16 @@ def _handle_luna_pretool(
         return _pretool_output(
             "deny", "Luna tool surface forbids agent/process continuation"
         )
+    if tool_name in _LUNA_PROCESS_TOOLS:
+        return _pretool_output(
+            "deny",
+            "Luna hard mode disables arbitrary shell/process execution; return to Sol",
+        )
     if _is_unknown_executor_tool(tool_name):
-        return _pretool_output("deny", "Luna unknown executor surface fails closed")
-    if tool_name not in _LUNA_SHELL_TOOLS:
-        return {}
-    command = tool_input.get("command")
-    if not isinstance(command, str):
-        return _pretool_output("deny", "Luna shell command payload is invalid")
-    decision = classify_shell_command(command, codex_binary=str(config["codex_binary"]))
-    if decision.disposition == "ALLOW":
-        return {}
-    return _pretool_output(
-        "deny", f"LUNA_CODEX_GATE_{decision.disposition}: {decision.reason}"
-    )
+        return _pretool_output(
+            "deny", "Luna hard mode rejects unknown executor surfaces"
+        )
+    return {}
 
 
 def _handle_parent_pretool(
@@ -362,7 +354,7 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
     if name == "UserPromptSubmit":
         return handle_user_prompt(event, installation_dir)
     try:
-        secret, config = _load_installation(Path(installation_dir))
+        secret, _config = _load_installation(Path(installation_dir))
         if name == "PreToolUse":
             base = _event_base(
                 event, name, ("session_id", "turn_id", "tool_name", "tool_use_id")
@@ -374,10 +366,8 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
                 return _handle_luna_pretool(
                     event=event,
                     base=base,
-                    tool_input=tool_input,
                     installation_dir=Path(installation_dir),
                     secret=secret,
-                    config=config,
                 )
             if _is_subagent_event(event):
                 if _looks_like_agent_lifecycle_tool(base["tool_name"]):
