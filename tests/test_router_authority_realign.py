@@ -184,6 +184,24 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
         )
         self.assertEqual(output, {})
 
+    def test_non_primary_child_cannot_create_or_control_router_agents(self):
+        output = handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-a",
+                "turn_id": "turn-a",
+                "tool_name": "spawn_agent",
+                "tool_use_id": "child-spawn",
+                "agent_id": "other-child",
+                "agent_type": "reviewer",
+                "tool_input": {"task_name": "luna_worker"},
+            },
+            self.installation_dir,
+        )
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
