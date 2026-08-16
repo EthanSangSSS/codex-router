@@ -75,8 +75,9 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
         lifecycle.bind_child(
             self.installation_dir,
             self.secret,
-            {"agent_id": "luna-child", "agent_type": "luna_worker"},
-            {"parent_thread_id": session, "agent_path": "/root/luna_worker"},
+            session,
+            "luna-child",
+            "luna_worker",
         )
 
     def _journal_record(self, session: str, turn: str):
@@ -124,6 +125,15 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
             "REVOKED",
         )
 
+    def test_new_routed_root_turn_revokes_prior_turn_binding(self):
+        self._bind_luna(turn="turn-old")
+        context = self._route_context("修改 README")
+        self.assertEqual(context["decision"], "route")
+        self.assertEqual(
+            self._journal_record("session-a", "turn-old")["authorization"],
+            "REVOKED",
+        )
+
     def test_stop_revokes_active_binding_before_requesting_one_cleanup_continuation(self):
         self._bind_luna()
         output = handle_hook_event(
@@ -147,28 +157,6 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
             self.installation_dir,
         )
         self.assertEqual(second, {})
-
-    def test_luna_tool_use_from_another_turn_is_denied_and_revokes_old_binding(self):
-        self._bind_luna(turn="turn-old")
-        output = handle_hook_event(
-            {
-                "hook_event_name": "PreToolUse",
-                "session_id": "session-a",
-                "turn_id": "turn-new",
-                "tool_name": "exec_command",
-                "tool_use_id": "tool-new",
-                "agent_id": "luna-child",
-                "agent_type": "luna_worker",
-                "tool_input": {"cmd": "echo ok"},
-            },
-            self.installation_dir,
-        )
-        decision = output["hookSpecificOutput"]["permissionDecision"]
-        self.assertEqual(decision, "deny")
-        self.assertEqual(
-            self._journal_record("session-a", "turn-old")["authorization"],
-            "REVOKED",
-        )
 
     def test_non_luna_permission_request_defers_to_native_approval_flow(self):
         output = handle_hook_event(
