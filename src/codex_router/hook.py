@@ -208,7 +208,7 @@ def handle_user_prompt(
             "luna_model": luna["requested_model"],
             "luna_reasoning": luna["requested_reasoning"],
             "luna_lifecycle": "persistent_while_root_turn_active",
-            "parent_terminal_policy": "revoke_only_security_boundary",
+            "parent_terminal_policy": "revoke_then_cleanup",
             "capacity_failure_policy": "return_to_sol",
             "luna_descendant_policy": "forbidden",
             "luna_codex_runtime_policy": "forbidden",
@@ -248,10 +248,7 @@ def _permission_deny(message: str) -> dict[str, Any]:
     return {
         "hookSpecificOutput": {
             "hookEventName": "PermissionRequest",
-            "decision": {
-                "behavior": "deny",
-                "message": message[:500],
-            },
+            "decision": {"behavior": "deny", "message": message[:500]},
         }
     }
 
@@ -293,15 +290,10 @@ def _handle_luna_pretool(
     config: Mapping[str, Any],
 ) -> dict[str, Any]:
     native_lifecycle.authorize_luna(
-        installation_dir,
-        secret,
-        base["session_id"],
-        _event_text(event, "agent_id"),
+        installation_dir, secret, base["session_id"], _event_text(event, "agent_id")
     )
     tool_name = base["tool_name"]
-    if tool_name in _LUNA_FORBIDDEN_TOOLS or _looks_like_agent_lifecycle_tool(
-        tool_name
-    ):
+    if tool_name in _LUNA_FORBIDDEN_TOOLS or _looks_like_agent_lifecycle_tool(tool_name):
         return _pretool_output(
             "deny", "Luna tool surface forbids agent/process continuation"
         )
@@ -309,19 +301,14 @@ def _handle_luna_pretool(
         return _pretool_output("deny", "Luna unknown executor surface fails closed")
     if tool_name not in _LUNA_SHELL_TOOLS:
         return {}
-
     command = tool_input.get("command")
     if not isinstance(command, str):
         return _pretool_output("deny", "Luna shell command payload is invalid")
-    decision = classify_shell_command(
-        command,
-        codex_binary=str(config["codex_binary"]),
-    )
+    decision = classify_shell_command(command, codex_binary=str(config["codex_binary"]))
     if decision.disposition == "ALLOW":
         return {}
     return _pretool_output(
-        "deny",
-        f"LUNA_CODEX_GATE_{decision.disposition}: {decision.reason}",
+        "deny", f"LUNA_CODEX_GATE_{decision.disposition}: {decision.reason}"
     )
 
 
@@ -366,15 +353,11 @@ def _handle_parent_pretool(
     if tool_name in _PARENT_OBSERVE_TOOLS:
         return {}
     if _looks_like_agent_lifecycle_tool(tool_name):
-        return _pretool_output(
-            "deny", "unknown agent lifecycle operation fails closed"
-        )
+        return _pretool_output("deny", "unknown agent lifecycle operation fails closed")
     return {}
 
 
-def handle_hook_event(
-    event: Mapping[str, Any], installation_dir: Path
-) -> dict[str, Any]:
+def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[str, Any]:
     name = event.get("hook_event_name") if isinstance(event, Mapping) else None
     if name == "UserPromptSubmit":
         return handle_user_prompt(event, installation_dir)
@@ -382,9 +365,7 @@ def handle_hook_event(
         secret, config = _load_installation(Path(installation_dir))
         if name == "PreToolUse":
             base = _event_base(
-                event,
-                name,
-                ("session_id", "turn_id", "tool_name", "tool_use_id"),
+                event, name, ("session_id", "turn_id", "tool_name", "tool_use_id")
             )
             tool_input = event.get("tool_input")
             if not isinstance(tool_input, Mapping):
@@ -401,8 +382,7 @@ def handle_hook_event(
             if _is_subagent_event(event):
                 if _looks_like_agent_lifecycle_tool(base["tool_name"]):
                     return _pretool_output(
-                        "deny",
-                        "Router agent lifecycle control is reserved for primary Sol",
+                        "deny", "Router agent lifecycle control is reserved for primary Sol"
                     )
                 return {}
             return _handle_parent_pretool(
@@ -414,9 +394,7 @@ def handle_hook_event(
 
         if name == "PostToolUse":
             base = _event_base(
-                event,
-                name,
-                ("session_id", "turn_id", "tool_name", "tool_use_id"),
+                event, name, ("session_id", "turn_id", "tool_name", "tool_use_id")
             )
             if _is_subagent_event(event):
                 return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
@@ -439,9 +417,7 @@ def handle_hook_event(
 
         if name == "SubagentStart":
             base = _event_base(
-                event,
-                name,
-                ("session_id", "turn_id", "agent_id", "agent_type"),
+                event, name, ("session_id", "turn_id", "agent_id", "agent_type")
             )
             if base["agent_type"] == "luna_worker":
                 native_lifecycle.bind_child(
@@ -456,10 +432,7 @@ def handle_hook_event(
         if name == "Stop":
             base = _event_base(event, name, ("session_id", "turn_id"))
             native_lifecycle.stop_once(
-                Path(installation_dir),
-                secret,
-                base["session_id"],
-                base["turn_id"],
+                Path(installation_dir), secret, base["session_id"], base["turn_id"]
             )
             return {}
 
