@@ -162,7 +162,7 @@ class HookNativeDelegationTests(HookTestCase):
                 "luna_model": "gpt-5.6-luna",
                 "luna_reasoning": "max",
                 "luna_lifecycle": "persistent_while_root_turn_active",
-                "parent_terminal_policy": "revoke_then_cleanup",
+                "parent_terminal_policy": "revoke_only_security_boundary",
                 "capacity_failure_policy": "return_to_sol",
                 "luna_descendant_policy": "forbidden",
                 "luna_codex_runtime_policy": "forbidden",
