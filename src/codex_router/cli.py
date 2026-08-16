@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from .adapters import adapters_for_mode
-from .global_install import (
+from .global_install_adapter import (
     global_install,
     global_self_test,
     global_status,
