@@ -175,7 +175,7 @@ class GlobalInstallTests(unittest.TestCase):
                 self.assertNotIn(stale_policy, managed_agents)
         self.assertNotIn("drive Local Sol -> Web Sol -> Luna", managed_agents)
         self.assertIn("packet id", managed_agents)
-        self.assertIn("latest explicit packet", managed_agents)
+        self.assertIn("latest bounded packet", managed_agents)
         luna_path = self.codex_home / "agents" / "luna-worker.toml"
         luna = tomllib.loads(luna_path.read_text(encoding="utf-8"))
         self.assertEqual(
