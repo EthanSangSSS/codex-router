@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 class GlobalSelfTestTests(unittest.TestCase):
     def setUp(self):
-        from codex_router.global_install import global_install
+        from codex_router.global_install_adapter import global_install
 
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -55,18 +55,19 @@ class GlobalSelfTestTests(unittest.TestCase):
         }
 
     def test_offline_self_test_is_ephemeral_private_and_has_no_external_actions(self):
-        import codex_router.global_install as global_install_module
+        import codex_router.global_install as core_module
+        from codex_router.global_install_adapter import global_self_test
 
         before = self.snapshot()
         with patch.object(socket, "socket", side_effect=AssertionError("network forbidden")), patch(
             "webbrowser.open", side_effect=AssertionError("browser forbidden")
         ), patch.object(
-            global_install_module,
+            core_module,
             "handle_user_prompt",
             side_effect=AssertionError("self-test must use the configured subprocess"),
             create=True,
         ):
-            result = global_install_module.global_self_test(self.codex_home)
+            result = global_self_test(self.codex_home)
 
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["protocol"], "codex-router/global-self-test/v1")
@@ -93,7 +94,8 @@ class GlobalSelfTestTests(unittest.TestCase):
         self.assertNotIn("synthetic-self-test-route", persisted)
 
     def test_self_test_accepts_current_source_hook_contract(self):
-        import codex_router.global_install as global_install_module
+        import codex_router.global_install as core_module
+        from codex_router.global_install_adapter import global_self_test
         from codex_router.hook import handle_user_prompt
 
         installation_dir = self.codex_home / ".codex-router-policy-v1"
@@ -103,12 +105,12 @@ class GlobalSelfTestTests(unittest.TestCase):
             return handle_user_prompt(event, installation_dir)
 
         with patch.object(
-            global_install_module,
+            core_module,
             "_invoke_hook_argv",
             side_effect=invoke_current_source,
         ):
             try:
-                result = global_install_module.global_self_test(self.codex_home)
+                result = global_self_test(self.codex_home)
             except Exception as error:
                 self.fail(str(error))
 
@@ -141,7 +143,7 @@ class GlobalSelfTestTests(unittest.TestCase):
         self.assertFalse(self.state_root.exists())
 
     def test_uninstalled_policy_cannot_claim_a_passing_self_test(self):
-        from codex_router.global_install import global_self_test, global_uninstall
+        from codex_router.global_install_adapter import global_self_test, global_uninstall
         from codex_router.state import RouterStateError
 
         global_uninstall(self.codex_home)
