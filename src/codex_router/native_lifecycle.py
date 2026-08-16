@@ -1,4 +1,4 @@
-"""Fail-closed native Luna lifecycle journal for Codex V2."""
+"""Minimal fail-closed native Luna authorization journal for Codex V2."""
 from __future__ import annotations
 
 import fcntl
@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import tempfile
 from contextlib import contextmanager
+from copy import deepcopy
 from typing import Any, Iterator, Mapping
 
 from .protocol import canonical_json_bytes
@@ -19,7 +20,7 @@ PROTOCOL = "codex-router/native-luna-safety-v2"
 _STATE = "native-luna-safety-v2.json"
 _LOCK = "native-luna-safety-v2.lock"
 _AUTH = {"ACTIVE", "REVOKED"}
-_CLEANUP = {"NONE", "REQUESTED", "OBSERVED", "UNVERIFIED"}
+_MAX_SESSIONS = 64
 _TARGET_FIELD = {
     "send_input": "target",
     "send_message": "target",
@@ -40,12 +41,37 @@ def _text(value: Any, field: str) -> str:
     return value
 
 
-def scope_mac(secret: bytes, session_id: str, turn_id: str) -> str:
+def _tag(secret: bytes, label: str, values: Mapping[str, str]) -> str:
     return hmac.new(
         secret,
-        canonical_json_bytes({"session_id": session_id, "turn_id": turn_id}),
+        label.encode("ascii") + b"\0" + canonical_json_bytes(dict(values)),
         hashlib.sha256,
     ).hexdigest()
+
+
+def session_tag(secret: bytes, session_id: str) -> str:
+    return _tag(secret, "session", {"session_id": _text(session_id, "session_id")})
+
+
+def scope_tag(secret: bytes, session_id: str, turn_id: str) -> str:
+    return _tag(
+        secret,
+        "scope",
+        {
+            "session_id": _text(session_id, "session_id"),
+            "turn_id": _text(turn_id, "turn_id"),
+        },
+    )
+
+
+def scope_mac(secret: bytes, session_id: str, turn_id: str) -> str:
+    """Compatibility alias for the former scope-MAC helper."""
+    return scope_tag(secret, session_id, turn_id)
+
+
+def _key(session_id: str, turn_id: str) -> str:
+    """Legacy test helper retained only for callers outside the security schema."""
+    return hashlib.sha256((session_id + "\0" + turn_id).encode()).hexdigest()
 
 
 def task_path(task_name: str) -> str:
@@ -53,10 +79,6 @@ def task_path(task_name: str) -> str:
     if name != "luna_worker":
         raise _error("only luna_worker may be spawned")
     return "/root/luna_worker"
-
-
-def _key(session_id: str, turn_id: str) -> str:
-    return hashlib.sha256((session_id + "\0" + turn_id).encode()).hexdigest()
 
 
 def _target(tool_name: str, tool_input: Mapping[str, Any]) -> str:
@@ -67,99 +89,165 @@ def _target(tool_name: str, tool_input: Mapping[str, Any]) -> str:
 
 
 def _empty() -> dict[str, Any]:
-    return {"protocol": PROTOCOL, "bindings": {}}
+    return {"protocol": PROTOCOL, "sessions": {}}
+
+
+def _hex_tag(value: Any, field: str) -> str:
+    text = _text(value, field)
+    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
+        raise _error(f"{field} is invalid")
+    return text
+
+
+def _validate_pending(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != {"tool_use_id", "task_path"}:
+        raise _error("native Luna pending spawn is invalid")
+    _text(value["tool_use_id"], "tool_use_id")
+    if value["task_path"] != "/root/luna_worker":
+        raise _error("native Luna pending spawn is invalid")
+
+
+def _validate_luna(value: Any) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != {"agent_id", "task_path"}:
+        raise _error("native Luna binding is invalid")
+    _text(value["agent_id"], "agent_id")
+    if value["task_path"] != "/root/luna_worker":
+        raise _error("native Luna binding is invalid")
 
 
 def _validate_state(value: Any, secret: bytes) -> dict[str, Any]:
+    del secret  # opaque HMAC tags are compared against recomputed caller tags on access.
     if (
         not isinstance(value, dict)
-        or set(value) != {"protocol", "bindings"}
+        or set(value) != {"protocol", "sessions"}
         or value["protocol"] != PROTOCOL
-        or not isinstance(value["bindings"], dict)
+        or not isinstance(value["sessions"], dict)
+        or len(value["sessions"]) > _MAX_SESSIONS
     ):
         raise _error("native Luna lifecycle journal is invalid")
-    for key, record in value["bindings"].items():
-        if not isinstance(key, str) or not isinstance(record, dict):
-            raise _error("native Luna lifecycle journal is invalid")
-        scope = record.get("scope")
-        if not isinstance(scope, dict) or set(scope) != {"session_id", "turn_id", "mac"}:
-            raise _error("native Luna lifecycle journal is invalid")
-        session_id = _text(scope["session_id"], "session_id")
-        turn_id = _text(scope["turn_id"], "turn_id")
-        if key != _key(session_id, turn_id) or not hmac.compare_digest(
-            scope["mac"], scope_mac(secret, session_id, turn_id)
-        ):
-            raise _error("native Luna lifecycle journal authentication failed")
+    for key, record in value["sessions"].items():
+        _hex_tag(key, "session_tag")
         if (
-            record.get("authorization") not in _AUTH
-            or record.get("cleanup") not in _CLEANUP
-            or not isinstance(record.get("stop_blocked"), bool)
+            not isinstance(record, dict)
+            or set(record) != {"scope_tag", "authorization", "pending", "luna"}
         ):
             raise _error("native Luna lifecycle journal is invalid")
-        for optional in ("pending", "luna"):
-            item = record.get(optional)
-            if item is not None and not isinstance(item, dict):
-                raise _error("native Luna lifecycle journal is invalid")
+        _hex_tag(record["scope_tag"], "scope_tag")
+        if record["authorization"] not in _AUTH:
+            raise _error("native Luna lifecycle journal is invalid")
+        _validate_pending(record["pending"])
+        _validate_luna(record["luna"])
     return value
 
 
-@contextmanager
-def _journal(directory: Path, secret: bytes) -> Iterator[dict[str, Any]]:
-    lock = directory / _LOCK
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
     try:
-        os.fchmod(fd, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        path = directory / _STATE
-        if path.exists():
-            meta = path.lstat()
-            if (
-                not stat.S_ISREG(meta.st_mode)
-                or stat.S_ISLNK(meta.st_mode)
-                or meta.st_uid != os.geteuid()
-                or stat.S_IMODE(meta.st_mode) != 0o600
-            ):
-                raise _error("native Luna lifecycle journal is unsafe")
-            try:
-                value = _validate_state(json.loads(path.read_bytes()), secret)
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise _error("native Luna lifecycle journal is unreadable") from exc
-        else:
-            value = _empty()
-        yield value
-        data = canonical_json_bytes(value) + b"\n"
-        temp_fd, temp_name = tempfile.mkstemp(prefix=".native-luna-", dir=directory)
-        try:
-            os.fchmod(temp_fd, 0o600)
-            os.write(temp_fd, data)
-            os.fsync(temp_fd)
-            os.close(temp_fd)
-            os.replace(temp_name, path)
-            os.chmod(path, 0o600)
-        finally:
-            try:
-                os.close(temp_fd)
-            except OSError:
-                pass
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
+        os.fsync(descriptor)
     finally:
-        os.close(fd)
+        os.close(descriptor)
 
 
-def _record(secret: bytes, session_id: str, turn_id: str) -> dict[str, Any]:
+def _read_state_unlocked(directory: Path, secret: bytes) -> dict[str, Any]:
+    path = directory / _STATE
+    if not path.exists():
+        return _empty()
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise _error("native Luna lifecycle journal is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+    ):
+        raise _error("native Luna lifecycle journal is unsafe")
+    try:
+        return _validate_state(json.loads(path.read_bytes()), secret)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _error("native Luna lifecycle journal is unreadable") from exc
+
+
+def _write_state_unlocked(directory: Path, state: Mapping[str, Any]) -> None:
+    path = directory / _STATE
+    data = canonical_json_bytes(dict(state)) + b"\n"
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".native-luna-", dir=directory)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        _fsync_directory(directory)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+@contextmanager
+def _locked_state(
+    directory: Path, secret: bytes, *, mutate: bool
+) -> Iterator[dict[str, Any]]:
+    lock = directory / _LOCK
+    descriptor = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            raise _error("native Luna lifecycle lock is unsafe")
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX if mutate else fcntl.LOCK_SH)
+        state = _read_state_unlocked(directory, secret)
+        before = canonical_json_bytes(state)
+        yield state
+        if mutate and canonical_json_bytes(state) != before:
+            _validate_state(state, secret)
+            _write_state_unlocked(directory, state)
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _record(scope: str) -> dict[str, Any]:
     return {
-        "scope": {
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "mac": scope_mac(secret, session_id, turn_id),
-        },
+        "scope_tag": scope,
         "authorization": "ACTIVE",
-        "cleanup": "NONE",
-        "stop_blocked": False,
         "pending": None,
         "luna": None,
     }
+
+
+def _lookup(
+    state: Mapping[str, Any], secret: bytes, session_id: str
+) -> tuple[str, dict[str, Any] | None]:
+    key = session_tag(secret, session_id)
+    record = state["sessions"].get(key)
+    return key, record if isinstance(record, dict) else None
+
+
+def _compact_for_new_session(state: dict[str, Any], keep_key: str) -> None:
+    sessions = state["sessions"]
+    for key in list(sessions):
+        if key != keep_key and sessions[key]["authorization"] == "REVOKED":
+            del sessions[key]
+    if keep_key not in sessions and len(sessions) >= _MAX_SESSIONS:
+        raise _error("native Luna lifecycle journal active-session capacity is exhausted")
 
 
 def revoke_stale(
@@ -167,15 +255,15 @@ def revoke_stale(
 ) -> None:
     if not (directory / _STATE).exists():
         return
-    with _journal(directory, secret) as state:
-        for record in state["bindings"].values():
-            scope = record["scope"]
-            if (
-                scope["session_id"] == session_id
-                and scope["turn_id"] != turn_id
-                and record["authorization"] == "ACTIVE"
-            ):
-                record["authorization"] = "REVOKED"
+    current_scope = scope_tag(secret, session_id, turn_id)
+    with _locked_state(directory, secret, mutate=True) as state:
+        _, record = _lookup(state, secret, session_id)
+        if (
+            record is not None
+            and record["scope_tag"] != current_scope
+            and record["authorization"] == "ACTIVE"
+        ):
+            record["authorization"] = "REVOKED"
 
 
 def pre_spawn(
@@ -190,29 +278,21 @@ def pre_spawn(
     if tool_input.get("fork_turns") != "none":
         raise _error("luna_worker must be spawned with fork_turns=none")
     tool_use_id = _text(tool_use_id, "tool_use_id")
-    with _journal(directory, secret) as state:
-        for record in state["bindings"].values():
-            if (
-                record["scope"]["session_id"] == session_id
-                and record["scope"]["turn_id"] != turn_id
-                and record["authorization"] == "ACTIVE"
-            ):
-                record["authorization"] = "REVOKED"
-        key = _key(session_id, turn_id)
-        record = state["bindings"].setdefault(
-            key, _record(secret, session_id, turn_id)
-        )
+    current_scope = scope_tag(secret, session_id, turn_id)
+    with _locked_state(directory, secret, mutate=True) as state:
+        key, record = _lookup(state, secret, session_id)
+        _compact_for_new_session(state, key)
+        if record is None or record["scope_tag"] != current_scope:
+            state["sessions"][key] = _record(current_scope)
+            record = state["sessions"][key]
         if (
-            record["authorization"] != "ACTIVE"
+            record["scope_tag"] != current_scope
+            or record["authorization"] != "ACTIVE"
             or record["pending"] is not None
             or record["luna"] is not None
         ):
-            raise _error("a Luna worker is already bound for this turn")
-        record["pending"] = {
-            "tool_use_id": tool_use_id,
-            "task_path": path,
-            "confirmed": False,
-        }
+            raise _error("a Luna worker is already bound or revoked for this root turn")
+        record["pending"] = {"tool_use_id": tool_use_id, "task_path": path}
 
 
 def post_spawn(
@@ -223,11 +303,13 @@ def post_spawn(
     tool_use_id: str,
     response: Any,
 ) -> None:
+    current_scope = scope_tag(secret, session_id, turn_id)
     deferred_error: RouterStateError | None = None
-    with _journal(directory, secret) as state:
-        record = state["bindings"].get(_key(session_id, turn_id))
+    with _locked_state(directory, secret, mutate=True) as state:
+        _, record = _lookup(state, secret, session_id)
         if (
             record is None
+            or record["scope_tag"] != current_scope
             or record["authorization"] != "ACTIVE"
             or not isinstance(record["pending"], dict)
             or record["pending"].get("tool_use_id") != tool_use_id
@@ -240,8 +322,6 @@ def post_spawn(
         ):
             record["authorization"] = "REVOKED"
             deferred_error = _error("Luna spawn response failed identity verification")
-        else:
-            record["pending"]["confirmed"] = True
     if deferred_error is not None:
         raise deferred_error
 
@@ -255,33 +335,25 @@ def bind_child(
 ) -> None:
     session_id = _text(session_id, "session_id")
     agent_id = _text(agent_id, "agent_id")
-    agent_type = _text(agent_type, "agent_type")
-    if agent_type != "luna_worker":
+    if _text(agent_type, "agent_type") != "luna_worker":
         raise _error("non-Luna child is not eligible")
     deferred_error: RouterStateError | None = None
-    with _journal(directory, secret) as state:
-        candidates = [
-            record
-            for record in state["bindings"].values()
-            if record["authorization"] == "ACTIVE"
-            and record["scope"]["session_id"] == session_id
-            and isinstance(record.get("pending"), dict)
-        ]
-        if len(candidates) != 1:
-            for record in candidates:
-                record["authorization"] = "REVOKED"
+    with _locked_state(directory, secret, mutate=True) as state:
+        _, record = _lookup(state, secret, session_id)
+        if (
+            record is None
+            or record["authorization"] != "ACTIVE"
+            or not isinstance(record.get("pending"), dict)
+        ):
             deferred_error = _error("Luna child binding cannot be verified")
+        elif record.get("luna") is not None:
+            record["authorization"] = "REVOKED"
+            deferred_error = _error("Luna child is already bound")
         else:
-            record = candidates[0]
-            if record.get("luna") is not None:
-                record["authorization"] = "REVOKED"
-                deferred_error = _error("Luna child is already bound")
-            else:
-                record["luna"] = {
-                    "agent_id": agent_id,
-                    "agent_type": agent_type,
-                    "task_path": record["pending"]["task_path"],
-                }
+            record["luna"] = {
+                "agent_id": agent_id,
+                "task_path": record["pending"]["task_path"],
+            }
     if deferred_error is not None:
         raise deferred_error
 
@@ -292,51 +364,17 @@ def authorize_luna(
     session_id: str,
     agent_id: str,
 ) -> dict[str, Any]:
-    session_id = _text(session_id, "session_id")
     agent_id = _text(agent_id, "agent_id")
-    authorized: list[dict[str, Any]] = []
-    with _journal(directory, secret) as state:
-        for record in state["bindings"].values():
-            luna = record.get("luna")
-            if (
-                record["authorization"] == "ACTIVE"
-                and record["scope"]["session_id"] == session_id
-                and isinstance(luna, dict)
-                and luna.get("agent_id") == agent_id
-            ):
-                authorized.append(record)
-        if len(authorized) != 1:
-            raise _error("Luna parent scope is revoked, mismatched, or unknown")
-        return dict(authorized[0])
-
-
-def begin_interrupt(
-    directory: Path,
-    secret: bytes,
-    session_id: str,
-    turn_id: str,
-    tool_name: str,
-    tool_input: Mapping[str, Any],
-) -> None:
-    target = _target(tool_name, tool_input)
-    with _journal(directory, secret) as state:
-        record = state["bindings"].get(_key(session_id, turn_id))
-        if not isinstance(record, dict) or not isinstance(record.get("luna"), dict):
-            raise _error("no bound Luna worker may be interrupted")
-        if target not in {record["luna"]["agent_id"], record["luna"]["task_path"]}:
-            raise _error("Luna interrupt is unauthorized")
-        if record["authorization"] == "ACTIVE" and record["cleanup"] == "NONE":
-            record["authorization"] = "REVOKED"
-            record["cleanup"] = "REQUESTED"
-            return
+    with _locked_state(directory, secret, mutate=False) as state:
+        _, record = _lookup(state, secret, session_id)
         if (
-            record["authorization"] == "REVOKED"
-            and record["stop_blocked"]
-            and record["cleanup"] == "NONE"
+            record is None
+            or record["authorization"] != "ACTIVE"
+            or not isinstance(record.get("luna"), dict)
+            or record["luna"].get("agent_id") != agent_id
         ):
-            record["cleanup"] = "REQUESTED"
-            return
-        raise _error("Luna interrupt is unauthorized")
+            raise _error("Luna parent scope is revoked, mismatched, or unknown")
+        return deepcopy(record)
 
 
 def authorize_parent_operation(
@@ -348,10 +386,12 @@ def authorize_parent_operation(
     tool_input: Mapping[str, Any],
 ) -> None:
     target = _target(tool_name, tool_input)
-    with _journal(directory, secret) as state:
-        record = state["bindings"].get(_key(session_id, turn_id))
+    expected_scope = scope_tag(secret, session_id, turn_id)
+    with _locked_state(directory, secret, mutate=False) as state:
+        _, record = _lookup(state, secret, session_id)
         if (
-            not isinstance(record, dict)
+            record is None
+            or record["scope_tag"] != expected_scope
             or record["authorization"] != "ACTIVE"
             or not isinstance(record.get("luna"), dict)
         ):
@@ -360,40 +400,47 @@ def authorize_parent_operation(
             raise _error("parent lifecycle operation is not bound to the active Luna worker")
 
 
-def finish_interrupt(
+def begin_interrupt(
     directory: Path,
     secret: bytes,
     session_id: str,
     turn_id: str,
-    response: Any,
+    tool_name: str,
+    tool_input: Mapping[str, Any],
 ) -> None:
-    with _journal(directory, secret) as state:
-        record = state["bindings"].get(_key(session_id, turn_id))
-        if not isinstance(record, dict) or record["cleanup"] != "REQUESTED":
-            raise _error("unrecognized Luna interrupt response")
-        parsed = _response(response)
-        record["cleanup"] = (
-            "OBSERVED"
-            if isinstance(parsed, Mapping) and "previous_status" in parsed
-            else "UNVERIFIED"
-        )
+    """Authorize one parent cleanup by revoking first; cleanup result is non-authoritative."""
+    target = _target(tool_name, tool_input)
+    expected_scope = scope_tag(secret, session_id, turn_id)
+    with _locked_state(directory, secret, mutate=True) as state:
+        _, record = _lookup(state, secret, session_id)
+        if (
+            record is None
+            or record["scope_tag"] != expected_scope
+            or record["authorization"] != "ACTIVE"
+            or not isinstance(record.get("luna"), dict)
+        ):
+            raise _error("no active Luna worker may be cleaned up")
+        if target not in {record["luna"]["agent_id"], record["luna"]["task_path"]}:
+            raise _error("Luna cleanup target is unauthorized")
+        record["authorization"] = "REVOKED"
 
 
 def stop_once(
     directory: Path, secret: bytes, session_id: str, turn_id: str
 ) -> bool:
-    with _journal(directory, secret) as state:
-        record = state["bindings"].get(_key(session_id, turn_id))
+    """Durably revoke the current root scope. The Hook must never create a continuation."""
+    expected_scope = scope_tag(secret, session_id, turn_id)
+    changed = False
+    with _locked_state(directory, secret, mutate=True) as state:
+        _, record = _lookup(state, secret, session_id)
         if (
-            not isinstance(record, dict)
-            or record["luna"] is None
-            or record["authorization"] != "ACTIVE"
-            or record["stop_blocked"]
+            record is not None
+            and record["scope_tag"] == expected_scope
+            and record["authorization"] == "ACTIVE"
         ):
-            return False
-        record["authorization"] = "REVOKED"
-        record["stop_blocked"] = True
-        return True
+            record["authorization"] = "REVOKED"
+            changed = True
+    return changed
 
 
 def _response(value: Any) -> Any:
