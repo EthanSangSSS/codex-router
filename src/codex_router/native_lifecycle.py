@@ -1,4 +1,4 @@
-"""Fail-closed, turn-scoped native Luna lifecycle journal for Codex V2."""
+"""Fail-closed native Luna lifecycle journal for Codex V2."""
 from __future__ import annotations
 
 import fcntl
@@ -249,46 +249,36 @@ def post_spawn(
 def bind_child(
     directory: Path,
     secret: bytes,
-    event: Mapping[str, Any],
-    child_metadata: Mapping[str, Any],
+    session_id: str,
+    agent_id: str,
+    agent_type: str,
 ) -> None:
-    agent_id = _text(event.get("agent_id"), "agent_id")
-    agent_type = _text(event.get("agent_type"), "agent_type")
+    session_id = _text(session_id, "session_id")
+    agent_id = _text(agent_id, "agent_id")
+    agent_type = _text(agent_type, "agent_type")
     if agent_type != "luna_worker":
         raise _error("non-Luna child is not eligible")
-    parent = _text(child_metadata.get("parent_thread_id"), "parent_thread_id")
-    path = _text(child_metadata.get("agent_path"), "agent_path")
     deferred_error: RouterStateError | None = None
     with _journal(directory, secret) as state:
-        parent_candidates = [
+        candidates = [
             record
             for record in state["bindings"].values()
             if record["authorization"] == "ACTIVE"
-            and isinstance(record["pending"], dict)
-            and record["pending"].get("confirmed") is True
-            and record["scope"]["session_id"] == parent
-        ]
-        candidates = [
-            record
-            for record in parent_candidates
-            if path == "/root/luna_worker"
-            and record["pending"].get("task_path") == path
+            and record["scope"]["session_id"] == session_id
+            and isinstance(record.get("pending"), dict)
+            and record.get("luna") is None
         ]
         if len(candidates) != 1:
-            for record in parent_candidates:
+            for record in candidates:
                 record["authorization"] = "REVOKED"
             deferred_error = _error("Luna child binding cannot be verified")
         else:
             record = candidates[0]
-            if record["luna"] is not None:
-                record["authorization"] = "REVOKED"
-                deferred_error = _error("Luna child is already bound")
-            else:
-                record["luna"] = {
-                    "agent_id": agent_id,
-                    "agent_type": agent_type,
-                    "task_path": path,
-                }
+            record["luna"] = {
+                "agent_id": agent_id,
+                "agent_type": agent_type,
+                "task_path": record["pending"]["task_path"],
+            }
     if deferred_error is not None:
         raise deferred_error
 
@@ -297,39 +287,24 @@ def authorize_luna(
     directory: Path,
     secret: bytes,
     session_id: str,
-    turn_id: str,
     agent_id: str,
 ) -> dict[str, Any]:
+    session_id = _text(session_id, "session_id")
     agent_id = _text(agent_id, "agent_id")
-    deferred_error: RouterStateError | None = None
-    authorized: dict[str, Any] | None = None
+    authorized: list[dict[str, Any]] = []
     with _journal(directory, secret) as state:
-        key = _key(session_id, turn_id)
-        current = state["bindings"].get(key)
-        if (
-            isinstance(current, dict)
-            and current["authorization"] == "ACTIVE"
-            and isinstance(current.get("luna"), dict)
-            and current["luna"].get("agent_id") == agent_id
-        ):
-            authorized = dict(current)
-        else:
-            for record in state["bindings"].values():
-                luna = record.get("luna")
-                if (
-                    isinstance(luna, dict)
-                    and luna.get("agent_id") == agent_id
-                    and record["authorization"] == "ACTIVE"
-                ):
-                    record["authorization"] = "REVOKED"
-            if isinstance(current, dict) and current["authorization"] == "ACTIVE":
-                current["authorization"] = "REVOKED"
-            deferred_error = _error("Luna parent scope is revoked, mismatched, or unknown")
-    if deferred_error is not None:
-        raise deferred_error
-    if authorized is None:
-        raise _error("Luna authorization is unavailable")
-    return authorized
+        for record in state["bindings"].values():
+            luna = record.get("luna")
+            if (
+                record["authorization"] == "ACTIVE"
+                and record["scope"]["session_id"] == session_id
+                and isinstance(luna, dict)
+                and luna.get("agent_id") == agent_id
+            ):
+                authorized.append(record)
+        if len(authorized) != 1:
+            raise _error("Luna parent scope is revoked, mismatched, or unknown")
+        return dict(authorized[0])
 
 
 def begin_interrupt(
