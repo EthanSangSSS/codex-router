@@ -20,6 +20,14 @@ _STATE = "native-luna-safety-v2.json"
 _LOCK = "native-luna-safety-v2.lock"
 _AUTH = {"ACTIVE", "REVOKED"}
 _CLEANUP = {"NONE", "REQUESTED", "OBSERVED", "UNVERIFIED"}
+_TARGET_FIELD = {
+    "send_input": "target",
+    "send_message": "target",
+    "followup_task": "target",
+    "interrupt_agent": "target",
+    "close_agent": "target",
+    "resume_agent": "id",
+}
 
 
 def _error(message: str) -> RouterStateError:
@@ -49,6 +57,13 @@ def task_path(task_name: str) -> str:
 
 def _key(session_id: str, turn_id: str) -> str:
     return hashlib.sha256((session_id + "\0" + turn_id).encode()).hexdigest()
+
+
+def _target(tool_name: str, tool_input: Mapping[str, Any]) -> str:
+    field = _TARGET_FIELD.get(tool_name)
+    if field is None:
+        raise _error("unsupported parent lifecycle operation")
+    return _text(tool_input.get(field), field)
 
 
 def _empty() -> dict[str, Any]:
@@ -172,6 +187,8 @@ def pre_spawn(
     tool_input: Mapping[str, Any],
 ) -> None:
     path = task_path(tool_input.get("task_name"))
+    if tool_input.get("fork_turns") != "none":
+        raise _error("luna_worker must be spawned with fork_turns=none")
     tool_use_id = _text(tool_use_id, "tool_use_id")
     with _journal(directory, secret) as state:
         for record in state["bindings"].values():
@@ -320,9 +337,10 @@ def begin_interrupt(
     secret: bytes,
     session_id: str,
     turn_id: str,
+    tool_name: str,
     tool_input: Mapping[str, Any],
 ) -> None:
-    target = tool_input.get("task_name") or tool_input.get("agent_id")
+    target = _target(tool_name, tool_input)
     with _journal(directory, secret) as state:
         record = state["bindings"].get(_key(session_id, turn_id))
         if not isinstance(record, dict) or not isinstance(record.get("luna"), dict):
@@ -348,9 +366,10 @@ def authorize_parent_operation(
     secret: bytes,
     session_id: str,
     turn_id: str,
+    tool_name: str,
     tool_input: Mapping[str, Any],
 ) -> None:
-    target = tool_input.get("task_name") or tool_input.get("agent_id")
+    target = _target(tool_name, tool_input)
     with _journal(directory, secret) as state:
         record = state["bindings"].get(_key(session_id, turn_id))
         if (
