@@ -124,10 +124,11 @@ class PolicySurfaceV2Tests(unittest.TestCase):
             (self.home / "agents" / "luna-worker.toml").read_text(encoding="utf-8")
         )
         instructions = parsed["developer_instructions"]
-        self.assertIn("hard mode", instructions.lower())
-        self.assertIn("do not run shell", instructions.lower())
-        self.assertIn("return process-dependent validation to Sol", instructions)
-        self.assertNotIn("including focused tests", instructions)
+        lowered = instructions.lower()
+        self.assertIn("hard mode", lowered)
+        self.assertIn("do not run shell", lowered)
+        self.assertIn("return process-dependent validation to sol", lowered)
+        self.assertNotIn("including focused tests", lowered)
 
     def test_permission_deny_prefers_bound_native_agent_id_even_without_role_text(self):
         self._bind_luna()
