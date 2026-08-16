@@ -266,7 +266,6 @@ def bind_child(
             if record["authorization"] == "ACTIVE"
             and record["scope"]["session_id"] == session_id
             and isinstance(record.get("pending"), dict)
-            and record.get("luna") is None
         ]
         if len(candidates) != 1:
             for record in candidates:
@@ -274,11 +273,15 @@ def bind_child(
             deferred_error = _error("Luna child binding cannot be verified")
         else:
             record = candidates[0]
-            record["luna"] = {
-                "agent_id": agent_id,
-                "agent_type": agent_type,
-                "task_path": record["pending"]["task_path"],
-            }
+            if record.get("luna") is not None:
+                record["authorization"] = "REVOKED"
+                deferred_error = _error("Luna child is already bound")
+            else:
+                record["luna"] = {
+                    "agent_id": agent_id,
+                    "agent_type": agent_type,
+                    "task_path": record["pending"]["task_path"],
+                }
     if deferred_error is not None:
         raise deferred_error
 
