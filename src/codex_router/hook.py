@@ -287,36 +287,6 @@ def _is_subagent_event(event: Mapping[str, Any]) -> bool:
     return isinstance(agent_id, str) and bool(agent_id)
 
 
-def _read_child_metadata(event: Mapping[str, Any]) -> Mapping[str, Any]:
-    path = event.get("transcript_path")
-    if not isinstance(path, str) or not Path(path).is_absolute():
-        raise _invalid("transcript_path must be absolute")
-    target = Path(path)
-    meta = target.lstat()
-    if (
-        not stat.S_ISREG(meta.st_mode)
-        or stat.S_ISLNK(meta.st_mode)
-        or meta.st_uid != os.geteuid()
-        or meta.st_size > MAX_HOOK_INPUT_BYTES
-    ):
-        raise _invalid("child transcript is unsafe")
-    with target.open("rb") as stream:
-        first = stream.readline(MAX_HOOK_INPUT_BYTES)
-    try:
-        value = json.loads(first)
-        source = (
-            value.get("payload", {})
-            .get("source", {})
-            .get("subagent", {})
-            .get("thread_spawn", {})
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as exc:
-        raise _invalid("child session metadata is invalid") from exc
-    if not isinstance(source, Mapping):
-        raise _invalid("child session metadata is invalid")
-    return source
-
-
 def _handle_luna_pretool(
     *,
     event: Mapping[str, Any],
@@ -330,7 +300,6 @@ def _handle_luna_pretool(
         installation_dir,
         secret,
         base["session_id"],
-        base["turn_id"],
         _event_text(event, "agent_id"),
     )
     tool_name = base["tool_name"]
@@ -482,17 +451,18 @@ def handle_hook_event(
             return {}
 
         if name == "SubagentStart":
-            _event_base(
+            base = _event_base(
                 event,
                 name,
-                ("session_id", "turn_id", "agent_id", "agent_type", "transcript_path"),
+                ("session_id", "turn_id", "agent_id", "agent_type"),
             )
-            if event.get("agent_type") == "luna_worker":
+            if base["agent_type"] == "luna_worker":
                 native_lifecycle.bind_child(
                     Path(installation_dir),
                     secret,
-                    event,
-                    _read_child_metadata(event),
+                    base["session_id"],
+                    base["agent_id"],
+                    base["agent_type"],
                 )
             return {"hookSpecificOutput": {"hookEventName": "SubagentStart"}}
 
