@@ -384,6 +384,7 @@ def _handle_parent_pretool(
             secret,
             base["session_id"],
             base["turn_id"],
+            tool_name,
             tool_input,
         )
         return {}
@@ -393,6 +394,7 @@ def _handle_parent_pretool(
             secret,
             base["session_id"],
             base["turn_id"],
+            tool_name,
             tool_input,
         )
         return {}
