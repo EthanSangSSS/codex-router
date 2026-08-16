@@ -1,13 +1,25 @@
 import json
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from codex_router import native_lifecycle as lifecycle
-from codex_router.hook import handle_hook_event, handle_user_prompt
+from codex_router.hook import handle_hook_event
 from codex_router.state import RouterStateError
+
+
+ROLE_CONFIG = {
+    "local_sol": {"requested_model": "gpt-5.6-sol", "requested_reasoning": "max"},
+    "web_sol": {
+        "model_claimed": "sol",
+        "reasoning_claimed": "xhigh",
+        "verification": "operator_attested",
+    },
+    "luna": {"requested_model": "gpt-5.6-luna", "requested_reasoning": "max"},
+}
 
 
 class MinimalJournalV2Tests(unittest.TestCase):
@@ -17,6 +29,26 @@ class MinimalJournalV2Tests(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.directory.chmod(0o700)
         self.secret = b"j" * 32
+        secret_path = self.directory / "installation-secret"
+        secret_path.write_bytes(self.secret)
+        secret_path.chmod(0o600)
+        self.assertEqual(stat.S_IMODE(secret_path.stat().st_mode), 0o600)
+        binary = self.directory / "codex"
+        binary.write_text("synthetic binary", encoding="utf-8")
+        binary.chmod(0o700)
+        config_path = self.directory / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "protocol": "codex-router/global-policy-config/v1",
+                    "state_root": str(self.directory / "runs"),
+                    "codex_binary": str(binary),
+                    "role_config": ROLE_CONFIG,
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_path.chmod(0o600)
 
     def _spawn_and_bind(self, session="session-a", turn="turn-a", agent="luna-a"):
         lifecycle.pre_spawn(
