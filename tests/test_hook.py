@@ -132,7 +132,7 @@ class HookSchemaTests(HookTestCase):
         output = self.handle(self.event(prompt=protected_prompt))
 
         self.assertEqual(output["decision"], "block")
-        self.assertIn("仅本地执行", output["reason"])
+        self.assertIn("Router safety state", output["reason"])
         serialized = json.dumps(output, ensure_ascii=False)
         self.assertNotIn(protected_prompt, serialized)
         self.assertNotIn("config", serialized.lower())
@@ -155,15 +155,18 @@ class HookNativeDelegationTests(HookTestCase):
                 "decision": "route",
                 "reason": "substantive_request",
                 "workflow": "native_luna_worker",
-                "sol_role": "plan_review",
+                "sol_role": "plan_review_final_authority",
                 "luna_role": "default_execution",
                 "delegation_mode": "sequential_work_packets",
                 "luna_agent": "luna_worker",
                 "luna_model": "gpt-5.6-luna",
                 "luna_reasoning": "max",
-                "luna_lifecycle": "persistent_per_parent_task",
-                "capacity_failure_policy": "reuse_or_block",
+                "luna_lifecycle": "persistent_while_root_turn_active",
+                "parent_terminal_policy": "revoke_then_cleanup",
+                "capacity_failure_policy": "return_to_sol",
                 "luna_descendant_policy": "forbidden",
+                "luna_codex_runtime_policy": "forbidden",
+                "interactive_blocker_policy": "return_to_sol_or_user",
                 "initial_context_mode": "packet_only",
                 "web_mode": "manual_operator",
             },
