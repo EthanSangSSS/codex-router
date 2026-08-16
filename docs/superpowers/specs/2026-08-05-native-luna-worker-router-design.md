@@ -1,7 +1,7 @@
 # Native Luna Worker Router Design
 
-Status: approved, amended after 2026-08-14 lifecycle incident
-Date: 2026-08-05; hardening amendment 2026-08-14
+Status: approved, amended after 2026-08-14 lifecycle incident and 2026-08-16 Codex V2 capability reconciliation
+Date: 2026-08-05; hardening amendments 2026-08-14 and 2026-08-16
 Target branch: `main`
 
 ## Objective
@@ -28,6 +28,59 @@ Three safety invariants are not overridable by Sol or Luna:
 
 Everything else remains under Sol's judgment. In particular, capacity, packet count, retry strategy, whether to continue using Luna, whether to take over ordinary execution, and when to stop are Sol decisions with explicit reasoning and observed evidence.
 
+## 2026-08-16 Codex V2 compatibility amendment
+
+The deployed `codex-cli 0.147.0-alpha.6.5` Multi-Agent V2 surface differs from
+the earlier assumed lifecycle surface in two material ways: successful
+`spawn_agent` output contains a canonical task path and optional nickname, not
+the spawned thread UUID; and V2 exposes `interrupt_agent`, but not
+model-visible `close_agent`.
+
+The Router therefore uses a capability-verified adaptation. It does not infer
+identity from model prose and never launches another Codex process to discover
+lifecycle state.
+
+### Binding protocol
+
+PreToolUse records one private pending binding under the current `TURN_SCOPE`
+with native `tool_use_id`, expected role `luna_worker`, and expected canonical
+task path. PostToolUse accepts a spawn result only when the returned task path
+exactly matches, but does not bind an ID V2 does not return.
+
+The child-only SubagentStart Hook supplies `agent_id` and `agent_type`. It
+reads only no-follow, owner-checked, bounded session metadata from the child
+transcript and extracts only `parent_thread_id` and `agent_path`. Binding is
+atomic only when parent thread, canonical task path, role, and current ACTIVE
+scope all match the pending record. The pending record is single-use. A new
+root turn, HMAC failure, malformed or ambiguous metadata, duplicate start, or
+scope mismatch revokes it and fails closed. No child prompt or model output is
+read for correlation.
+
+### V2 cleanup protocol
+
+`close_agent` is unavailable in V2. Parent termination atomically revokes
+authorization before allowing exactly one `interrupt_agent` attempt for bound
+Luna. PostToolUse records cleanup as `OBSERVED` only for a verified native
+success response; all other outcomes are `UNVERIFIED`. `OBSERVED` means an
+interrupt was observed, not that process termination was proven. No outcome
+restores authorization or permits follow-up, messaging, resume, or a
+replacement Luna in that parent scope.
+
+### Luna execution surface
+
+The generated role explicitly disables Unified Exec, Code Mode, Code Mode
+Only, both multi-agent feature families, and request-permissions. The remaining
+supported executor is the ordinary one-shot shell command. `write_stdin`, Code
+Mode executors, descendant-agent tools, and unknown process/executor tools are
+rejected for Luna at PreToolUse. Textual mentions of `codex` remain allowed;
+only a supported command whose effective executable intent launches Codex is
+blocked.
+
+The profile is validated from the exact deployed Codex source/tag and synthetic
+Hook fixtures. A fresh live Luna tool-list probe remains deferred to a
+user-started live migration review because it would require a second Codex
+process.
+
 ## Native Luna worker
 
 The global installer manages exactly one custom agent file:
@@ -47,7 +100,7 @@ model_reasoning_effort = "max"
 enabled = false
 ```
 
-The file intentionally omits `sandbox_mode`, approval policy, MCP, and skill overrides so the child inherits the parent task's effective controls. Its instructions require bounded scope, evidence-first work, no browser or Web Sol operation, no authentication access, and no GitHub/install/release mutations unless an exact delegated packet explicitly authorizes an otherwise permitted action.
+The file intentionally omits `sandbox_mode`, approval policy, MCP, and skill overrides so the child inherits the parent task's effective controls. It explicitly disables Unified Exec, Code Mode, descendant-agent features, and request-permissions. Its instructions require bounded scope, evidence-first work, no browser or Web Sol operation, no authentication access, and no GitHub/install/release mutations unless an exact delegated packet explicitly authorizes an otherwise permitted action.
 
 The `[agents]` gate mechanically disables Luna's multi-Agent tools. Luna must never create, spawn, fork, relay, resume, or delegate a child or descendant; a packet that requires recursive delegation returns `BLOCKED_LUNA_RECURSIVE_DELEGATION`.
 
@@ -65,7 +118,7 @@ Luna packet completed/idle != parent task completed
 
 While the parent task is active, Sol may reuse the same Luna across multiple sequential work packets and bounded correction packets, including when Luna's previous packet is completed or idle. This preserves cache continuity and avoids unnecessary cold-session context expansion.
 
-When the parent task is about to enter a terminal state, Sol must close the persistent Luna when the runtime exposes a close operation, stop issuing new packets, and invalidate any outstanding delegated work. A late result may be observed for reporting, but it must not cause new model work, a new packet, `send_input`, resume, or inter-agent communication after the parent terminal boundary.
+When the parent task is about to enter a terminal state, Sol must use the one verified native cleanup operation. In V1 this is `close_agent`; in deployed V2 it is one `interrupt_agent` attempt. Authorization is revoked before that attempt, and a late result may be observed only for reporting. It must not cause new model work, a new packet, follow-up, resume, or inter-agent communication after the parent terminal boundary.
 
 A parent-terminal Luna must never be selected by a later task. A new user task receives a new parent-scoped Luna identity if delegation is needed.
 
@@ -147,7 +200,8 @@ Offline tests must prove at minimum:
 - routed Hook context preserves Sol plan/review/final authority and Luna default execution;
 - Luna is reusable across sequential packets while the parent is active;
 - a parent terminal boundary forbids later Luna resume, `send_input`, new packet, or inter-agent reactivation;
-- close status is reported truthfully and unverified cleanup is not called successful;
+- V2 binding correlates only verified native pending-spawn and SubagentStart metadata;
+- cleanup status is reported truthfully and unverified interrupt cleanup is not called successful;
 - Luna descendant-agent creation remains mechanically disabled;
 - Luna cannot launch a Codex runtime through direct, absolute-path, environment, shell, or PTY wrappers at the strongest verified tool boundary;
 - interactive user-required blockers return control instead of autonomous PTY/TERM retry loops;
