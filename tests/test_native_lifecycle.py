@@ -37,11 +37,9 @@ class NativeLunaLifecycleTests(unittest.TestCase):
         lifecycle.bind_child(
             self.directory,
             self.secret,
-            {"agent_id": agent_id, "agent_type": "luna_worker"},
-            {
-                "parent_thread_id": "root-session",
-                "agent_path": "/root/luna_worker",
-            },
+            "root-session",
+            agent_id,
+            "luna_worker",
         )
 
     def record(self, turn="root-turn"):
@@ -67,7 +65,6 @@ class NativeLunaLifecycleTests(unittest.TestCase):
                 self.directory,
                 self.secret,
                 "root-session",
-                "root-turn",
                 "child-session",
             )
         with self.assertRaises(RouterStateError):
@@ -115,11 +112,9 @@ class NativeLunaLifecycleTests(unittest.TestCase):
             lifecycle.bind_child(
                 self.directory,
                 self.secret,
-                {"agent_id": "other-child", "agent_type": "luna_worker"},
-                {
-                    "parent_thread_id": "root-session",
-                    "agent_path": "/root/luna_worker",
-                },
+                "root-session",
+                "other-child",
+                "luna_worker",
             )
         self.assertEqual(self.record()["authorization"], "REVOKED")
 
@@ -162,17 +157,16 @@ class NativeLunaLifecycleTests(unittest.TestCase):
                 {"target": "child-session"},
             )
 
-    def test_turn_mismatch_durably_revokes_old_luna(self):
-        self.bind(turn="turn-old")
+    def test_unknown_agent_id_is_denied_without_authorizing_by_role_text(self):
+        self.bind()
         with self.assertRaises(RouterStateError):
             lifecycle.authorize_luna(
                 self.directory,
                 self.secret,
                 "root-session",
-                "turn-new",
-                "child-session",
+                "historical-or-other-child",
             )
-        self.assertEqual(self.record("turn-old")["authorization"], "REVOKED")
+        self.assertEqual(self.record()["authorization"], "ACTIVE")
 
     def test_parent_message_is_limited_to_bound_luna(self):
         self.bind()
@@ -207,7 +201,6 @@ class NativeLunaLifecycleTests(unittest.TestCase):
                 self.directory,
                 self.secret,
                 "root-session",
-                "root-turn",
                 "child-session",
             )
 
