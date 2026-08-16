@@ -482,13 +482,28 @@ def _luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
         f"{key} = {json.dumps(value, ensure_ascii=False)}\n"
         for key, value in values.items()
     )
-    rendered += "\n[agents]\nenabled = false\n"
+    rendered += (
+        "\n[agents]\nenabled = false\n\n[features]\nmulti_agent = false\n"
+        "multi_agent_v2 = false\nunified_exec = false\ncode_mode = false\n"
+        "code_mode_only = false\nrequest_permissions_tool = false\n"
+    )
     encoded = rendered.encode("utf-8")
     try:
         parsed = tomllib.loads(encoded.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise _error("conflict", "generated Luna agent configuration is invalid") from error
-    expected = {**values, "agents": {"enabled": False}}
+    expected = {
+        **values,
+        "agents": {"enabled": False},
+        "features": {
+            "multi_agent": False,
+            "multi_agent_v2": False,
+            "unified_exec": False,
+            "code_mode": False,
+            "code_mode_only": False,
+            "request_permissions_tool": False,
+        },
+    }
     if parsed != expected:
         raise _error("conflict", "generated Luna agent configuration is unstable")
     return encoded
@@ -550,7 +565,9 @@ def _walk_strings(value: Any) -> Iterator[str]:
             yield from _walk_strings(child)
 
 
-def _hook_argv(installation_dir: Path) -> list[str]:
+def _hook_argv(
+    installation_dir: Path, subcommand: str = "hook-user-prompt"
+) -> list[str]:
     python_path = Path(sys.executable)
     if not python_path.is_absolute():
         raise _error("conflict", "Router hook Python must be absolute")
@@ -561,14 +578,16 @@ def _hook_argv(installation_dir: Path) -> list[str]:
         "-P",
         "-m",
         "codex_router",
-        "hook-user-prompt",
+        subcommand,
         "--installation-dir",
         str(installation_dir),
     ]
 
 
-def _hook_handler(installation_dir: Path) -> dict[str, Any]:
-    command = shlex.join(_hook_argv(installation_dir))
+def _hook_handler(
+    installation_dir: Path, subcommand: str = "hook-user-prompt"
+) -> dict[str, Any]:
+    command = shlex.join(_hook_argv(installation_dir, subcommand))
     return {
         "type": "command",
         "command": command,
@@ -686,7 +705,7 @@ def _preflight_hook_handler(
         raise _error("conflict", "Router hook command failed preflight")
 
 
-def _install_hook(original: bytes | None, handler: Mapping[str, Any]) -> bytes:
+def _install_hook(original: bytes | None, handler: Mapping[str, Any] | None = None) -> bytes:
     if original is None:
         document: dict[str, Any] = {}
     else:
@@ -708,18 +727,46 @@ def _install_hook(original: bytes | None, handler: Mapping[str, Any]) -> bytes:
         document["hooks"] = hooks
     if not isinstance(hooks, dict):
         raise _error("conflict", "hooks.json hooks field is invalid")
-    prompt_groups = hooks.get("UserPromptSubmit")
-    if prompt_groups is None:
-        prompt_groups = []
-        hooks["UserPromptSubmit"] = prompt_groups
-    if not isinstance(prompt_groups, list):
-        raise _error("conflict", "UserPromptSubmit hook groups are invalid")
-    for group in prompt_groups:
-        if not isinstance(group, Mapping) or not isinstance(group.get("hooks"), list):
-            raise _error("conflict", "UserPromptSubmit hook group is invalid")
-        if any(not isinstance(item, Mapping) for item in group["hooks"]):
-            raise _error("conflict", "UserPromptSubmit hook handler is invalid")
-    prompt_groups.append({"hooks": [deepcopy(dict(handler))]})
+    subcommands = {
+        "UserPromptSubmit": "hook-user-prompt",
+        "PreToolUse": "hook-pre-tool",
+        "PostToolUse": "hook-post-tool",
+        "PermissionRequest": "hook-permission-request",
+        "Stop": "hook-stop",
+        "SubagentStart": "hook-subagent-start",
+        "SubagentStop": "hook-subagent-stop",
+    }
+    if handler is None:
+        raise _error("invalid-input", "Router hook handler is required")
+    try:
+        base_arguments = shlex.split(str(handler["command"]), posix=True)
+    except (KeyError, TypeError, ValueError) as error:
+        raise _error("conflict", "Router hook handler is invalid") from error
+    if len(base_arguments) != 8 or base_arguments[3:6] != [
+        "-m",
+        "codex_router",
+        "hook-user-prompt",
+    ]:
+        raise _error("conflict", "Router hook handler is invalid")
+    for event, subcommand in subcommands.items():
+        groups = hooks.get(event)
+        if groups is None:
+            groups = []
+            hooks[event] = groups
+        if not isinstance(groups, list):
+            raise _error("conflict", f"{event} hook groups are invalid")
+        for group in groups:
+            if (
+                not isinstance(group, Mapping)
+                or not isinstance(group.get("hooks"), list)
+                or any(not isinstance(item, Mapping) for item in group["hooks"])
+            ):
+                raise _error("conflict", f"{event} hook group is invalid")
+        current = dict(handler)
+        arguments = list(base_arguments)
+        arguments[5] = subcommand
+        current["command"] = shlex.join(arguments)
+        groups.append({"hooks": [current]})
     return (
         json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
         + b"\n"
@@ -1535,7 +1582,7 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
                 parsed = json.loads(content)
                 hook_configured = sum(
                     HOOK_MARKER in value for value in _walk_strings(parsed)
-                ) == 1
+                ) == 7
             except (UnicodeDecodeError, json.JSONDecodeError):
                 hook_configured = False
         elif name == "AGENTS.md" and installed_match:
@@ -1886,7 +1933,7 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
                 "requested_reasoning"
             ],
             "luna_lifecycle": "persistent_per_parent_task",
-            "capacity_failure_policy": "reuse_close_or_block",
+            "capacity_failure_policy": "reuse_or_block",
             "luna_descendant_policy": "forbidden",
             "initial_context_mode": "packet_only",
             "web_mode": "manual_operator",

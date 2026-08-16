@@ -22,6 +22,14 @@ class PromptPolicyTests(unittest.TestCase):
                 self.assertEqual(result.decision, "bypass")
                 self.assertEqual(result.reason_code, "explicit_one_turn_bypass")
 
+    def test_router_direct_markers_force_only_current_turn_local(self):
+        classify = self.policy()
+        for prompt in ("[CODEX_ROUTER_DIRECT]\n修复 Router", "本轮不用 Luna。\n修复 Router"):
+            with self.subTest(prompt=prompt.splitlines()[0]):
+                result = classify(prompt)
+                self.assertEqual(result.decision, "direct")
+                self.assertEqual(result.reason_code, "explicit_one_turn_direct")
+
     def test_quoted_embedded_example_and_code_directives_do_not_bypass(self):
         classify = self.policy()
         prompts = (

@@ -312,6 +312,19 @@ class GlobalInstallTests(unittest.TestCase):
             arguments[7],
             str(self.codex_home / ".codex-router-policy-v1"),
         )
+        expected = {
+            "UserPromptSubmit": "hook-user-prompt",
+            "PreToolUse": "hook-pre-tool",
+            "PostToolUse": "hook-post-tool",
+            "PermissionRequest": "hook-permission-request",
+            "Stop": "hook-stop",
+            "SubagentStart": "hook-subagent-start",
+            "SubagentStop": "hook-subagent-stop",
+        }
+        self.assertEqual(set(hooks["hooks"]).intersection(expected), set(expected))
+        for event, command in expected.items():
+            installed = hooks["hooks"][event][0]["hooks"][0]
+            self.assertEqual(shlex.split(installed["command"])[5], command)
 
     def test_interrupted_install_resumes_after_each_managed_write(self):
         for write_number in (1, 2, 3):

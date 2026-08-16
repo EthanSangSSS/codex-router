@@ -12,7 +12,7 @@ from .global_install import (
     global_status,
     global_uninstall,
 )
-from .hook import handle_user_prompt, read_hook_event
+from .hook import handle_hook_event, read_hook_event
 from .pipeline import Router, RouterRunError
 from .state import RouterStateError, fail_stage, get_status, start_run, submit_stage
 from .types import GlobalStatus, TransitionResult
@@ -84,10 +84,9 @@ def parser() -> argparse.ArgumentParser:
     status.add_argument("--run-id", required=True)
     status.add_argument("--state-dir", type=Path, required=True)
 
-    hook = subcommands.add_parser(
-        "hook-user-prompt", help="handle one Codex UserPromptSubmit event"
-    )
-    hook.add_argument("--installation-dir", type=Path, required=True)
+    for command, event in (("hook-user-prompt", "UserPromptSubmit"), ("hook-pre-tool", "PreToolUse"), ("hook-post-tool", "PostToolUse"), ("hook-permission-request", "PermissionRequest"), ("hook-stop", "Stop"), ("hook-subagent-start", "SubagentStart"), ("hook-subagent-stop", "SubagentStop")):
+        hook = subcommands.add_parser(command, help=f"handle one Codex {event} event")
+        hook.add_argument("--installation-dir", type=Path, required=True)
 
     install = subcommands.add_parser(
         "global-install", help="install the reversible global Router policy"
@@ -233,10 +232,8 @@ def main(argv=None) -> int:
         args = parser().parse_args(argv)
         if args.command == "run":
             return _run_legacy(args)
-        if args.command == "hook-user-prompt":
-            output = handle_user_prompt(
-                read_hook_event(sys.stdin.buffer), args.installation_dir
-            )
+        if args.command.startswith("hook-"):
+            output = handle_hook_event(read_hook_event(sys.stdin.buffer), args.installation_dir)
             _print_json(output)
             return 0
         if args.command == "global-install":
