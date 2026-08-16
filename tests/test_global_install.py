@@ -150,30 +150,32 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertIn("codex-router-global-policy-v1", handler["statusMessage"])
         managed_agents = agents_path.read_text(encoding="utf-8")
         self.assertIn("`luna_worker`", managed_agents)
-        self.assertIn("Sol plans, decomposes, and reviews", managed_agents)
-        self.assertIn("multiple sequential work packets", managed_agents)
-        self.assertIn("takes over writable execution only", managed_agents)
-        self.assertIn("Web Sol is manual operator work", managed_agents)
-        self.assertIn("The Hook route is stateless", managed_agents)
-        self.assertNotIn("drive Local Sol -> Web Sol -> Luna", managed_agents)
-        self.assertIn("at most one persistent `luna_worker`", managed_agents)
-        self.assertIn("reuse the existing Luna", managed_agents)
-        self.assertIn("Capacity exhaustion does not authorize Sol takeover", managed_agents)
-        self.assertIn("completed non-Luna", managed_agents)
-        self.assertIn("BLOCKED_LUNA_CAPACITY", managed_agents)
         for required_policy in (
-            "Only the primary Codex task may create agents",
-            "Luna and all other child agents must not create descendants",
-            "create the initial Luna with a self-contained packet and no conversation history",
-            "reuse the same Luna for all later packets",
-            "Never use a relay for Luna capacity recovery",
+            "primary Sol coordinator, highest ordinary execution authority",
+            "Sol plans and decomposes",
+            "Sol reviews results",
+            "exactly one current-root-turn `luna_worker`",
+            "primary Sol must retain the native multi-agent capability",
+            "capacity exhaustion or another ordinary execution blocker returns control to Sol",
+            "take over ordinary execution",
+            "revoked or turn-mismatched historical Luna",
+            "Web Sol is manual operator work",
+            "Hook route is stateless with respect to legacy Router runs",
+            "revokes Luna authorization before any best-effort cleanup",
         ):
             with self.subTest(required_policy=required_policy):
                 self.assertIn(required_policy, managed_agents)
-        with self.subTest(required_policy="no pure relay"):
-            self.assertNotIn("pure relay", managed_agents)
+        for stale_policy in (
+            "Capacity exhaustion does not authorize Sol takeover",
+            "capacity exhaustion is never a takeover reason",
+            "BLOCKED_LUNA_CAPACITY",
+            "takes over writable execution only",
+        ):
+            with self.subTest(stale_policy=stale_policy):
+                self.assertNotIn(stale_policy, managed_agents)
+        self.assertNotIn("drive Local Sol -> Web Sol -> Luna", managed_agents)
         self.assertIn("packet id", managed_agents)
-        self.assertIn("latest explicit boundary", managed_agents)
+        self.assertIn("latest explicit packet", managed_agents)
         luna_path = self.codex_home / "agents" / "luna-worker.toml"
         luna = tomllib.loads(luna_path.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -193,30 +195,28 @@ class GlobalInstallTests(unittest.TestCase):
         with self.subTest(luna_contract="recursive delegation disabled"):
             self.assertIs(luna.get("agents", {}).get("enabled"), False)
         self.assertIn("default execution worker", luna["description"])
-        self.assertIn(
-            "multi-step work across the explicitly allowed paths",
-            luna["developer_instructions"],
-        )
-        self.assertIn(
-            "Accept bounded follow-up correction packets",
-            luna["developer_instructions"],
-        )
-        self.assertIn("persistent execution worker for each parent task", luna["developer_instructions"])
-        self.assertIn("New packets do not inherit the previous packet's write permissions", luna["developer_instructions"])
-        with self.subTest(luna_contract="absolute descendant prohibition"):
-            self.assertIn(
-                "Never create, spawn, fork, relay, resume, or delegate any child or descendant agent",
-                luna["developer_instructions"],
-            )
-        with self.subTest(luna_contract="bounded recursive delegation blocker"):
-            self.assertIn(
-                "BLOCKED_LUNA_RECURSIVE_DELEGATION",
-                luna["developer_instructions"],
-            )
-        with self.subTest(luna_contract="no soft ordinary-packet qualifier"):
-            self.assertNotIn("ordinary packets", luna["developer_instructions"])
+        for required_luna_policy in (
+            "default bounded execution worker for one authorized Router root turn",
+            "Never act on a packet from another turn",
+            "New packets do not inherit previous write permissions",
+            "Never create, spawn, fork, relay, resume, or delegate any child or descendant agent",
+            "BLOCKED_LUNA_RECURSIVE_DELEGATION",
+            "BLOCKED_LUNA_CODEX_RUNTIME",
+            "BLOCKED_USER_INTERACTION_REQUIRED",
+            "ordinary blocker prevents completion, stop and report evidence to Sol",
+        ):
+            with self.subTest(required_luna_policy=required_luna_policy):
+                self.assertIn(required_luna_policy, luna["developer_instructions"])
+        self.assertNotIn("persistent execution worker for each parent task", luna["developer_instructions"])
+        self.assertNotIn("ordinary packets", luna["developer_instructions"])
         self.assertNotIn("sandbox_mode", luna)
         self.assertNotIn("approval_policy", luna)
+        self.assertIs(luna.get("features", {}).get("multi_agent"), False)
+        self.assertIs(luna.get("features", {}).get("multi_agent_v2"), False)
+        self.assertIs(luna.get("features", {}).get("unified_exec"), False)
+        self.assertIs(luna.get("features", {}).get("code_mode"), False)
+        self.assertIs(luna.get("features", {}).get("code_mode_only"), False)
+        self.assertIs(luna.get("features", {}).get("request_permissions_tool"), False)
         self.assertEqual(config_toml.read_bytes(), b"[features]\nhooks = true\n")
         self.assertEqual(override.read_bytes(), b"existing override\n")
 
@@ -756,6 +756,7 @@ class GlobalInstallTests(unittest.TestCase):
                 self.assertEqual(hooks_after, hooks_before)
                 self.assertEqual(agents_after, agents_before)
                 self.assertFalse((self.codex_home / ".codex-router-policy-v1").exists())
+
     def cli(self, *arguments):
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(REPO / "src")
