@@ -24,7 +24,7 @@ class NativeLunaLifecycleTests(unittest.TestCase):
             "root-session",
             turn,
             "tool-1",
-            {"task_name": "luna_worker"},
+            {"task_name": "luna_worker", "fork_turns": "none"},
         )
         lifecycle.post_spawn(
             self.directory,
@@ -59,7 +59,8 @@ class NativeLunaLifecycleTests(unittest.TestCase):
             self.secret,
             "root-session",
             "root-turn",
-            {"task_name": "/root/luna_worker"},
+            "interrupt_agent",
+            {"target": "/root/luna_worker"},
         )
         with self.assertRaises(RouterStateError):
             lifecycle.authorize_luna(
@@ -75,7 +76,8 @@ class NativeLunaLifecycleTests(unittest.TestCase):
                 self.secret,
                 "root-session",
                 "root-turn",
-                {"task_name": "/root/luna_worker"},
+                "interrupt_agent",
+                {"target": "/root/luna_worker"},
             )
         lifecycle.finish_interrupt(
             self.directory,
@@ -94,7 +96,7 @@ class NativeLunaLifecycleTests(unittest.TestCase):
             "root-session",
             "root-turn",
             "tool-1",
-            {"task_name": "luna_worker"},
+            {"task_name": "luna_worker", "fork_turns": "none"},
         )
         with self.assertRaises(RouterStateError):
             lifecycle.post_spawn(
@@ -146,7 +148,8 @@ class NativeLunaLifecycleTests(unittest.TestCase):
             self.secret,
             "root-session",
             "root-turn",
-            {"agent_id": "child-session"},
+            "interrupt_agent",
+            {"target": "child-session"},
         )
         self.assertEqual(self.record()["cleanup"], "REQUESTED")
         with self.assertRaises(RouterStateError):
@@ -155,7 +158,8 @@ class NativeLunaLifecycleTests(unittest.TestCase):
                 self.secret,
                 "root-session",
                 "root-turn",
-                {"agent_id": "child-session"},
+                "interrupt_agent",
+                {"target": "child-session"},
             )
 
     def test_turn_mismatch_durably_revokes_old_luna(self):
@@ -177,7 +181,8 @@ class NativeLunaLifecycleTests(unittest.TestCase):
             self.secret,
             "root-session",
             "root-turn",
-            {"task_name": "/root/luna_worker"},
+            "send_message",
+            {"target": "/root/luna_worker"},
         )
         with self.assertRaises(RouterStateError):
             lifecycle.authorize_parent_operation(
@@ -185,7 +190,8 @@ class NativeLunaLifecycleTests(unittest.TestCase):
                 self.secret,
                 "root-session",
                 "root-turn",
-                {"task_name": "/root/other"},
+                "send_message",
+                {"target": "/root/other"},
             )
 
     def test_hmac_tamper_fails_closed(self):
