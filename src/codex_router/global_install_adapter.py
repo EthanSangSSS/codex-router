@@ -19,6 +19,7 @@ LUNA_EXECUTION_MODE = "hard_mode_no_process"
 COMPATIBLE = "COMPATIBLE"
 INCOMPATIBLE = "INCOMPATIBLE"
 UNKNOWN = "UNKNOWN_REQUIRES_CAPABILITY_CHECK"
+_V2_HOOK_COUNT = 6
 
 AGENTS_BLOCK_V2 = f"""{_core.AGENTS_BEGIN}
 This Codex task is the primary Sol coordinator, highest ordinary execution authority, and final reviewer. Luna is the default bounded execution worker for routed work.
@@ -230,12 +231,63 @@ def _enrich(status: GlobalStatus, codex_home: Path | str) -> GlobalStatus:
     )
 
 
-def _legacy_self_test_receipt(output: dict[str, Any]) -> dict[str, Any]:
-    """Translate only the semantic label expected by the unchanged installer-core self-test.
+def _v2_hook_configured(
+    home: Path, state: Mapping[str, Any]
+) -> bool:
+    """Verify the six managed V2 Hooks against the transaction record."""
+    targets = state.get("targets")
+    if not isinstance(targets, Mapping):
+        return False
+    record = targets.get("hooks.json")
+    if not isinstance(record, Mapping):
+        return False
+    try:
+        exists, content, mode = _core._read_target_file(home, "hooks.json")
+    except Exception:
+        return False
+    if (
+        not exists
+        or content is None
+        or _core._sha256(content) != record.get("installed_sha256")
+        or mode != record.get("installed_mode")
+    ):
+        return False
+    try:
+        parsed = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return sum(_core.HOOK_MARKER in value for value in _core._walk_strings(parsed)) == _V2_HOOK_COUNT
 
-    Repository tests independently assert the actual V2 receipt. This shim lets the stable
-    transaction core retain its historical self-test implementation until a later refactor.
-    """
+
+def _status_from_state_v2(
+    legacy_status_from_state,
+    home: Path,
+    installation_dir: Path,
+    state: Mapping[str, Any],
+) -> GlobalStatus:
+    status = legacy_status_from_state(home, installation_dir, state)
+    if state.get("phase") != "installed" or status.hook_configured:
+        return status
+    hook_configured = _v2_hook_configured(home, state)
+    if not hook_configured:
+        return status
+    installed = (
+        status.agents_managed
+        and status.luna_agent_configured
+        and status.config_valid
+        and status.identity_material_valid
+    )
+    return replace(
+        status,
+        state="installed" if installed else status.state,
+        hook_configured=True,
+        hook_trust="requires-user-check" if installed else status.hook_trust,
+        new_session_required=True if installed else status.new_session_required,
+    )
+
+
+def _legacy_self_test_receipt(output: dict[str, Any]) -> dict[str, Any]:
+    """Translate only the semantic label expected by the unchanged installer-core self-test."""
     translated = deepcopy(output)
     try:
         raw = translated["hookSpecificOutput"]["additionalContext"]
@@ -258,17 +310,28 @@ def _legacy_self_test_receipt(output: dict[str, Any]) -> dict[str, Any]:
 
 @contextmanager
 def _rendering_adapter() -> Iterator[None]:
-    """Temporarily inject V2 rendering without rewriting the transaction core."""
+    """Temporarily inject V2 rendering/status without rewriting transaction mechanics."""
     old_bytes = _core._luna_agent_bytes
     old_matches = _core._luna_agent_matches
     old_install_hook = _core._install_hook
     old_agents_block = _core.AGENTS_BLOCK
     old_luna_instructions = _core._LUNA_DEVELOPER_INSTRUCTIONS
+    old_status_from_state = _core._status_from_state
+
+    def status_from_state(home, installation_dir, state):
+        return _status_from_state_v2(
+            old_status_from_state,
+            home,
+            installation_dir,
+            state,
+        )
+
     _core._luna_agent_bytes = luna_agent_bytes
     _core._luna_agent_matches = luna_agent_matches
     _core._install_hook = install_hook_v2
     _core.AGENTS_BLOCK = AGENTS_BLOCK_V2
     _core._LUNA_DEVELOPER_INSTRUCTIONS = LUNA_DEVELOPER_INSTRUCTIONS_V2
+    _core._status_from_state = status_from_state
     try:
         yield
     finally:
@@ -277,6 +340,7 @@ def _rendering_adapter() -> Iterator[None]:
         _core._install_hook = old_install_hook
         _core.AGENTS_BLOCK = old_agents_block
         _core._LUNA_DEVELOPER_INSTRUCTIONS = old_luna_instructions
+        _core._status_from_state = old_status_from_state
 
 
 def global_install(*args, **kwargs):
