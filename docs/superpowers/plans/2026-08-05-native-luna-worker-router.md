@@ -109,7 +109,7 @@
 
 ---
 
-## 2026-08-14 incident-hardening extension
+## 2026-08-14 incident-hardening extension (historical; superseded below)
 
 The tasks below supersede only the lifecycle, takeover, recursive-runtime, and interactive-blocker semantics from Task 5. All completed installation/stateless-routing work above remains valid.
 
@@ -421,3 +421,108 @@ Do not intentionally execute nested Codex to test the negative gate. Validate th
 - [ ] **Step 10: Final evidence report.**
 
 Report exact branch/HEAD, commits, tests, install status, live/source version match, lifecycle close evidence, and any residual enforcement limitation. If any required boundary is unverifiable, final status is `INCONCLUSIVE` or the explicit blocker, not PASS.
+
+## 2026-08-16 approved Codex V2 implementation plan
+
+This plan supersedes Tasks 6-10 above. It preserves their safety outcomes while
+using only the lifecycle evidence actually exposed by deployed Multi-Agent V2.
+It never starts a second Codex process, modifies live `~/.codex` or
+site-packages, or treats an unverified cleanup result as a close.
+
+### Task 6: Freeze V2 capability fixtures and policy context
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-08-05-native-luna-worker-router-design.md`
+- Modify: `tests/test_hook.py`
+- Modify: `src/codex_router/hook.py`
+
+**RED:** add fixtures for the exact command Hook fields of UserPromptSubmit,
+PreToolUse, PostToolUse, PermissionRequest, Stop, SubagentStart, and
+SubagentStop. Require routed context to declare parent-scoped authority,
+V2 SubagentStart binding, interrupt-only cleanup, restricted Luna surface, and
+manual Web mode.
+
+**GREEN:** add strict event normalization and compact route context only; no
+journal allocation on UserPromptSubmit.
+
+**Validation:** focused Hook fixture tests; `git diff --check`.
+
+### Task 7: Add privacy-preserving native lifecycle journal
+
+**Files:**
+- Add: `src/codex_router/native_contract.py`
+- Add: `src/codex_router/native_lifecycle.py`
+- Modify: `src/codex_router/hook.py`
+- Add: `tests/test_native_lifecycle.py`
+
+**RED:** cover HMAC-authenticated TURN_SCOPE, single pending spawn, successful
+PostToolUse task-path confirmation, SubagentStart correlation via bounded child
+session metadata, duplicate/mismatch revocation, and `ACTIVE` / `REVOKED`
+authority states with `NONE` / `REQUESTED` / `OBSERVED` / `UNVERIFIED` cleanup.
+
+**GREEN:** use a private owner-only journal directory, lock file, no-follow
+reads, bounded JSON, atomic replacement, and no prompt/model-output storage.
+Correlate `agent_id` only after child metadata proves parent session and
+canonical task path. Any ambiguity revokes and blocks.
+
+**Validation:** focused lifecycle tests and corruption/symlink/mode cases.
+
+### Task 8: Enforce supported Luna command and interaction surface
+
+**Files:**
+- Add: `src/codex_router/command_intent.py`
+- Modify: `src/codex_router/hook.py`
+- Add: `tests/test_command_intent.py`
+
+**RED:** table-drive direct, absolute, `env`, `sh -c`, `bash -lc`, and wrapper
+Codex launches; prove textual mentions and ordinary commands remain allowed.
+Require Luna to reject Unified Exec, Code Mode, write_stdin, descendants,
+unknown process/executor tools, and every PermissionRequest.
+
+**GREEN:** parse only supported one-shot shell command payloads; block effective
+Codex process intent with `BLOCKED_LUNA_CODEX_RUNTIME`; fail closed for unknown
+executor tools; return `BLOCKED_USER_INTERACTION_REQUIRED` for Luna permission
+requests. Sol/App task-management controls remain allowed.
+
+**Validation:** focused intent and Hook dispatch tests; no Codex subprocess.
+
+### Task 9: Install V2 ownership atomically and reversibly
+
+**Files:**
+- Modify: `src/codex_router/global_install.py`
+- Modify: `src/codex_router/cli.py`
+- Modify: `tests/test_global_install.py`
+- Modify: `README.md`
+
+**RED:** require owned Hook entries for UserPromptSubmit, PreToolUse,
+PostToolUse, PermissionRequest, Stop, and necessary SubagentStart/Stop;
+require exact uninstall/rollback and unrelated Hook preservation. Require the
+generated Luna TOML to disable Unified Exec, Code Mode, Code Mode Only,
+multi_agent, multi_agent_v2, and request_permissions.
+
+**GREEN:** render and validate all owned command entries, add CLI dispatch for
+each Hook event, and retain byte/mode-safe installer recovery. V2 terminal
+cleanup authorizes only one interrupt after atomic revocation; PostToolUse can
+record `OBSERVED`, otherwise it remains `UNVERIFIED`.
+
+**Validation:** installer install/upgrade/uninstall conflict tests and isolated
+subprocess Hook self-tests. Do not install into live Codex home.
+
+### Task 10: Full regression, build, and GitHub handoff
+
+**Files:** all changed source, test, documentation, and installer files.
+
+**Required matrix:** same-turn reuse, one-Luna denial, turn mismatch revoke,
+post-revoke send/followup/interrupt denial, revoke-before-interrupt, failed
+interrupt remains revoked, one-shot Stop, no cleanup loop, PermissionRequest
+deny, direct/bypass task tools, legacy fake pipeline compatibility, and no
+fixed-turn restart.
+
+**Validation:** focused RED/GREEN tests, full unittest suite, compileall,
+`git diff --check`, build artifact, fresh temporary virtual environment install,
+package self-test, and legacy fake smoke. Run a narrow redacted gitleaks scan
+before upload.
+
+**Delivery:** small commits, push `hardening/native-luna-safety-v2`, create a
+Draft PR only, and stop at `READY_FOR_LIVE_MIGRATION_REVIEW`. Live installation,
+Hook trust, and a live Luna tool-list probe remain user-started migration work.
