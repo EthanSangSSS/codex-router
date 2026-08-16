@@ -80,11 +80,10 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
             "luna_worker",
         )
 
-    def _journal_record(self, session: str, turn: str):
+    def _journal_record(self, session: str):
         path = self.installation_dir / "native-luna-safety-v2.json"
         state = json.loads(path.read_text(encoding="utf-8"))
-        key = lifecycle._key(session, turn)
-        return state["bindings"][key]
+        return state["sessions"][lifecycle.session_tag(self.secret, session)]
 
     def _prompt(self, prompt: str, *, session: str = "session-a", turn: str = "turn-a"):
         return {
@@ -95,8 +94,8 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
             "cwd": str(self.root),
         }
 
-    def _route_context(self, prompt: str = "修改 README"):
-        output = handle_user_prompt(self._prompt(prompt), self.installation_dir)
+    def _route_context(self, prompt: str = "修改 README", *, turn: str = "turn-a"):
+        output = handle_user_prompt(self._prompt(prompt, turn=turn), self.installation_dir)
         raw = output["hookSpecificOutput"]["additionalContext"]
         prefix = "[CODEX_ROUTER_POLICY_V1] "
         self.assertTrue(raw.startswith(prefix))
@@ -107,7 +106,7 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
         self.assertEqual(context["decision"], "route")
         self.assertEqual(context["sol_role"], "plan_review_final_authority")
         self.assertEqual(context["luna_lifecycle"], "persistent_while_root_turn_active")
-        self.assertEqual(context["parent_terminal_policy"], "revoke_then_cleanup")
+        self.assertEqual(context["parent_terminal_policy"], "revoke_only_security_boundary")
         self.assertEqual(context["capacity_failure_policy"], "return_to_sol")
         self.assertEqual(context["luna_codex_runtime_policy"], "forbidden")
         self.assertEqual(context["interactive_blocker_policy"], "return_to_sol_or_user")
@@ -120,21 +119,15 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
         )
         raw = output["hookSpecificOutput"]["additionalContext"]
         self.assertIn('"decision":"direct"', raw)
-        self.assertEqual(
-            self._journal_record("session-a", "turn-old")["authorization"],
-            "REVOKED",
-        )
+        self.assertEqual(self._journal_record("session-a")["authorization"], "REVOKED")
 
     def test_new_routed_root_turn_revokes_prior_turn_binding(self):
         self._bind_luna(turn="turn-old")
-        context = self._route_context("修改 README")
+        context = self._route_context("修改 README", turn="turn-new")
         self.assertEqual(context["decision"], "route")
-        self.assertEqual(
-            self._journal_record("session-a", "turn-old")["authorization"],
-            "REVOKED",
-        )
+        self.assertEqual(self._journal_record("session-a")["authorization"], "REVOKED")
 
-    def test_stop_revokes_active_binding_before_requesting_one_cleanup_continuation(self):
+    def test_stop_revokes_without_requesting_cleanup_continuation(self):
         self._bind_luna()
         output = handle_hook_event(
             {
@@ -144,10 +137,8 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
             },
             self.installation_dir,
         )
-        self.assertEqual(output["decision"], "block")
-        record = self._journal_record("session-a", "turn-a")
-        self.assertEqual(record["authorization"], "REVOKED")
-        self.assertTrue(record["stop_blocked"])
+        self.assertEqual(output, {})
+        self.assertEqual(self._journal_record("session-a")["authorization"], "REVOKED")
         second = handle_hook_event(
             {
                 "hook_event_name": "Stop",
@@ -186,9 +177,7 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
             },
             self.installation_dir,
         )
-        self.assertEqual(
-            output["hookSpecificOutput"]["permissionDecision"], "deny"
-        )
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_v2_parent_message_followup_and_interrupt_use_target_field(self):
         self._bind_luna()
@@ -232,41 +221,38 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
             {"task_name": "luna_worker", "fork_turns": "all"},
         ):
             with self.subTest(tool_input=tool_input):
-                with self.subTest():
-                    temp = tempfile.TemporaryDirectory()
-                    self.addCleanup(temp.cleanup)
-                    root = Path(temp.name)
-                    install = root / "installation"
-                    install.mkdir(mode=0o700)
-                    self._write_private(install / "installation-secret", self.secret)
-                    binary = root / "codex"
-                    binary.write_text("synthetic binary", encoding="utf-8")
-                    binary.chmod(0o700)
-                    self._write_private(
-                        install / "config.json",
-                        json.dumps(
-                            {
-                                "protocol": "codex-router/global-policy-config/v1",
-                                "state_root": str(root / "runs"),
-                                "codex_binary": str(binary),
-                                "role_config": ROLE_CONFIG,
-                            }
-                        ).encode("utf-8"),
-                    )
-                    output = handle_hook_event(
+                temp = tempfile.TemporaryDirectory()
+                self.addCleanup(temp.cleanup)
+                root = Path(temp.name)
+                install = root / "installation"
+                install.mkdir(mode=0o700)
+                self._write_private(install / "installation-secret", self.secret)
+                binary = root / "codex"
+                binary.write_text("synthetic binary", encoding="utf-8")
+                binary.chmod(0o700)
+                self._write_private(
+                    install / "config.json",
+                    json.dumps(
                         {
-                            "hook_event_name": "PreToolUse",
-                            "session_id": "session-packet",
-                            "turn_id": "turn-packet",
-                            "tool_name": "spawn_agent",
-                            "tool_use_id": "spawn-packet",
-                            "tool_input": tool_input,
-                        },
-                        install,
-                    )
-                    self.assertEqual(
-                        output["hookSpecificOutput"]["permissionDecision"], "deny"
-                    )
+                            "protocol": "codex-router/global-policy-config/v1",
+                            "state_root": str(root / "runs"),
+                            "codex_binary": str(binary),
+                            "role_config": ROLE_CONFIG,
+                        }
+                    ).encode("utf-8"),
+                )
+                output = handle_hook_event(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "session_id": "session-packet",
+                        "turn_id": "turn-packet",
+                        "tool_name": "spawn_agent",
+                        "tool_use_id": "spawn-packet",
+                        "tool_input": tool_input,
+                    },
+                    install,
+                )
+                self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
 
     def test_spawn_with_packet_only_context_is_admitted(self):
         output = handle_hook_event(
