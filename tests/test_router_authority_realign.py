@@ -62,7 +62,7 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
             session,
             turn,
             "spawn-1",
-            {"task_name": "luna_worker"},
+            {"task_name": "luna_worker", "fork_turns": "none"},
         )
         lifecycle.post_spawn(
             self.installation_dir,
@@ -194,13 +194,105 @@ class RouterAuthorityRealignmentTests(unittest.TestCase):
                 "tool_use_id": "child-spawn",
                 "agent_id": "other-child",
                 "agent_type": "reviewer",
-                "tool_input": {"task_name": "luna_worker"},
+                "tool_input": {"task_name": "luna_worker", "fork_turns": "none"},
             },
             self.installation_dir,
         )
         self.assertEqual(
             output["hookSpecificOutput"]["permissionDecision"], "deny"
         )
+
+    def test_v2_parent_message_followup_and_interrupt_use_target_field(self):
+        self._bind_luna()
+        for tool_name, tool_input in (
+            ("send_message", {"target": "/root/luna_worker", "message": "fix"}),
+            ("followup_task", {"target": "/root/luna_worker", "message": "fix"}),
+            ("interrupt_agent", {"target": "/root/luna_worker"}),
+        ):
+            with self.subTest(tool_name=tool_name):
+                output = handle_hook_event(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "session_id": "session-a",
+                        "turn_id": "turn-a",
+                        "tool_name": tool_name,
+                        "tool_use_id": f"{tool_name}-1",
+                        "tool_input": tool_input,
+                    },
+                    self.installation_dir,
+                )
+                self.assertEqual(output, {})
+
+    def test_parent_rejects_wrong_v2_target(self):
+        self._bind_luna()
+        output = handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-a",
+                "turn_id": "turn-a",
+                "tool_name": "send_message",
+                "tool_use_id": "send-1",
+                "tool_input": {"target": "/root/other", "message": "x"},
+            },
+            self.installation_dir,
+        )
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_spawn_requires_fork_turns_none(self):
+        for tool_input in (
+            {"task_name": "luna_worker"},
+            {"task_name": "luna_worker", "fork_turns": "all"},
+        ):
+            with self.subTest(tool_input=tool_input):
+                with self.subTest():
+                    temp = tempfile.TemporaryDirectory()
+                    self.addCleanup(temp.cleanup)
+                    root = Path(temp.name)
+                    install = root / "installation"
+                    install.mkdir(mode=0o700)
+                    self._write_private(install / "installation-secret", self.secret)
+                    binary = root / "codex"
+                    binary.write_text("synthetic binary", encoding="utf-8")
+                    binary.chmod(0o700)
+                    self._write_private(
+                        install / "config.json",
+                        json.dumps(
+                            {
+                                "protocol": "codex-router/global-policy-config/v1",
+                                "state_root": str(root / "runs"),
+                                "codex_binary": str(binary),
+                                "role_config": ROLE_CONFIG,
+                            }
+                        ).encode("utf-8"),
+                    )
+                    output = handle_hook_event(
+                        {
+                            "hook_event_name": "PreToolUse",
+                            "session_id": "session-packet",
+                            "turn_id": "turn-packet",
+                            "tool_name": "spawn_agent",
+                            "tool_use_id": "spawn-packet",
+                            "tool_input": tool_input,
+                        },
+                        install,
+                    )
+                    self.assertEqual(
+                        output["hookSpecificOutput"]["permissionDecision"], "deny"
+                    )
+
+    def test_spawn_with_packet_only_context_is_admitted(self):
+        output = handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-a",
+                "turn_id": "turn-a",
+                "tool_name": "spawn_agent",
+                "tool_use_id": "spawn-packet",
+                "tool_input": {"task_name": "luna_worker", "fork_turns": "none"},
+            },
+            self.installation_dir,
+        )
+        self.assertEqual(output, {})
 
 
 if __name__ == "__main__":
