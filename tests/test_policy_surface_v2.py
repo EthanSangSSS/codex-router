@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from codex_router.global_install_adapter import global_install
-from codex_router.hook import handle_user_prompt
+from codex_router.hook import handle_hook_event, handle_user_prompt
 
 
 ROLE_CONFIG = {
@@ -36,6 +36,40 @@ class PolicySurfaceV2Tests(unittest.TestCase):
             defaults=ROLE_CONFIG,
         )
         self.installation = self.home / ".codex-router-policy-v1"
+
+    def _bind_luna(self):
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn",
+                    "tool_name": "spawn_agent",
+                    "tool_use_id": "spawn-1",
+                    "tool_input": {
+                        "task_name": "luna_worker",
+                        "agent_type": "luna_worker",
+                        "fork_turns": "none",
+                        "message": "bounded packet",
+                    },
+                },
+                self.installation,
+            ),
+            {},
+        )
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "SubagentStart",
+                    "session_id": "session-a",
+                    "turn_id": "child-turn",
+                    "agent_id": "luna-native-id",
+                    "agent_type": "luna_worker",
+                },
+                self.installation,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
+        )
 
     def test_managed_hook_set_omits_subagent_stop(self):
         document = json.loads((self.home / "hooks.json").read_text(encoding="utf-8"))
@@ -94,6 +128,44 @@ class PolicySurfaceV2Tests(unittest.TestCase):
         self.assertIn("do not run shell", instructions.lower())
         self.assertIn("return process-dependent validation to Sol", instructions)
         self.assertNotIn("including focused tests", instructions)
+
+    def test_permission_deny_prefers_bound_native_agent_id_even_without_role_text(self):
+        self._bind_luna()
+        output = handle_hook_event(
+            {
+                "hook_event_name": "PermissionRequest",
+                "session_id": "session-a",
+                "turn_id": "another-child-turn",
+                "agent_id": "luna-native-id",
+                "tool_name": "Bash",
+                "tool_input": {"command": "echo forbidden"},
+            },
+            self.installation,
+        )
+        self.assertEqual(
+            output["hookSpecificOutput"]["decision"]["behavior"], "deny"
+        )
+
+    def test_partial_child_identity_cannot_fall_through_to_primary_lifecycle_authority(self):
+        output = handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-b",
+                "turn_id": "root-turn",
+                "agent_type": "reviewer",
+                "tool_name": "spawn_agent",
+                "tool_use_id": "malformed-child-spawn",
+                "tool_input": {
+                    "task_name": "luna_worker",
+                    "fork_turns": "none",
+                    "message": "should not be admitted",
+                },
+            },
+            self.installation,
+        )
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
 
 
 if __name__ == "__main__":
