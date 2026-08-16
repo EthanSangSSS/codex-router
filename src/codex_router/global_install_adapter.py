@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import json
+from pathlib import Path
 import tomllib
 from typing import Any, Iterator, Mapping
 
 from . import global_install as _core
+from .types import GlobalStatus
 
 
 LUNA_EXECUTION_MODE = "hard_mode_no_process"
+COMPATIBLE = "COMPATIBLE"
+INCOMPATIBLE = "INCOMPATIBLE"
+UNKNOWN = "UNKNOWN_REQUIRES_CAPABILITY_CHECK"
 
 
 def luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
@@ -76,6 +82,63 @@ def luna_agent_matches(content: bytes | None, role: Mapping[str, Any]) -> bool:
     return parsed == expected
 
 
+def _primary_capability(codex_home: Path) -> tuple[str, str]:
+    """Classify only statically observable primary capabilities; never mutate config."""
+    config_path = codex_home / "config.toml"
+    if not config_path.exists():
+        return (
+            UNKNOWN,
+            "primary config.toml is absent; effective layered capability requires runtime validation",
+        )
+    try:
+        value = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return (
+            UNKNOWN,
+            "primary config.toml could not be safely interpreted for compatibility",
+        )
+    if not isinstance(value, dict):
+        return (UNKNOWN, "primary configuration shape is unverified")
+    agents = value.get("agents")
+    features = value.get("features")
+    agents = agents if isinstance(agents, Mapping) else {}
+    features = features if isinstance(features, Mapping) else {}
+
+    if agents.get("enabled") is False:
+        return (INCOMPATIBLE, "primary agents.enabled=false disables Router Luna management")
+    if features.get("multi_agent") is False:
+        return (
+            INCOMPATIBLE,
+            "primary features.multi_agent=false disables Router Luna management",
+        )
+    if features.get("hooks") is False:
+        return (INCOMPATIBLE, "primary features.hooks=false disables Router Hooks")
+
+    if (
+        agents.get("enabled") is True
+        and features.get("multi_agent") is True
+        and features.get("hooks") is True
+    ):
+        return (
+            COMPATIBLE,
+            "required primary agents, multi-agent, and Hook capabilities are explicitly enabled",
+        )
+    return (
+        UNKNOWN,
+        "required primary capabilities are not all explicit; effective layered config needs validation",
+    )
+
+
+def _enrich(status: GlobalStatus, codex_home: Path | str) -> GlobalStatus:
+    compatibility, reason = _primary_capability(Path(codex_home).expanduser())
+    return replace(
+        status,
+        compatibility=compatibility,
+        compatibility_reason=reason,
+        luna_execution_mode=LUNA_EXECUTION_MODE,
+    )
+
+
 @contextmanager
 def _rendering_adapter() -> Iterator[None]:
     """Temporarily inject V2 rendering without rewriting the transaction core."""
@@ -91,18 +154,24 @@ def _rendering_adapter() -> Iterator[None]:
 
 
 def global_install(*args, **kwargs):
+    codex_home = kwargs.get("codex_home", args[0] if args else None)
     with _rendering_adapter():
-        return _core.global_install(*args, **kwargs)
+        status = _core.global_install(*args, **kwargs)
+    return _enrich(status, codex_home)
 
 
 def global_status(*args, **kwargs):
+    codex_home = kwargs.get("codex_home", args[0] if args else None)
     with _rendering_adapter():
-        return _core.global_status(*args, **kwargs)
+        status = _core.global_status(*args, **kwargs)
+    return _enrich(status, codex_home)
 
 
 def global_uninstall(*args, **kwargs):
+    codex_home = kwargs.get("codex_home", args[0] if args else None)
     with _rendering_adapter():
-        return _core.global_uninstall(*args, **kwargs)
+        status = _core.global_uninstall(*args, **kwargs)
+    return _enrich(status, codex_home)
 
 
 def global_self_test(*args, **kwargs):
