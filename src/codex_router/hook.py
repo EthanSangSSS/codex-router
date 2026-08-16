@@ -261,7 +261,11 @@ def _permission_deny(message: str) -> dict[str, Any]:
 
 
 def _looks_like_agent_lifecycle_tool(tool_name: str) -> bool:
-    return tool_name in _KNOWN_AGENT_TOOLS or tool_name.startswith("agent_") or tool_name.endswith("_agent")
+    return (
+        tool_name in _KNOWN_AGENT_TOOLS
+        or tool_name.startswith("agent_")
+        or tool_name.endswith("_agent")
+    )
 
 
 def _is_unknown_executor_tool(tool_name: str) -> bool:
@@ -276,6 +280,11 @@ def _is_unknown_executor_tool(tool_name: str) -> bool:
         "node_exec",
         "terminal_exec",
     } or lowered.endswith("_exec")
+
+
+def _is_subagent_event(event: Mapping[str, Any]) -> bool:
+    agent_id = event.get("agent_id")
+    return isinstance(agent_id, str) and bool(agent_id)
 
 
 def _read_child_metadata(event: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -325,8 +334,12 @@ def _handle_luna_pretool(
         _event_text(event, "agent_id"),
     )
     tool_name = base["tool_name"]
-    if tool_name in _LUNA_FORBIDDEN_TOOLS or _looks_like_agent_lifecycle_tool(tool_name):
-        return _pretool_output("deny", "Luna tool surface forbids agent/process continuation")
+    if tool_name in _LUNA_FORBIDDEN_TOOLS or _looks_like_agent_lifecycle_tool(
+        tool_name
+    ):
+        return _pretool_output(
+            "deny", "Luna tool surface forbids agent/process continuation"
+        )
     if _is_unknown_executor_tool(tool_name):
         return _pretool_output("deny", "Luna unknown executor surface fails closed")
     if tool_name not in _LUNA_SHELL_TOOLS:
@@ -418,6 +431,13 @@ def handle_hook_event(
                     secret=secret,
                     config=config,
                 )
+            if _is_subagent_event(event):
+                if _looks_like_agent_lifecycle_tool(base["tool_name"]):
+                    return _pretool_output(
+                        "deny",
+                        "Router agent lifecycle control is reserved for primary Sol",
+                    )
+                return {}
             return _handle_parent_pretool(
                 base=base,
                 tool_input=tool_input,
@@ -431,6 +451,8 @@ def handle_hook_event(
                 name,
                 ("session_id", "turn_id", "tool_name", "tool_use_id"),
             )
+            if _is_subagent_event(event):
+                return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
             response = event.get("tool_response")
             if base["tool_name"] == "spawn_agent":
                 native_lifecycle.post_spawn(
