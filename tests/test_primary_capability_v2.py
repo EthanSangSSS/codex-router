@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from codex_router.cli import _global_status_payload
 from codex_router.global_install_adapter import (
     global_install,
     global_status,
@@ -88,6 +89,14 @@ class PrimaryCapabilityV2Tests(unittest.TestCase):
         status = global_status(self.home)
         self.assertEqual(status.compatibility, "INCOMPATIBLE")
         self.assertIn("hooks", status.compatibility_reason)
+
+    def test_cli_status_payload_exposes_preflight_and_execution_mode(self):
+        self.install()
+        status = global_status(self.home)
+        payload = _global_status_payload(status)
+        self.assertEqual(payload["compatibility"], status.compatibility)
+        self.assertEqual(payload["compatibility_reason"], status.compatibility_reason)
+        self.assertEqual(payload["luna_execution_mode"], "hard_mode_no_process")
 
 
 if __name__ == "__main__":
