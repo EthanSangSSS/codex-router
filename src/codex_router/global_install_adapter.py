@@ -1,11 +1,12 @@
-"""Version-sensitive Codex rendering adapter for the stable installer core."""
+"""Version-sensitive Codex compatibility layer around the stable installer core."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import tomllib
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
-from . import global_install as _legacy
+from . import global_install as _core
 
 
 LUNA_EXECUTION_MODE = "hard_mode_no_process"
@@ -16,15 +17,15 @@ def luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
     model = role.get("requested_model")
     reasoning = role.get("requested_reasoning")
     if not isinstance(model, str) or not model.strip():
-        raise _legacy._error("invalid-input", "Luna model configuration is invalid")
+        raise _core._error("invalid-input", "Luna model configuration is invalid")
     if not isinstance(reasoning, str) or not reasoning.strip():
-        raise _legacy._error("invalid-input", "Luna reasoning configuration is invalid")
+        raise _core._error("invalid-input", "Luna reasoning configuration is invalid")
     values = {
         "name": "luna_worker",
-        "description": _legacy._LUNA_DESCRIPTION,
+        "description": _core._LUNA_DESCRIPTION,
         "model": model,
         "model_reasoning_effort": reasoning,
-        "developer_instructions": _legacy._LUNA_DEVELOPER_INSTRUCTIONS,
+        "developer_instructions": _core._LUNA_DEVELOPER_INSTRUCTIONS,
     }
     rendered = "".join(
         f"{key} = {json.dumps(value, ensure_ascii=False)}\n"
@@ -44,7 +45,7 @@ def luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
     try:
         parsed = tomllib.loads(encoded.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-        raise _legacy._error(
+        raise _core._error(
             "conflict", "generated Luna agent configuration is invalid"
         ) from error
     expected = {
@@ -58,7 +59,7 @@ def luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
         },
     }
     if parsed != expected:
-        raise _legacy._error(
+        raise _core._error(
             "conflict", "generated Luna agent configuration is unstable"
         )
     return encoded
@@ -73,3 +74,42 @@ def luna_agent_matches(content: bytes | None, role: Mapping[str, Any]) -> bool:
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
         return False
     return parsed == expected
+
+
+@contextmanager
+def _rendering_adapter() -> Iterator[None]:
+    """Temporarily inject V2 rendering without rewriting the transaction core."""
+    old_bytes = _core._luna_agent_bytes
+    old_matches = _core._luna_agent_matches
+    _core._luna_agent_bytes = luna_agent_bytes
+    _core._luna_agent_matches = luna_agent_matches
+    try:
+        yield
+    finally:
+        _core._luna_agent_bytes = old_bytes
+        _core._luna_agent_matches = old_matches
+
+
+def global_install(*args, **kwargs):
+    with _rendering_adapter():
+        return _core.global_install(*args, **kwargs)
+
+
+def global_status(*args, **kwargs):
+    with _rendering_adapter():
+        return _core.global_status(*args, **kwargs)
+
+
+def global_uninstall(*args, **kwargs):
+    with _rendering_adapter():
+        return _core.global_uninstall(*args, **kwargs)
+
+
+def global_self_test(*args, **kwargs):
+    with _rendering_adapter():
+        return _core.global_self_test(*args, **kwargs)
+
+
+# Narrow private aliases used by focused adapter tests. Transaction internals remain in core.
+_luna_agent_bytes = luna_agent_bytes
+_luna_agent_matches = luna_agent_matches
