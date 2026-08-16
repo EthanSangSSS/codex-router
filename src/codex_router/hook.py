@@ -207,7 +207,7 @@ def handle_user_prompt(
             "luna_model": luna["requested_model"],
             "luna_reasoning": luna["requested_reasoning"],
             "luna_lifecycle": "persistent_while_root_turn_active",
-            "parent_terminal_policy": "revoke_then_cleanup",
+            "parent_terminal_policy": "revoke_only_security_boundary",
             "capacity_failure_policy": "return_to_sol",
             "luna_descendant_policy": "forbidden",
             "luna_codex_runtime_policy": "forbidden",
@@ -272,9 +272,37 @@ def _is_unknown_executor_tool(tool_name: str) -> bool:
     } or lowered.endswith("_exec")
 
 
-def _is_subagent_event(event: Mapping[str, Any]) -> bool:
+def _identity_kind(event: Mapping[str, Any]) -> str:
     agent_id = event.get("agent_id")
-    return isinstance(agent_id, str) and bool(agent_id)
+    agent_type = event.get("agent_type")
+    has_id = isinstance(agent_id, str) and bool(agent_id)
+    has_type = isinstance(agent_type, str) and bool(agent_type)
+    if has_id and has_type:
+        return "child"
+    if has_id or has_type:
+        return "malformed-child"
+    return "root"
+
+
+def _is_bound_luna(
+    event: Mapping[str, Any], installation_dir: Path, secret: bytes
+) -> bool:
+    agent_id = event.get("agent_id")
+    session_id = event.get("session_id")
+    if not isinstance(agent_id, str) or not agent_id:
+        return False
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    try:
+        native_lifecycle.authorize_luna(
+            installation_dir,
+            secret,
+            session_id,
+            agent_id,
+        )
+    except RouterStateError:
+        return False
+    return True
 
 
 def _handle_luna_pretool(
@@ -362,14 +390,17 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             tool_input = event.get("tool_input")
             if not isinstance(tool_input, Mapping):
                 raise _invalid("tool_input must be an object")
-            if event.get("agent_type") == "luna_worker":
+            identity = _identity_kind(event)
+            if _is_bound_luna(event, Path(installation_dir), secret):
                 return _handle_luna_pretool(
                     event=event,
                     base=base,
                     installation_dir=Path(installation_dir),
                     secret=secret,
                 )
-            if _is_subagent_event(event):
+            if event.get("agent_type") == "luna_worker":
+                return _pretool_output("deny", "unbound Luna identity fails closed")
+            if identity != "root":
                 if _looks_like_agent_lifecycle_tool(base["tool_name"]):
                     return _pretool_output(
                         "deny", "Router agent lifecycle control is reserved for primary Sol"
@@ -386,7 +417,7 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             base = _event_base(
                 event, name, ("session_id", "turn_id", "tool_name", "tool_use_id")
             )
-            if _is_subagent_event(event):
+            if _identity_kind(event) != "root":
                 return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
             if base["tool_name"] == "spawn_agent":
                 native_lifecycle.post_spawn(
@@ -401,6 +432,8 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
 
         if name == "PermissionRequest":
             _event_base(event, name, ("session_id", "turn_id", "tool_name"))
+            if _is_bound_luna(event, Path(installation_dir), secret):
+                return _permission_deny("BLOCKED_USER_INTERACTION_REQUIRED")
             if event.get("agent_type") == "luna_worker":
                 return _permission_deny("BLOCKED_USER_INTERACTION_REQUIRED")
             return {}
