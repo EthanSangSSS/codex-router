@@ -2,139 +2,79 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the V2 root-turn/revocation/hard-no-process control model with the approved V3.1 persistent-Luna Minimal Control Plane: one Luna per coherent task epoch, Full Executor ordinary capabilities, packet-generation authority, Hard Authority Pause, narrow A1 authorization, and fail-closed live-activation gates.
+**Goal:** Replace the V2 root-turn/revocation/hard-no-process policy with the approved V3.1 persistent-Luna Minimal Control Plane: one Luna per coherent task epoch, Full Executor ordinary capabilities, monotonic packet authority, Hard Authority Pause, narrow A1 authorization, and explicit live-activation acceptance gates.
 
-**Architecture:** Add a focused `luna_control.py` module for durable V3.1 task/Luna/generation state and transitions, and keep `hook.py` as a narrow Codex-event adapter. Keep the mature global installer transaction/backup machinery, but replace its V2 rendering layer with a V3.1 profile that disables descendant agents without disabling ordinary shell/build/test tools. Runtime properties that the current App cannot prove remain explicit acceptance blockers rather than being guessed or replaced with V2 broad policing.
+**Architecture:** Create `luna_control.py` as the single V3.1 durable authority/state machine and keep `hook.py` as a narrow Codex-event adapter. Keep the mature global installer transaction/backup machinery, but replace its V2 rendering layer with a V3.1 profile that disables descendant agents without disabling ordinary shell/build/test tools. Properties the current App cannot prove remain explicit acceptance blockers; implementation must not fabricate equivalent guarantees with V2 broad policing.
 
 **Tech Stack:** Python 3.12 standard library, `unittest`, Codex command Hooks, TOML/JSON rendering, reversible global installer, GitHub Actions.
 
 ## Global Constraints
 
-- Target authority is `docs/superpowers/specs/2026-08-17-persistent-luna-minimal-control-plane-v3-1-design.md` plus `docs/superpowers/specs/2026-08-17-persistent-luna-hard-authority-pause-v3-1-addendum.md`; the addendum wins only where they conflict.
+- Design authority is `docs/superpowers/specs/2026-08-17-persistent-luna-minimal-control-plane-v3-1-design.md` plus `docs/superpowers/specs/2026-08-17-persistent-luna-hard-authority-pause-v3-1-addendum.md`; the addendum wins only where they conflict.
 - Sol remains user-facing coordinator/planner/reviewer/controller/final responder; Luna is the default substantive Full Executor.
-- P1 is one persistent Luna per coherent `task_epoch`, not one Luna per root turn and not one Luna forever across unrelated tasks.
-- A root-turn boundary is not a Luna-lifecycle boundary.
+- P1 is one persistent Luna per coherent `task_epoch`; a root-turn boundary is not a Luna-lifecycle boundary.
 - `native_workspace_boundary` is mechanical native authority for a Luna epoch; `intended_write_scope` is packet-level semantic write intent and may change without replacing Luna when it stays inside the same native boundary.
 - Packet authority is monotonic by `packet_generation`; a new packet replaces prior packet authority rather than adding to it.
 - Hard Authority Pause means immediate Router authority freeze, not guaranteed immediate OS/process/tool termination.
-- `interrupt_agent` acknowledgment is never settlement.
-- No generation N+1 work may begin while generation N remains `QUIESCING` and unsettled.
-- Logical task state and execution/control state are separate dimensions. In particular, cancellation while execution is still in flight must preserve an equivalent of `logical_task_status=CANCELLED` plus `execution_status=QUIESCING` until settlement.
+- `interrupt_agent` acknowledgment is never settlement. Generation N+1 must not execute while N remains `QUIESCING` and unsettled.
+- Logical task state and execution/control state are independent. Cancellation during in-flight execution must preserve `logical_task_status=CANCELLED` with `execution_status=QUIESCING` until settlement.
 - Stale prior-generation output may be logged but cannot complete the current packet, expand scope, authorize A1, replace Luna identity, or advance current authority.
-- A1 authorization is packet-scoped and non-inheriting. Hard A1 claims require a proven pre-action mechanical gate for the specific enabled surface.
+- A1 authorization is packet-scoped and non-inheriting. Hard A1 claims require a proven pre-action mechanical gate for the exact enabled surface.
 - Do not add a general shell parser, broad ordinary-tool positive allowlist, global `no_process` mode, periodic Sol polling, heartbeat loop, or Router-owned PID/process-group supervisor.
 - Luna descendants remain mechanically disabled with the effective equivalent of `[agents] enabled=false`, `[features] multi_agent=false`, and `multi_agent_v2=false`, plus a narrow lifecycle defense-in-depth gate.
-- Nested Codex remains prohibited by product policy, but the mechanical strength of that claim is an acceptance gate under Full Executor.
-- Baseline managed Hooks are `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `SubagentStart`. `PermissionRequest` is conditional and A1-specific only if runtime evidence proves it is needed and attributable. `Stop` is not a baseline V3.1 Hook.
+- Nested Codex remains prohibited by product policy; the strength of the mechanical claim is a target-runtime acceptance gate under Full Executor.
+- Baseline managed Hooks are exactly `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and `SubagentStart`. `PermissionRequest` is conditional and A1-specific only if runtime evidence proves it is needed and attributable. `Stop` is not a baseline V3.1 Hook.
+- `PostToolUse` remains spawn-result reconciliation in the baseline design. Do not silently expand it into settlement observation; if exact-runtime evidence later requires another Hook responsibility, stop and amend the design before live activation.
 - Persistent state remains owner-only, no-symlink, locked, bounded, atomically replaced, file-fsynced, and containing-directory-fsynced.
 - New OAuth/device-auth solely for Router validation is forbidden. Standalone authenticated-root validation is not the normal path.
 - Current-App smoke evidence may support product feasibility, but must not be promoted into unobserved G3-G8 hard guarantees.
-- No live `~/.codex` installation, Hook trust change, PR ready-for-review transition, merge, or live activation is authorized by this implementation plan.
-- PR #8 remains Draft throughout implementation unless the user separately authorizes a state change.
+- No live `~/.codex` installation, Hook trust change, PR ready-for-review transition, merge, or live activation is authorized by this plan.
+- PR #8 remains Draft unless the user separately authorizes a state change.
 
 ## File Structure
 
 Create:
 
-- `src/codex_router/luna_control.py` — V3.1 durable control-state schema, locking/persistence, spawn correlation, packet authority, quiescence, settlement, replacement, and recovery validation.
-- `src/codex_router/a1.py` — canonical A1 categories, per-surface capability/readiness model, packet authorization validation, and hard-claim gating without shell parsing.
-- `tests/test_luna_control_v3.py` — state machine, durability, dual-status cancellation, persistent reuse, spawn-order, stale-generation, recovery, and replacement tests.
+- `src/codex_router/luna_control.py` — V3.1 durable task/Luna/generation state, spawn correlation, packet authority, quiescence, settlement, replacement, and recovery validation.
+- `src/codex_router/a1.py` — canonical A1 categories, surface capability/readiness model, packet authorization validation, and hard-claim gating without shell parsing.
+- `tests/test_luna_control_v3.py` — state machine, durability, persistent reuse, spawn-order, pause/settlement, stale-generation, recovery, and replacement tests.
 - `tests/test_a1_v3.py` — A1 matrix, non-inheritance, conditional permission-gate, and no-false-hard-claim tests.
-- `tests/test_router_v3.py` — end-to-end synthetic Hook flow for current V3.1 route/spawn/reuse/pause/stale-result semantics.
+- `tests/test_router_v3.py` — synthetic Hook/control-plane integration tests.
+- `tests/test_primary_capability_v3.py` — V3.1 profile/readiness assertions.
 
 Modify:
 
-- `src/codex_router/protocol.py` — canonical K1 packet marker/schema and parser/validator.
-- `src/codex_router/hook.py` — replace V2 lifecycle journal calls and broad Luna tool policing with V3.1 control-plane calls.
-- `src/codex_router/global_install_adapter.py` — render Full Executor V3.1 Luna profile, four baseline Hooks, V3.1 policy text, and acceptance/readiness metadata.
-- `src/codex_router/global_install.py` — only where the stable transaction core needs new V3.1 config/status fields; do not rewrite backup/rollback machinery.
-- `src/codex_router/types.py` — expose V3.1 activation/readiness fields in `GlobalStatus`.
-- `src/codex_router/cli.py` — serialize new status fields; retain legacy hook subcommands only where required for safe upgrade compatibility.
-- `README.md` — document V3.1 semantics and acceptance blockers.
-- `docs/superpowers/plans/2026-08-17-router-v3-1-exact-runtime-validation.md` — replace standalone-auth normal-path assumptions with current-App/target-profile acceptance staging.
-- `.github/workflows/ci.yml` — only if needed to make the new offline V3.1 self-test explicit; keep Python 3.12 and existing package smoke coverage.
+- `src/codex_router/protocol.py` and `tests/test_protocol.py` — canonical K1 packet wire contract.
+- `src/codex_router/hook.py`, `src/codex_router/cli.py`, `tests/test_hook.py`, `tests/test_cli.py` — V3.1 Hook bridge and status serialization.
+- `src/codex_router/global_install_adapter.py`, `src/codex_router/global_install.py`, `src/codex_router/types.py`, `tests/test_global_install.py`, `tests/test_global_self_test.py` — V3.1 renderer/readiness while preserving installer transactions.
+- `README.md` and `docs/superpowers/plans/2026-08-17-router-v3-1-exact-runtime-validation.md` — current architecture and acceptance workflow.
 
-Delete after equivalent V3 coverage is green and imports are gone:
+Delete only after equivalent V3 coverage is green and imports are gone:
 
 - `src/codex_router/native_lifecycle.py`
-- V2-only tests whose required behavior conflicts with approved V3.1 semantics, including `tests/test_luna_hard_mode_v2.py`, `tests/test_minimal_agent_id_v2.py`, `tests/test_minimal_journal_v2.py`, and `tests/test_policy_surface_v2.py`.
+- `tests/test_native_lifecycle.py`
+- `tests/test_router_authority_realign.py`
+- `tests/test_luna_hard_mode_v2.py`
+- `tests/test_minimal_agent_id_v2.py`
+- `tests/test_minimal_journal_v2.py`
+- `tests/test_policy_surface_v2.py`
+- `tests/test_primary_capability_v2.py`
 
-Do not delete legacy Local Sol → Web Sol → Luna pipeline/state files merely because V3.1 changes the native global Router control plane.
+Do not redesign or delete the legacy Local Sol → Web Sol → Luna pipeline/state subsystem; it remains regression-tested.
 
 ---
 
-### Task 1: Introduce the V3.1 control-state types and dual-status contract
+### Task 1: Build the V3.1 durable control-state model
 
 **Files:**
 - Create: `src/codex_router/luna_control.py`
 - Create: `tests/test_luna_control_v3.py`
 
 **Interfaces:**
-- Produces `TaskStatus = Literal["ACTIVE", "COMPLETED", "CANCELLED"]`.
-- Produces `ExecutionStatus = Literal["IDLE", "RUNNING", "QUIESCING", "PAUSED_SETTLED", "RETIRED"]`.
-- Produces `ControlSnapshot` with independent logical and execution states.
-- Produces `new_task(...)`, `read_snapshot(...)`, and validation helpers used by later tasks.
-
-- [ ] **Step 1: Write RED tests for the dual-dimensional state model**
-
-Add tests equivalent to:
 
 ```python
-snapshot = control.new_task(
-    directory=self.directory,
-    secret=self.secret,
-    session_id="root-session",
-    native_parent_identity="root-parent",
-    native_authority_profile="profile-A",
-)
-self.assertEqual(snapshot.logical_task_status, "ACTIVE")
-self.assertEqual(snapshot.execution_status, "IDLE")
-self.assertEqual(snapshot.packet_generation, 0)
-self.assertIsNone(snapshot.luna_agent_id)
-```
-
-And explicitly prove the approved cancellation representation is legal:
-
-```python
-cancelled = control._validated_snapshot(
-    {
-        **base_record,
-        "logical_task_status": "CANCELLED",
-        "execution_status": "QUIESCING",
-    }
-)
-self.assertEqual(cancelled.logical_task_status, "CANCELLED")
-self.assertEqual(cancelled.execution_status, "QUIESCING")
-```
-
-Reject impossible combinations such as `ACTIVE + RETIRED`, negative generation, malformed epoch IDs, unknown fields, or an active child-turn ID while execution is `IDLE`.
-
-- [ ] **Step 2: Run the new test module and observe RED**
-
-Run:
-
-```bash
-PYTHONPATH=src python3.12 -m unittest tests.test_luna_control_v3 -v
-```
-
-Expected: import failure because `codex_router.luna_control` does not exist.
-
-- [ ] **Step 3: Add the minimal public state types**
-
-Use explicit names and no V2 `ACTIVE|REVOKED` authorization enum:
-
-```python
-from dataclasses import dataclass
-from typing import Literal
-
 TaskStatus = Literal["ACTIVE", "COMPLETED", "CANCELLED"]
-ExecutionStatus = Literal[
-    "IDLE",
-    "RUNNING",
-    "QUIESCING",
-    "PAUSED_SETTLED",
-    "RETIRED",
-]
+ExecutionStatus = Literal["IDLE", "RUNNING", "QUIESCING", "PAUSED_SETTLED", "RETIRED"]
 
 @dataclass(frozen=True)
 class ControlSnapshot:
@@ -152,72 +92,67 @@ class ControlSnapshot:
     execution_status: ExecutionStatus
 ```
 
-Epochs must use collision-resistant Router-generated IDs such as `task-<uuid>` and `luna-<uuid>`. Keep raw session IDs out of the durable record; derive a keyed session tag from the installation secret.
+Public functions introduced in this task:
 
-- [ ] **Step 4: Encode state invariants in one validator**
-
-The validator must enforce at least:
-
-```text
-packet_generation >= 0
-no Luna agent_id without a Luna task path
-RUNNING/QUIESCING requires an active packet
-a CANCELLED task may remain QUIESCING or PAUSED_SETTLED
-RETIRED cannot accept a current packet
-unknown schema keys fail closed
+```python
+new_task(...) -> ControlSnapshot
+read_snapshot(...) -> ControlSnapshot | None
+validate_snapshot(snapshot: ControlSnapshot) -> None
 ```
 
-- [ ] **Step 5: Run the focused tests and prove GREEN**
+- [ ] **Step 1: Write RED tests for initial and dual-dimensional state**
 
-Run the same unittest command. Commit:
-
-```bash
-git add src/codex_router/luna_control.py tests/test_luna_control_v3.py
-git commit -m "feat: add V3.1 Luna control state model"
+```python
+snapshot = control.new_task(
+    directory=self.directory,
+    secret=self.secret,
+    session_id="root-session",
+    native_parent_identity="root-parent",
+    native_authority_profile="profile-A",
+)
+self.assertEqual(snapshot.logical_task_status, "ACTIVE")
+self.assertEqual(snapshot.execution_status, "IDLE")
+self.assertEqual(snapshot.packet_generation, 0)
+self.assertIsNone(snapshot.luna_agent_id)
 ```
 
----
+Construct an explicit cancellation/in-flight snapshot and prove it validates:
 
-### Task 2: Implement the durable V3.1 journal without V2 root-turn revocation
-
-**Files:**
-- Modify: `src/codex_router/luna_control.py`
-- Modify: `tests/test_luna_control_v3.py`
-
-**Interfaces:**
-- Produces owner-only `luna-control-v3-1.json` plus `luna-control-v3-1.lock` under the Router installation directory.
-- Produces `mutate_control(...)` and `read_snapshot(...)` with locking, bounded schema, atomic replace, file fsync, and directory fsync.
-- Persists one bounded current control record per session key; does not retain unbounded historical packet/Luna records.
-
-- [ ] **Step 1: Write RED filesystem-integrity tests**
-
-Cover:
-
-```text
-journal mode is 0600
-lock is a regular current-user-owned file
-journal symlink is rejected
-wrong-owner simulation is rejected where testable
-unknown/malformed schema fails closed
-unchanged reads do not rewrite the journal
-security/control transitions fsync the replacement and containing directory
+```python
+cancelled_in_flight = control.ControlSnapshot(
+    task_epoch=snapshot.task_epoch,
+    luna_epoch=snapshot.luna_epoch,
+    root_session_tag=snapshot.root_session_tag,
+    native_parent_identity="root-parent",
+    native_authority_profile="profile-A",
+    luna_agent_id="agent-1",
+    luna_task_path="/root/luna_worker",
+    packet_generation=1,
+    active_packet_id="packet-1",
+    active_child_turn_id="child-turn-1",
+    logical_task_status="CANCELLED",
+    execution_status="QUIESCING",
+)
+control.validate_snapshot(cancelled_in_flight)
 ```
 
-Use `unittest.mock.patch("os.fsync")` for deterministic fsync assertions rather than relying on filesystem timing.
+Reject `ACTIVE + RETIRED`, negative generation, malformed epoch IDs, unknown state keys on disk, Luna ID without task path, and `RUNNING/QUIESCING` without an active packet.
 
-- [ ] **Step 2: Write RED bounded-state tests**
-
-Create more than the configured session capacity with retired/settled records and prove compaction removes only non-current historical records. Prove an absent historical record never authorizes an old Luna.
-
-- [ ] **Step 3: Run focused tests and observe RED**
+- [ ] **Step 2: Run the module and observe RED**
 
 ```bash
 PYTHONPATH=src python3.12 -m unittest tests.test_luna_control_v3 -v
 ```
 
-- [ ] **Step 4: Reuse the proven persistence mechanics, not the V2 authorization schema**
+Expected: import failure because `codex_router.luna_control` does not exist.
 
-Port the safe parts of `native_lifecycle.py` (`O_NOFOLLOW` where available, owner/mode validation, flock, temp file, atomic replace, fsync) into `luna_control.py`, but use a new protocol and schema:
+- [ ] **Step 3: Implement the state types and deterministic validator**
+
+Use collision-resistant IDs `task-<uuid>` and `luna-<uuid>`. Keep raw session IDs out of durable state; derive an HMAC session tag using the installation secret.
+
+- [ ] **Step 4: Add owner-only journal persistence**
+
+Use:
 
 ```python
 PROTOCOL = "codex-router/luna-control/v3.1"
@@ -225,66 +160,63 @@ _STATE = "luna-control-v3-1.json"
 _LOCK = "luna-control-v3-1.lock"
 ```
 
-Do not persist prompts, model output, transcripts, tokens, credentials, or unbounded history.
+Port only the proven persistence mechanics from V2: current-user owner checks, `0600`, no symlink, `flock`, bounded schema, temp-file write, file fsync, atomic replace, directory fsync. Do not port the V2 `ACTIVE|REVOKED` schema.
 
-- [ ] **Step 5: Prove unchanged reads are cheap and mutations durable**
+- [ ] **Step 5: Add RED/green integrity tests**
 
-Run the focused test suite again and commit:
+Prove journal mode `0600`, unsafe symlink rejection, malformed schema fail-closed, unchanged reads do not rewrite the file, and mutating transitions call `os.fsync` for file and containing directory.
+
+- [ ] **Step 6: Run focused tests and commit**
 
 ```bash
+PYTHONPATH=src python3.12 -m unittest tests.test_luna_control_v3 -v
 git add src/codex_router/luna_control.py tests/test_luna_control_v3.py
-git commit -m "feat: persist V3.1 Luna control state safely"
+git commit -m "feat: add V3.1 Luna control state"
 ```
 
 ---
 
-### Task 3: Add order-independent spawn reservation and persistent Luna binding
+### Task 2: Add order-independent spawn correlation and persistent Luna reuse
 
 **Files:**
 - Modify: `src/codex_router/luna_control.py`
 - Modify: `tests/test_luna_control_v3.py`
 
 **Interfaces:**
-- Produces `reserve_spawn(...)`.
-- Produces `observe_spawn_result(...)`.
-- Produces `observe_subagent_start(...)`.
-- Produces `current_luna(...)` / `authorize_parent_target(...)`.
-- `pending_spawn` includes `task_epoch`, `luna_epoch`, expected role, root/session tag, expected parent, `tool_use_id`, optional observed task path, and optional observed `agent_id`.
-
-- [ ] **Step 1: Write RED tests for both native event orderings**
-
-Prove both are valid:
-
-```text
-PreToolUse(spawn) -> PostToolUse(spawn result) -> SubagentStart
-PreToolUse(spawn) -> SubagentStart -> PostToolUse(spawn result)
-```
-
-Binding commits only when the available observations agree on the same pending reservation.
-
-- [ ] **Step 2: Write RED ambiguity and stale-event tests**
-
-Prove:
-
-```text
-second simultaneous pending spawn -> denied
-wrong role -> denied
-wrong task path -> fail closed
-late SubagentStart from retired luna_epoch -> cannot bind
-spawn result with wrong tool_use_id -> cannot bind
-an existing bound Luna prevents a replacement spawn unless controlled replacement has retired it
-```
-
-- [ ] **Step 3: Write RED persistence/reuse test across root turns**
-
-Use two different `turn_id` values while keeping the same session/task epoch. Prove no state transition revokes the bound Luna merely because a root turn changed.
-
-- [ ] **Step 4: Implement reservation reconciliation**
-
-Use a record shaped like:
 
 ```python
-pending_spawn = {
+reserve_spawn(..., tool_use_id: str, task_name: str, fork_turns: str) -> ControlSnapshot
+observe_spawn_result(..., tool_use_id: str, task_path: str) -> ControlSnapshot
+observe_subagent_start(..., agent_id: str, agent_type: str) -> ControlSnapshot
+current_luna(...) -> ControlSnapshot
+authorize_parent_target(..., tool_name: str, target: str) -> None
+```
+
+`pending_spawn` stores `task_epoch`, `luna_epoch`, expected role, root session tag, expected parent, `tool_use_id`, observed task path, and observed `agent_id`.
+
+- [ ] **Step 1: Write RED tests for both event orderings**
+
+```text
+reserve -> spawn result -> SubagentStart
+reserve -> SubagentStart -> spawn result
+```
+
+The authoritative bind occurs only after available observations agree with the same reservation.
+
+- [ ] **Step 2: Write RED ambiguity/stale tests**
+
+Prove second simultaneous reservation, wrong role, wrong task path, wrong `tool_use_id`, and delayed start from a retired `luna_epoch` cannot bind. `fork_turns` must equal `"none"`.
+
+- [ ] **Step 3: Write the P1 cross-root-turn test**
+
+Use `turn-a` and `turn-b` under the same root session/task epoch. Neither reading nor routing the second turn may revoke or replace the bound Luna merely because `turn_id` changed.
+
+- [ ] **Step 4: Implement reconciliation without transcript or child/root-turn equality**
+
+Reservation example:
+
+```python
+{
     "task_epoch": task_epoch,
     "luna_epoch": luna_epoch,
     "expected_role": "luna_worker",
@@ -296,40 +228,42 @@ pending_spawn = {
 }
 ```
 
-`fork_turns` remains mechanically required to equal `"none"`. Do not infer correlation from transcript text or child/root turn equality.
-
-- [ ] **Step 5: Run focused tests and prove GREEN**
-
-Commit:
+- [ ] **Step 5: Run focused tests and commit**
 
 ```bash
+PYTHONPATH=src python3.12 -m unittest tests.test_luna_control_v3 -v
 git add src/codex_router/luna_control.py tests/test_luna_control_v3.py
-git commit -m "feat: add persistent Luna spawn correlation"
+git commit -m "feat: persist and reuse one Luna per task epoch"
 ```
 
 ---
 
-### Task 4: Define the K1 packet wire contract and monotonic generation authority
+### Task 3: Implement the K1 packet wire contract and stale-generation rejection
 
 **Files:**
 - Modify: `src/codex_router/protocol.py`
 - Modify: `src/codex_router/luna_control.py`
+- Modify: `tests/test_protocol.py`
 - Modify: `tests/test_luna_control_v3.py`
-- Modify: `tests/test_protocol.py` if present; otherwise add packet cases to `tests/test_luna_control_v3.py`.
 
 **Interfaces:**
-- Produces `LUNA_PACKET_PREFIX = "[CODEX_ROUTER_PACKET_V3_1] "`.
-- Produces `build_luna_packet(...) -> str` and `parse_luna_packet(...) -> dict[str, Any]`.
-- Produces `begin_packet(...)` which atomically advances `packet_generation` only when execution state permits a new packet.
-- Produces `accept_result(...)` / equivalent correlation check that rejects stale generation or child-turn identities.
 
-- [ ] **Step 1: Write RED schema tests for the exact K1 fields**
+```python
+LUNA_PACKET_PREFIX = "[CODEX_ROUTER_PACKET_V3_1] "
+build_luna_packet(...) -> str
+parse_luna_packet(message: str) -> dict[str, Any]
+begin_packet(...) -> ControlSnapshot
+start_execution(..., child_turn_id: str | None) -> ControlSnapshot
+accept_result(..., generation: int, child_turn_id: str | None) -> Literal["CURRENT", "STALE"]
+```
 
-Required canonical payload:
+- [ ] **Step 1: Write RED protocol tests for exact K1 fields**
+
+Canonical packet object:
 
 ```python
 {
-    "packet_id": "packet-...",
+    "packet_id": "packet-1",
     "generation": 1,
     "objective": "Add multiply() and tests",
     "working_directory": "/workspace/repo",
@@ -340,117 +274,99 @@ Required canonical payload:
 }
 ```
 
-Reject missing/extra keys, non-monotonic generation, relative working directory, empty objective, duplicate or non-text scope entries, unknown A1 categories, and non-canonical JSON.
+Reject missing/extra keys, relative working directory, empty objective, duplicate/non-text scope entries, malformed generation, and non-canonical JSON.
 
-- [ ] **Step 2: Write RED authority-replacement tests**
+- [ ] **Step 2: Write RED generation replacement tests**
 
-Prove generation 2 replaces generation 1 rather than inheriting authorization:
+Generation N+1 must clear N's semantic scope and A1 authorizations unless restated. A delayed N result returns `"STALE"` and does not mutate current state.
 
-```python
-p1 = begin_packet(..., intended_write_scope=("src/auth/**",), a1=("git_push",))
-p2 = begin_packet(..., intended_write_scope=("src/api/**",), a1=())
-self.assertEqual(p2.generation, p1.generation + 1)
-self.assertEqual(p2.explicit_side_effect_authorizations, ())
-```
+- [ ] **Step 3: Implement packet encoding with `canonical_json_bytes()`**
 
-A delayed result from generation 1 must return a stale/non-authoritative disposition and must not mutate current state.
-
-- [ ] **Step 3: Implement the canonical packet marker**
-
-Use the existing `canonical_json_bytes()` helper so Sol/Luna packet identity is deterministic. The packet marker is parsed only on Router lifecycle communication (`send_message`/`followup_task`), not on arbitrary shell commands or Luna output.
+Parse K1 only on Router parent→Luna lifecycle communication; do not inspect arbitrary shell commands or normal Luna tool inputs.
 
 - [ ] **Step 4: Implement generation admission**
 
-Normal intended-write-scope changes inside the same native authority profile must not replace Luna. `begin_packet` must deny new execution while control state is `QUIESCING`.
+`begin_packet()` increments generation atomically. A normal `intended_write_scope` change inside the same native profile keeps the same Luna. `begin_packet()` must refuse when execution is `QUIESCING`.
 
 - [ ] **Step 5: Run focused tests and commit**
 
 ```bash
-PYTHONPATH=src python3.12 -m unittest tests.test_luna_control_v3 -v
-git add src/codex_router/protocol.py src/codex_router/luna_control.py tests
+PYTHONPATH=src python3.12 -m unittest tests.test_protocol tests.test_luna_control_v3 -v
+git add src/codex_router/protocol.py src/codex_router/luna_control.py tests/test_protocol.py tests/test_luna_control_v3.py
 git commit -m "feat: add V3.1 packet generation authority"
 ```
 
 ---
 
-### Task 5: Implement Hard Authority Pause and fail-closed settlement state
+### Task 4: Implement Hard Authority Pause and settlement gating
 
 **Files:**
 - Modify: `src/codex_router/luna_control.py`
 - Modify: `tests/test_luna_control_v3.py`
-- Create/Modify: `tests/test_router_v3.py`
+- Create: `tests/test_router_v3.py`
 
 **Interfaces:**
-- Produces `freeze_authority(...)`.
-- Produces `record_interrupt_ack(...)` as diagnostic-only state that cannot settle execution.
-- Produces `observe_settlement(...)` which accepts only a normalized trusted terminal observation supplied by a verified runtime adapter.
-- Produces `resume_after_settlement(...)` / `begin_packet(...)` enforcement that refuses N+1 while N is unsettled.
-
-- [ ] **Step 1: Write RED tests reproducing the real smoke finding**
-
-Model the observed sequence:
 
 ```python
-running = start_execution(..., generation=1)
-quiescing = freeze_authority(..., reason="user_pause")
-self.assertEqual(quiescing.execution_status, "QUIESCING")
+freeze_authority(..., reason: str, logical_cancel: bool = False) -> ControlSnapshot
+record_interrupt_ack(..., previous_status: str) -> ControlSnapshot
+observe_settlement(
+    ...,
+    source: Literal["verified_native_terminal"],
+    terminal_status: Literal["completed", "failed", "interrupted", "cancelled"],
+    child_turn_id: str | None,
+) -> ControlSnapshot
+```
 
-acked = record_interrupt_ack(..., previous_status="running")
+- [ ] **Step 1: Write the real-smoke regression test**
+
+```python
+control.start_execution(..., child_turn_id="turn-1")
+paused = control.freeze_authority(..., reason="user_pause")
+self.assertEqual(paused.execution_status, "QUIESCING")
+
+acked = control.record_interrupt_ack(..., previous_status="running")
 self.assertEqual(acked.execution_status, "QUIESCING")
 
 with self.assertRaises(RouterStateError):
-    begin_packet(..., generation=2)
+    control.begin_packet(..., packet_id="packet-2", objective="replacement", ...)
 ```
 
-The test must make it impossible for interrupt acknowledgment alone to produce `PAUSED_SETTLED`.
+`record_interrupt_ack()` must never produce `PAUSED_SETTLED`.
 
-- [ ] **Step 2: Write RED tests for natural completion after pause**
-
-A trusted terminal observation may settle even if the native interrupt did not kill the process:
+- [ ] **Step 2: Write natural-completion settlement test**
 
 ```python
-settled = observe_settlement(
+settled = control.observe_settlement(
     ...,
     source="verified_native_terminal",
     terminal_status="completed",
-    child_turn_id="turn-n",
+    child_turn_id="turn-1",
 )
 self.assertEqual(settled.execution_status, "PAUSED_SETTLED")
 ```
 
-The same API must accept native terminal outcomes such as `failed`, `interrupted`, or `cancelled` only after the runtime adapter has normalized them into the trusted terminal-observation interface.
+This proves settlement may come from natural completion after the pause.
 
-- [ ] **Step 3: Write the non-blocking review requirement as an executable test**
-
-Prove cancellation does not erase in-flight execution truth:
+- [ ] **Step 3: Write the approved dual-status cancellation test**
 
 ```python
-cancelled = freeze_authority(..., reason="user_cancel", logical_cancel=True)
+cancelled = control.freeze_authority(..., reason="user_cancel", logical_cancel=True)
 self.assertEqual(cancelled.logical_task_status, "CANCELLED")
 self.assertEqual(cancelled.execution_status, "QUIESCING")
 
-settled = observe_settlement(..., terminal_status="completed")
+settled = control.observe_settlement(..., source="verified_native_terminal", terminal_status="completed", child_turn_id="turn-1")
 self.assertEqual(settled.logical_task_status, "CANCELLED")
 self.assertEqual(settled.execution_status, "PAUSED_SETTLED")
 ```
 
-- [ ] **Step 4: Implement the exact transition rules**
+- [ ] **Step 4: Implement freeze semantics atomically**
 
-`freeze_authority` must atomically:
+Freeze the current generation for future scheduling, preserve Luna identity, retain the old generation correlation tuple for stale rejection, and block N+1 until settlement. Do not add sleep-based settlement, polling loops, PID supervision, or immediate-kill claims.
 
-```text
-mark current generation non-runnable
-preserve current Luna identity
-set execution_status=QUIESCING
-optionally set logical_task_status=CANCELLED
-retain enough current-generation identity to reject late output
-```
+- [ ] **Step 5: Keep the settlement source unbound until runtime acceptance**
 
-Do not add sleeps, timeout-based settlement, PID inspection, or polling loops.
-
-- [ ] **Step 5: Implement a deliberately narrow settlement-observation API**
-
-The core module must not guess raw Codex response shapes. Accept a normalized terminal observation only from the Hook/runtime adapter and verify it matches the current task/luna/generation/child-turn tuple to the strongest exposed degree. If no verified runtime source exists, the state remains `QUIESCING` and live activation remains blocked.
+`luna_control.py` accepts only the normalized `verified_native_terminal` observation. Baseline Hooks do not fabricate that observation. Until a later acceptance run proves a trustworthy native source and wires it through an approved adapter, live activation reports `G2_SETTLEMENT_OBSERVATION` blocked and an unsettled pause stays `QUIESCING` fail-closed.
 
 - [ ] **Step 6: Run focused tests and commit**
 
@@ -462,25 +378,23 @@ git commit -m "feat: add V3.1 hard authority pause"
 
 ---
 
-### Task 6: Replace the V2 Hook policy with the minimal V3.1 control-plane bridge
+### Task 5: Replace V2 Hook behavior with the minimal V3.1 bridge
 
 **Files:**
 - Modify: `src/codex_router/hook.py`
 - Modify: `src/codex_router/cli.py`
 - Modify: `tests/test_hook.py`
 - Modify: `tests/test_router_v3.py`
-- Modify: `tests/test_router_authority_realign.py` or replace its conflicting cases with V3 assertions.
 
 **Interfaces:**
-- `UserPromptSubmit` surfaces V3.1 route context but does not revoke Luna because `turn_id` changed.
-- `PreToolUse` controls Router lifecycle calls and denies Luna descendant-lifecycle attempts; it does not police ordinary Luna shell/read/write/build/test tools.
-- `PostToolUse` reconciles spawn results and only accepts additional settlement evidence after an exact runtime adapter is proven; it is not a general tool-output firewall.
-- `SubagentStart` records/reconciles native Luna identity.
-- Legacy `hook-stop` / `hook-permission-request` CLI entry points may remain temporarily callable for transactional upgrade compatibility, but V3.1 baseline rendering does not register them.
 
-- [ ] **Step 1: Write RED route-context tests**
+- `UserPromptSubmit`: route/direct control context; no root-turn Luna revocation.
+- `PreToolUse`: parent lifecycle admission, K1 packet admission, and Luna descendant-lifecycle denial only.
+- `PostToolUse`: spawn-result reconciliation only in the baseline implementation.
+- `SubagentStart`: spawn reservation identity reconciliation.
+- Legacy CLI entry points for `hook-stop` / `hook-permission-request` may remain callable for safe upgrade compatibility, but the V3 renderer does not register them by default.
 
-Expected V3 context includes:
+- [ ] **Step 1: Write RED V3 route-context tests**
 
 ```python
 self.assertEqual(context["workflow"], "persistent_native_luna")
@@ -490,71 +404,54 @@ self.assertEqual(context["sol_supervision"], "event_driven")
 self.assertEqual(context["luna_execution_mode"], "full_executor")
 ```
 
-A second routed root turn in the same session must not revoke the existing Luna solely because `turn_id` differs.
+A second routed root turn must not revoke the same task-epoch Luna solely because its `turn_id` differs.
 
-- [ ] **Step 2: Write RED Full Executor Hook tests**
+- [ ] **Step 2: Write RED Full Executor tests**
 
-After a bound Luna is recognized, ordinary tools such as these must not be denied by Router merely because they are executable:
+For a correctly bound Luna, Router must return no denial solely because the ordinary tool is `Read`, `apply_patch`, `Bash`, `shell_command`, `exec_command`, or an unknown non-lifecycle web/MCP/plugin tool. Luna lifecycle/delegation attempts such as `spawn_agent`, descendant `send_message`, and descendant `resume_agent` remain denied.
 
-```text
-Read
-apply_patch
-Bash
-shell_command
-exec_command
-web/MCP/plugin tool names not recognized as agent lifecycle
-```
+- [ ] **Step 3: Replace all `native_lifecycle` calls with `luna_control`**
 
-Agent lifecycle/delegation remains denied for Luna:
+Remove `revoke_stale()` from `handle_user_prompt`. Map exact parent lifecycle fields only. Unknown lifecycle operations fail closed for Router authority; unknown ordinary executor tools remain under native Codex controls.
 
-```text
-spawn_agent
-send_message to descendants
-resume_agent descendant path
-other agent_* / *_agent lifecycle variants
-```
+- [ ] **Step 4: Keep G3 actor attribution honest**
 
-Do not test or implement a positive allowlist for ordinary tools.
+For security-sensitive lifecycle operations, missing/ambiguous actor identity must not be silently treated as primary Sol. Unit tests use synthetic actor fields, while `global-status` continues to report `G3_ACTOR_ATTRIBUTION` blocked until exact runtime evidence exists.
 
-- [ ] **Step 3: Replace V2 root-turn revocation calls**
-
-Remove `native_lifecycle.revoke_stale(...)` from `handle_user_prompt`. Load/read the current V3 task control record and expose enough state for Sol to decide reuse versus controlled task-epoch replacement.
-
-- [ ] **Step 4: Replace V2 lifecycle calls with `luna_control` calls**
-
-Map only exact known parent lifecycle schemas. Unknown lifecycle operations fail closed for Router authority; unknown ordinary executor tools are not denied merely because Router does not recognize them.
-
-- [ ] **Step 5: Keep actor-specific claims honest**
-
-If a Hook event does not expose trustworthy child actor identity, do not silently classify it as root for a security-sensitive lifecycle action. Return a fail-closed lifecycle decision or an acceptance-readiness blocker according to the event class. Ordinary non-lifecycle tool calls remain governed by native Codex controls.
-
-- [ ] **Step 6: Run focused Hook tests and commit**
+- [ ] **Step 5: Run Hook integration tests and commit**
 
 ```bash
 PYTHONPATH=src python3.12 -m unittest tests.test_hook tests.test_router_v3 -v
-git add src/codex_router/hook.py src/codex_router/cli.py tests
+git add src/codex_router/hook.py src/codex_router/cli.py tests/test_hook.py tests/test_router_v3.py
 git commit -m "feat: narrow Router hooks for V3.1"
 ```
 
 ---
 
-### Task 7: Render the Full Executor Luna profile and exactly four baseline Hooks
+### Task 6: Render the V3.1 Full Executor profile and four baseline Hooks
 
 **Files:**
 - Modify: `src/codex_router/global_install_adapter.py`
-- Modify: `src/codex_router/global_install.py` only where the adapter contract requires it.
+- Modify: `src/codex_router/global_install.py` only where the adapter contract requires new V3 fields.
 - Modify: `tests/test_global_install.py`
 - Modify: `tests/test_global_self_test.py`
-- Modify: `tests/test_primary_capability_v2.py` into version-neutral/V3 readiness assertions.
+- Create: `tests/test_primary_capability_v3.py`
 
 **Interfaces:**
-- Produces `LUNA_EXECUTION_MODE = "full_executor_v3_1"`.
-- Produces V3.1 Luna TOML with descendant disable triad but no V2 shell/process disable block.
-- Produces four baseline Router-managed Hook registrations: `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`.
 
-- [ ] **Step 1: Write RED profile-rendering tests**
+```python
+LUNA_EXECUTION_MODE = "full_executor_v3_1"
+BASELINE_HOOK_EVENTS = (
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "SubagentStart",
+)
+```
 
-The rendered Luna profile must include:
+- [ ] **Step 1: Write RED profile tests**
+
+Require:
 
 ```toml
 [agents]
@@ -565,67 +462,44 @@ multi_agent = false
 multi_agent_v2 = false
 ```
 
-And must **not** force these V2 restrictions solely for Router policy:
+Assert the Router renderer no longer forces V2 restrictions such as `shell_tool=false`, `unified_exec=false`, `code_mode_only=false`, `apps=false`, `plugins=false`, or `web_search="disabled"` merely to enforce Router policy.
 
-```text
-shell_tool = false
-unified_exec = false
-code_mode_only = false
-apps = false
-plugins = false
-web_search = "disabled"
-```
+- [ ] **Step 2: Write RED Hook-set tests**
 
-If the exact Codex profile schema later requires explicit keys for a capability, add them only from verified target-runtime evidence; do not invent them in this task.
-
-- [ ] **Step 2: Write RED Hook-count tests**
-
-Assert the baseline managed Hook set is exactly:
-
-```python
-{
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "SubagentStart",
-}
-```
-
-`Stop` and `PermissionRequest` must not appear in baseline rendered hooks.
+Baseline rendered managed Hooks must equal exactly the four-event tuple above. `Stop` and `PermissionRequest` must be absent from the baseline.
 
 - [ ] **Step 3: Replace V2 generated policy text**
 
-Generated `AGENTS.md` and Luna developer instructions must say:
+`AGENTS.md` and Luna developer instructions must encode:
 
 ```text
-one persistent Luna per coherent task epoch
-root turn is not Luna lifecycle boundary
+persistent Luna per task epoch
 Full Executor ordinary inspect/research/edit/test/debug/retry/verify
 no descendants
 no nested Codex delegation
 packet generation replaces prior authority
 Hard Authority Pause freezes Router authority immediately
-old and new packet execution cannot overlap before settlement
-A1 requires current-packet authorization and only has a hard claim where a pre-action gate is proven
+no N/N+1 overlap before settlement
+A1 hard claims only on proven pre-action surfaces
 ```
 
-Remove `hard_mode_no_process`, `revoke_only_security_boundary` root-turn semantics, and broad allowed-tool language.
+Remove current-policy claims for `hard_mode_no_process`, per-root-turn persistence, and revoke-only terminal semantics.
 
-- [ ] **Step 4: Keep transaction/rollback mechanics unchanged**
+- [ ] **Step 4: Preserve installer transactions**
 
-Use the existing adapter seam around `global_install.py`; do not rewrite backup names, rollback state, target hashing, drift detection, or uninstall restoration unless a failing V3 test demonstrates a direct incompatibility.
+Use the existing `global_install_adapter.py` seam. Do not rewrite backup names, rollback records, drift detection, target hashing, or uninstall restoration unless a focused failing test proves a direct incompatibility.
 
-- [ ] **Step 5: Run installer/self-test suites and commit**
+- [ ] **Step 5: Run renderer/self-test suites and commit**
 
 ```bash
-PYTHONPATH=src python3.12 -m unittest tests.test_global_install tests.test_global_self_test -v
-git add src/codex_router/global_install_adapter.py src/codex_router/global_install.py tests
+PYTHONPATH=src python3.12 -m unittest tests.test_global_install tests.test_global_self_test tests.test_primary_capability_v3 -v
+git add src/codex_router/global_install_adapter.py src/codex_router/global_install.py tests/test_global_install.py tests/test_global_self_test.py tests/test_primary_capability_v3.py
 git commit -m "feat: render V3.1 full executor profile"
 ```
 
 ---
 
-### Task 8: Add A1 capability/readiness modeling without a shell firewall
+### Task 7: Add A1 capability/readiness modeling without shell parsing
 
 **Files:**
 - Create: `src/codex_router/a1.py`
@@ -635,15 +509,6 @@ git commit -m "feat: render V3.1 full executor profile"
 - Modify: `src/codex_router/global_install_adapter.py`
 
 **Interfaces:**
-- Produces canonical A1 category names.
-- Produces `SurfaceEnforcement = Literal["PROVEN_PRE_ACTION", "BASELINE_WITHHELD", "COOPERATIVE_ONLY", "UNVERIFIED"]`.
-- Produces `A1SurfaceCapability` and `A1CapabilityMatrix`.
-- Produces `validate_packet_authorizations(...)` and `hard_claim_ready(...)`.
-- `PermissionRequest` registration/handling is enabled only for a matrix entry whose exact surface and actor attribution are proven to require/use it.
-
-- [ ] **Step 1: Write RED category and non-inheritance tests**
-
-Canonical categories:
 
 ```python
 A1_CATEGORIES = (
@@ -655,131 +520,123 @@ A1_CATEGORIES = (
     "system_level_install",
     "comparable_external_persistent_mutation",
 )
+
+SurfaceEnforcement = Literal[
+    "PROVEN_PRE_ACTION",
+    "BASELINE_WITHHELD",
+    "COOPERATIVE_ONLY",
+    "UNVERIFIED",
+]
+
+@dataclass(frozen=True)
+class A1SurfaceCapability:
+    category: str
+    surface: str
+    enforcement: SurfaceEnforcement
+    gate: str | None
+    actor_attribution: str
+
+validate_packet_authorizations(values: Iterable[str]) -> tuple[str, ...]
+hard_claim_ready(matrix: Iterable[A1SurfaceCapability], category: str) -> bool
 ```
 
-Generation N authorization must not appear in N+1 unless explicitly restated.
+- [ ] **Step 1: Write RED category/non-inheritance tests**
+
+Generation N A1 authorizations must not appear in N+1 unless explicitly restated. Unknown categories are rejected at K1 parsing/admission.
 
 - [ ] **Step 2: Write RED hard-claim tests**
 
-Examples:
-
 ```python
-unverified = A1SurfaceCapability(
+surface = A1SurfaceCapability(
     category="git_push",
     surface="shell",
     enforcement="UNVERIFIED",
     gate=None,
     actor_attribution="UNVERIFIED",
 )
-self.assertFalse(hard_claim_ready((unverified,), "git_push"))
+self.assertFalse(hard_claim_ready((surface,), "git_push"))
 ```
 
-A cooperative developer instruction alone must never return hard-ready.
+`COOPERATIVE_ONLY` also returns false.
 
-- [ ] **Step 3: Write RED tests proving there is no broad command parser**
+- [ ] **Step 3: Prove there is no general command parser**
 
-Do not classify arbitrary Bash strings such as `git push`, `curl`, or compound shell commands in `a1.py`. The module operates on capability/surface metadata and explicit packet authorization, not shell syntax.
+`a1.py` must not parse arbitrary Bash strings such as `git push`, `curl`, or compound shell syntax. It operates on explicit packet authorization plus runtime capability/surface metadata only.
 
-- [ ] **Step 4: Implement conditional `PermissionRequest` support**
+- [ ] **Step 4: Implement conditional `PermissionRequest` registration**
 
-The installer may add `PermissionRequest` only when the exact runtime compatibility profile says a specific A1 surface uses a proven attributable pre-action permission event. Otherwise baseline Hooks remain four and the corresponding hard A1 readiness remains blocked/withheld.
+The renderer may add `PermissionRequest` only when an exact-runtime compatibility record marks a specific A1 surface `PROVEN_PRE_ACTION`, identifies `PermissionRequest` as its gate, and marks actor attribution proven. Otherwise baseline remains four Hooks and the corresponding hard A1 claim remains blocked/withheld.
 
-- [ ] **Step 5: Run A1/Hook/installer tests and commit**
+- [ ] **Step 5: Run A1/Hook/renderer tests and commit**
 
 ```bash
 PYTHONPATH=src python3.12 -m unittest tests.test_a1_v3 tests.test_hook tests.test_global_install -v
-git add src/codex_router/a1.py src/codex_router/protocol.py src/codex_router/hook.py src/codex_router/global_install_adapter.py tests/test_a1_v3.py tests
+git add src/codex_router/a1.py src/codex_router/protocol.py src/codex_router/hook.py src/codex_router/global_install_adapter.py tests/test_a1_v3.py
 git commit -m "feat: model V3.1 A1 capability gates"
 ```
 
 ---
 
-### Task 9: Implement controlled replacement and durable recovery validation
+### Task 8: Add controlled replacement, recovery, and honest readiness status
 
 **Files:**
 - Modify: `src/codex_router/luna_control.py`
-- Modify: `tests/test_luna_control_v3.py`
-- Modify: `tests/test_router_v3.py`
-
-**Interfaces:**
-- Produces `retire_luna(...)`, `start_new_task_epoch(...)`, and `reconcile_recovery(...)`.
-- Controlled replacement reasons are restricted to `unrecoverable_runtime_identity`, `new_task_epoch`, `native_authority_profile_change`, and a later runtime-validated context reset reason.
-- Recovery requires the strongest available parent/role/agent/profile evidence; resumability alone is not authority.
-
-- [ ] **Step 1: Write RED replacement-reason tests**
-
-Prove ordinary `intended_write_scope` change inside the same profile does not replace Luna. Prove a native authority-profile change cannot start a new Luna until the old execution is settled/retired.
-
-- [ ] **Step 2: Write RED recovery tests**
-
-Given a persisted record, reject recovery if any available authoritative field conflicts:
-
-```text
-wrong native parent
-wrong Luna role
-wrong agent_id
-wrong authority-profile hash
-retired luna_epoch
-ambiguous multiple candidates
-```
-
-A candidate that merely exists or is resumable must not bind.
-
-- [ ] **Step 3: Write RED delayed-event race tests**
-
-Simulate a delayed SubagentStart from Luna epoch E while E+1 has a pending reservation. It must not bind or overwrite E+1.
-
-- [ ] **Step 4: Implement controlled replacement**
-
-Replacement flow is:
-
-```text
-freeze old authority if execution is running
-wait for trusted settlement observation
-mark old Luna RETIRED
-create new task/luna epoch or new authority profile
-reserve exactly one replacement spawn
-```
-
-Do not replace merely because Luna is idle/completed or because a root turn changed.
-
-- [ ] **Step 5: Run focused tests and commit**
-
-```bash
-PYTHONPATH=src python3.12 -m unittest tests.test_luna_control_v3 tests.test_router_v3 -v
-git add src/codex_router/luna_control.py tests/test_luna_control_v3.py tests/test_router_v3.py
-git commit -m "feat: add V3.1 Luna recovery and replacement"
-```
-
----
-
-### Task 10: Expose honest V3.1 readiness and acceptance blockers
-
-**Files:**
 - Modify: `src/codex_router/types.py`
 - Modify: `src/codex_router/global_install_adapter.py`
 - Modify: `src/codex_router/cli.py`
+- Modify: `tests/test_luna_control_v3.py`
 - Modify: `tests/test_cli.py`
 - Modify: `tests/test_global_install.py`
-- Modify: `tests/test_global_self_test.py`
 
 **Interfaces:**
-- Extend `GlobalStatus` with version/readiness information without claiming current-turn telemetry.
-- Suggested fields:
+
+```python
+retire_luna(..., reason: Literal[
+    "unrecoverable_runtime_identity",
+    "new_task_epoch",
+    "native_authority_profile_change",
+    "runtime_validated_context_reset",
+]) -> ControlSnapshot
+
+start_new_task_epoch(...) -> ControlSnapshot
+reconcile_recovery(...) -> ControlSnapshot
+```
+
+Extend `GlobalStatus` with exact fields:
 
 ```python
 router_design: str = "v3.1"
 live_activation: str = "BLOCKED_ACCEPTANCE_GATES"
-acceptance_blockers: tuple[str, ...] = ()
+live_activation_blockers: tuple[str, ...] = ()
+deferred_acceptance_evidence: tuple[str, ...] = ()
 ```
 
-- Status must distinguish repository implementation readiness from live activation readiness.
+- [ ] **Step 1: Write RED controlled-replacement tests**
 
-- [ ] **Step 1: Write RED status tests**
+An `intended_write_scope` change inside the same native profile must not replace Luna. A native authority-profile change must freeze/settle the old execution before retirement and replacement.
 
-An offline installed V3.1 candidate with no target-runtime proof must report blockers including the unresolved applicable gates, for example:
+- [ ] **Step 2: Write RED recovery/race tests**
+
+Reject recovery for wrong parent, role, agent ID, authority-profile identity, retired epoch, or ambiguous candidates. Resumability alone is not authority. A delayed SubagentStart from epoch E must not bind over pending E+1.
+
+- [ ] **Step 3: Implement controlled replacement**
 
 ```text
+freeze old authority if running
+require trusted settlement observation
+mark old Luna RETIRED
+create new task/luna epoch or profile
+reserve one replacement spawn
+```
+
+Do not replace merely because Luna is idle/completed or a root turn changed.
+
+- [ ] **Step 4: Write RED status/readiness tests**
+
+Before target-runtime acceptance, `live_activation_blockers` must include applicable safety/correctness gates such as:
+
+```text
+G1_STRONG_IDENTITY_PROFILE
 G2_SETTLEMENT_OBSERVATION
 G3_ACTOR_ATTRIBUTION
 G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY
@@ -787,57 +644,32 @@ G5_NESTED_CODEX
 G6_NATIVE_AUTHORITY_PROFILE
 G7_A1_CAPABILITY_MATRIX
 G8_RECOVERY_CORRELATION
-G9_ECONOMICS
 ```
 
-Do not list G1 product feasibility as failed; distinguish its stronger identity/profile acceptance subclaim if still unresolved.
+`G9_ECONOMICS` belongs in `deferred_acceptance_evidence`, not in the live-activation safety blocker list.
 
-- [ ] **Step 2: Preserve primary capability diagnostics**
+- [ ] **Step 5: Update CLI/global self-test semantics**
 
-Keep `COMPATIBLE | INCOMPATIBLE | UNKNOWN_REQUIRES_CAPABILITY_CHECK`. V3.1 status may be repository-green while live activation remains blocked.
+Offline self-test may return pass for repository/install invariants while `live_activation` remains `BLOCKED_ACCEPTANCE_GATES`. Do not equate offline green with runtime acceptance.
 
-- [ ] **Step 3: Update CLI JSON serialization**
-
-Example output fields:
-
-```json
-{
-  "router_design": "v3.1",
-  "luna_execution_mode": "full_executor_v3_1",
-  "live_activation": "BLOCKED_ACCEPTANCE_GATES",
-  "acceptance_blockers": ["G2_SETTLEMENT_OBSERVATION", "G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY"]
-}
-```
-
-- [ ] **Step 4: Make offline self-test verify claims, not erase blockers**
-
-`global-self-test` may pass repository/install invariants while returning live-activation blockers separately. A passing offline self-test must not imply target runtime acceptance.
-
-- [ ] **Step 5: Run status/CLI tests and commit**
+- [ ] **Step 6: Run focused tests and commit**
 
 ```bash
-PYTHONPATH=src python3.12 -m unittest tests.test_cli tests.test_global_install tests.test_global_self_test -v
-git add src/codex_router/types.py src/codex_router/global_install_adapter.py src/codex_router/cli.py tests
-git commit -m "feat: report V3.1 activation readiness"
+PYTHONPATH=src python3.12 -m unittest tests.test_luna_control_v3 tests.test_cli tests.test_global_install tests.test_global_self_test -v
+git add src/codex_router/luna_control.py src/codex_router/types.py src/codex_router/global_install_adapter.py src/codex_router/cli.py tests
+git commit -m "feat: add V3.1 recovery and readiness gates"
 ```
 
 ---
 
-### Task 11: Replace obsolete V2 tests/module only after V3 parity is green
+### Task 9: Remove the superseded V2 control path and synchronize documentation
 
 **Files:**
-- Delete: `src/codex_router/native_lifecycle.py`
-- Modify/Delete: `tests/test_native_lifecycle.py`
-- Modify/Delete: `tests/test_router_authority_realign.py`
-- Delete after equivalent V3 coverage: `tests/test_luna_hard_mode_v2.py`
-- Delete after equivalent V3 coverage: `tests/test_minimal_agent_id_v2.py`
-- Delete after equivalent V3 coverage: `tests/test_minimal_journal_v2.py`
-- Delete after equivalent V3 coverage: `tests/test_policy_surface_v2.py`
-- Modify: any remaining imports found by repository search.
-
-**Interfaces:**
-- No runtime code imports `native_lifecycle` after this task.
-- Equivalent durability, agent binding, target validation, and fail-closed lifecycle tests exist under V3 names before V2 files are removed.
+- Delete after V3 focused suites pass: `src/codex_router/native_lifecycle.py`
+- Delete after equivalent coverage: the V2-only test files listed in File Structure.
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-08-17-router-v3-1-exact-runtime-validation.md`
+- Modify: any remaining imports/current-policy assertions found by search.
 
 - [ ] **Step 1: Prove V3 focused suites are green before deleting V2 code**
 
@@ -846,66 +678,30 @@ PYTHONPATH=src python3.12 -m unittest \
   tests.test_luna_control_v3 \
   tests.test_router_v3 \
   tests.test_a1_v3 \
-  tests.test_hook -v
+  tests.test_hook \
+  tests.test_primary_capability_v3 -v
 ```
 
-- [ ] **Step 2: Search for V2-only imports and semantic labels**
-
-Run:
+- [ ] **Step 2: Search current code/tests for superseded semantics**
 
 ```bash
 grep -R "native_lifecycle\|native-luna-safety-v2\|hard_mode_no_process\|persistent_while_root_turn_active\|revoke_only_security_boundary" -n src tests
 ```
 
-Every remaining match must be either deliberate historical compatibility text in a migration test or removed in this task.
+Port any still-useful regression to V3 tests, then remove the active V2 implementation and conflicting V2 tests. Do not leave two live authorization state machines.
 
-- [ ] **Step 3: Delete V2 lifecycle implementation and conflicting tests**
+- [ ] **Step 3: Rewrite runtime validation normal path**
 
-Do not retain two active authorization state machines. Preserve useful test cases by porting them to V3 tests before deletion.
-
-- [ ] **Step 4: Run all unit tests**
-
-```bash
-PYTHONPATH=src python3.12 -m unittest discover -s tests -v
-```
-
-- [ ] **Step 5: Commit the migration cleanup**
-
-```bash
-git add -A src tests
-git commit -m "refactor: remove superseded V2 Luna control path"
-```
-
----
-
-### Task 12: Synchronize runtime-acceptance guidance and public documentation
-
-**Files:**
-- Modify: `docs/superpowers/plans/2026-08-17-router-v3-1-exact-runtime-validation.md`
-- Modify: `README.md`
-- Modify: generated policy constants in `src/codex_router/global_install_adapter.py` if documentation review finds mismatch.
-- Modify: tests that assert generated documentation/policy text.
-
-**Interfaces:**
-- Runtime validation normal path uses the currently authenticated Codex App and controlled target-profile evidence; it does not require new OAuth or a standalone authenticated root.
-- Acceptance remains staged and blocks live claims until the relevant gates are closed.
-
-- [ ] **Step 1: Rewrite the validation topology section**
-
-The validation plan must explicitly state:
+The validation plan must state:
 
 ```text
 NEW_OAUTH_FOR_VALIDATION=FORBIDDEN
 STANDALONE_AUTHENTICATED_ROOT=NORMAL_PATH_DROPPED
 CURRENT_APP_SMALL_TASK_SMOKE=PREFERRED_FOR_PRODUCT_RUNTIME_FEASIBILITY
-TARGET_PROFILE_ACCEPTANCE=REQUIRED_FOR_G4_G7_AND_OTHER_PROFILE_DEPENDENT_CLAIMS
+TARGET_PROFILE_ACCEPTANCE=REQUIRED_FOR_PROFILE_DEPENDENT_HARD_CLAIMS
 ```
 
-Retain the historical standalone-auth attempt only as historical context if needed; it must not remain a prerequisite.
-
-- [ ] **Step 2: Encode the current evidence disposition**
-
-Document:
+Record current evidence accurately:
 
 ```text
 P1_PRODUCT_RUNTIME_FEASIBILITY=PASS
@@ -914,37 +710,31 @@ G9_SHORT_CONTEXT_REUSE=PASS
 G2_SETTLEMENT_OBSERVATION=ACCEPTANCE_GATE
 G3_G8_HIDDEN_RUNTIME_FIELDS=ACCEPTANCE_GATE
 G4_G7_TARGET_PROFILE_PROPERTIES=ACCEPTANCE_GATE
+G9_ECONOMICS=DEFERRED_SOAK_EVIDENCE
 ```
 
-Do not claim native numeric IDs or Hook actor fields that the current App surface did not expose.
+- [ ] **Step 4: Update README/current generated-policy documentation**
 
-- [ ] **Step 3: Update README architecture and safety semantics**
+Document persistent task-epoch Luna, Full Executor, Hard Authority Pause, no descendants, A1 pre-action hard-claim rule, and live-activation blockers. Historical V2 docs may remain historical but must not be described as current authority.
 
-README must describe one persistent Luna per task epoch, Full Executor ordinary capability, Hard Authority Pause, A1 pre-action requirement, no descendants, and live-activation blockers. Remove V2 hard-no-process and per-root revocation claims from current documentation; keep historical docs clearly historical.
-
-- [ ] **Step 4: Run documentation/policy tests and whitespace checks**
+- [ ] **Step 5: Run full unit suite and commit cleanup/docs**
 
 ```bash
-PYTHONPATH=src python3.12 -m unittest tests.test_global_install tests.test_hook -v
+PYTHONPATH=src python3.12 -m unittest discover -s tests -v
 git diff --check
-```
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add README.md docs/superpowers/plans/2026-08-17-router-v3-1-exact-runtime-validation.md src/codex_router/global_install_adapter.py tests
-git commit -m "docs: align V3.1 runtime acceptance workflow"
+git add -A src tests README.md docs/superpowers/plans/2026-08-17-router-v3-1-exact-runtime-validation.md
+git commit -m "refactor: complete V3.1 control-plane migration"
 ```
 
 ---
 
-### Task 13: Full repository verification and Draft-PR implementation handoff
+### Task 10: Full repository verification and Draft-PR handoff
 
 **Files:**
 - Modify only files required by observed verification failures.
-- Do not change PR body/state in this task unless the user separately authorizes that GitHub mutation.
+- Do not change PR body/state unless the user separately authorizes that GitHub mutation.
 
-- [ ] **Step 1: Run the complete CI-equivalent unit and compile checks**
+- [ ] **Step 1: Run CI-equivalent checks**
 
 ```bash
 PYTHONPATH=src python3.12 -m unittest discover -s tests -v
@@ -952,9 +742,7 @@ python3.12 -m compileall -q src tests
 git diff --check
 ```
 
-Expected: all tests pass, compile exits 0, diff check exits 0.
-
-- [ ] **Step 2: Run the fake-adapter legacy smoke**
+- [ ] **Step 2: Run the legacy fake-adapter smoke**
 
 ```bash
 state_dir="$(mktemp -d)"
@@ -965,9 +753,7 @@ output="$(PYTHONPATH=src python3.12 -m codex_router run \
 test "$output" = "ROUTER_MVP_OK"
 ```
 
-This proves V3.1 native-global-policy work did not break the legacy pipeline command.
-
-- [ ] **Step 3: Build and install a fresh wheel in a temporary virtualenv**
+- [ ] **Step 3: Build and install a fresh wheel**
 
 ```bash
 rm -rf dist
@@ -978,8 +764,6 @@ python3.12 -m venv "$wheel_env"
 ```
 
 - [ ] **Step 4: Run disposable offline global install/self-test/uninstall**
-
-Use only fresh temporary paths and a synthetic executable; do not point at live `~/.codex`:
 
 ```bash
 codex_home="$(mktemp -d)"
@@ -992,55 +776,52 @@ chmod 700 "$synthetic_codex"
   --codex-home "$codex_home" \
   --state-dir "$policy_state" \
   --codex-bin "$synthetic_codex" > /tmp/router-v3-install.json
-
 "$wheel_env/bin/router" global-self-test \
   --codex-home "$codex_home" > /tmp/router-v3-self-test.json
-
 "$wheel_env/bin/router" global-uninstall \
   --codex-home "$codex_home" > /tmp/router-v3-uninstall.json
 ```
 
-Verify offline self-test success is separate from `live_activation=BLOCKED_ACCEPTANCE_GATES`.
+Use only temporary paths; never point these commands at live `~/.codex`.
 
-- [ ] **Step 5: Run the anti-regression semantic scan**
+- [ ] **Step 5: Run semantic anti-regression scans**
 
 ```bash
 grep -R "hard_mode_no_process\|persistent_while_root_turn_active\|revoke_only_security_boundary" -n src tests README.md || true
-grep -R "PermissionRequest\|Stop" -n src/codex_router/global_install_adapter.py
+grep -R "Stop\|PermissionRequest" -n src/codex_router/global_install_adapter.py
 ```
 
 Interpretation:
 
 ```text
 no current-policy hard_mode_no_process claim
-no per-root persistent lifetime claim
+no per-root persistent-lifetime claim
 no revoke-only root terminal semantics
-baseline Hook renderer contains no Stop
-PermissionRequest appears only in conditional A1-specific logic or compatibility code
+baseline renderer contains no Stop
+PermissionRequest appears only in conditional A1 logic or safe migration compatibility code
 ```
 
-- [ ] **Step 6: Review the implementation against each approved design boundary**
-
-Confirm:
+- [ ] **Step 6: Verify the approved design boundaries manually against the diff**
 
 ```text
 P1 persistent reuse is the normal path
-logical CANCELLED can coexist with execution QUIESCING
+logical CANCELLED may coexist with execution QUIESCING
 interrupt ACK cannot settle
 N+1 cannot execute before N settles
 stale N output cannot advance authority
 intended_write_scope change does not automatically replace Luna
-Full Executor ordinary tools are not Router-allowlisted
-no descendant capability is rendered in Luna profile
-A1 hard claims are gated by per-surface evidence
+ordinary Full Executor tools are not Router-allowlisted
+Luna descendant capability is disabled in the rendered profile
+A1 hard claims are gated per surface
 no new OAuth validation path exists
 standalone authenticated root is not required
-live activation remains blocked on unresolved acceptance gates
+live activation remains blocked on unresolved G1-8 acceptance gates
+G9 economics remains deferred soak evidence
 ```
 
-- [ ] **Step 7: Commit only verification-driven fixes, then stop before live activation**
+- [ ] **Step 7: Re-run affected tests after any verification-driven fix and stop before activation**
 
-If verification required code changes, use one final focused commit after rerunning the affected tests. Final implementation handoff must report exact evidence using:
+Final handoff must report observed evidence using:
 
 ```text
 REPOSITORY_IMPLEMENTATION=V3_1_IMPLEMENTED_OFFLINE
@@ -1056,7 +837,7 @@ HOOK_TRUST_CHANGED=NO
 NEW_OAUTH_CREATED=NO
 ```
 
-Do not install to live `~/.codex`, change Hook trust, mark PR ready, merge, or claim G2-G8 acceptance without the later target-runtime evidence.
+Do not install to live `~/.codex`, change Hook trust, mark PR ready, merge, or claim runtime acceptance without the later current-App/target-profile evidence.
 
 ---
 
@@ -1064,30 +845,33 @@ Do not install to live `~/.codex`, change Hook trust, mark PR ready, merge, or c
 
 ### Spec coverage
 
-- P1 persistent Luna: Tasks 3, 4, 9.
-- Four authority/correlation dimensions and stale-result rejection: Tasks 1, 3, 4, 9.
-- `native_workspace_boundary` vs `intended_write_scope`: Tasks 4, 9, 13.
-- K1 minimal packet: Task 4.
-- Hard Authority Pause and dual cancellation/execution state: Task 5.
-- Event-driven Sleeping Sol / no polling: Tasks 5, 6, 13.
-- E2 remains prompt/policy behavior and is synchronized in Tasks 7 and 12; no new broad escalation machinery is introduced.
-- A1 hard-claim discipline: Task 8.
-- No descendants and Full Executor: Tasks 6, 7.
-- Minimal four-Hook baseline: Tasks 6, 7.
-- Controlled replacement/recovery: Task 9.
-- Durable state integrity: Tasks 1, 2, 9.
-- Runtime-gate staging / no new OAuth: Tasks 10, 12, 13.
-- Live-activation and merge-ready blockers: Tasks 10, 12, 13.
+- P1 persistent Luna and root-turn non-boundary: Tasks 2, 3, 8.
+- Identity/epoch/generation correlation and stale rejection: Tasks 1-3, 8.
+- `native_workspace_boundary` vs `intended_write_scope`: Tasks 3, 8, 10.
+- K1 packet: Task 3.
+- Hard Authority Pause and logical/execution dual state: Task 4.
+- Event-driven Sleeping Sol / no polling: Tasks 4, 5, 10.
+- E2 remains generated policy behavior; Task 6 synchronizes it without adding orchestration machinery.
+- A1 hard-claim discipline: Task 7.
+- No descendants and Full Executor: Tasks 5-7.
+- Four baseline Hooks: Tasks 5-7.
+- Controlled replacement/recovery: Task 8.
+- Durable state integrity: Tasks 1, 2, 8.
+- Runtime-gate staging / no new OAuth: Tasks 8-10.
+- Live-activation and merge-ready blockers: Tasks 8-10.
+- G9 economics is deferred soak evidence, not silently promoted to a safety hard claim.
 
 ### Type/interface consistency
 
-- `logical_task_status` and `execution_status` are independent throughout the plan.
-- `packet_generation` is monotonic and is the packet-authority version everywhere.
-- `pending_spawn` is a structured reservation, not a boolean.
-- Settlement is represented by `observe_settlement(...)`; `record_interrupt_ack(...)` never settles.
-- A1 authorization uses canonical category names from `a1.py`; packet generations never inherit them.
-- The Hook layer consumes `luna_control.py`; no second active V2 authorization state machine remains after Task 11.
+- `logical_task_status` and `execution_status` are independent everywhere.
+- `packet_generation` is the monotonic packet-authority version.
+- `pending_spawn` is structured reservation state, never a boolean.
+- `record_interrupt_ack()` never settles; only `observe_settlement()` may leave `QUIESCING`.
+- `accept_result()` returns exactly `CURRENT` or `STALE`.
+- A1 authorizations use canonical `A1_CATEGORIES` and never inherit across generations.
+- `PostToolUse` baseline responsibility remains spawn reconciliation.
+- `hook.py` consumes `luna_control.py`; after Task 9 there is no second active V2 authorization state machine.
 
-### Scope check
+### Placeholder and scope check
 
-The tasks form one implementation sequence around a single product subsystem: the native persistent-Luna global Router control plane. Legacy pipeline behavior is preserved and tested but not redesigned. Runtime acceptance is deliberately staged after implementation rather than expanded into an unrelated authentication or live-migration project.
+All implementation-facing interfaces used by a task are defined in that task or an earlier task. The plan contains no unresolved implementation placeholders. The work is one subsystem—the native persistent-Luna global Router control plane—while the legacy pipeline is preserved only as a regression boundary. Runtime acceptance is staged after implementation rather than expanded into a new authentication or live-migration project.
