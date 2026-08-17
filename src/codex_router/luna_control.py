@@ -39,6 +39,7 @@ _RETIRE_REASONS = {
     "native_authority_profile_change",
     "runtime_validated_context_reset",
 }
+_LUNA_REPLACEMENT_REASONS = _RETIRE_REASONS - {"new_task_epoch"}
 
 
 @dataclass(frozen=True)
@@ -174,8 +175,12 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
         intended_write_scope or explicit_side_effect_authorizations
     ):
         raise _error("packet metadata requires an active packet")
-    if snapshot.logical_task_status == "ACTIVE" and snapshot.execution_status == "RETIRED":
-        raise _error("active task cannot have retired execution")
+    if (
+        snapshot.logical_task_status == "ACTIVE"
+        and snapshot.execution_status == "RETIRED"
+        and luna_agent_id is None
+    ):
+        raise _error("active task may retire only a bound Luna epoch")
     if snapshot.execution_status in {"RUNNING", "QUIESCING"} and packet_id is None:
         raise _error("running or quiescing execution requires an active packet")
     if snapshot.execution_status == "IDLE" and child_turn is not None:
@@ -403,6 +408,22 @@ def _locked_state(directory: Path, *, mutate: bool) -> Iterator[dict[str, Any]]:
             os.close(descriptor)
 
 
+def _reclaim_terminal_session(sessions: dict[str, Any]) -> bool:
+    candidates: list[str] = []
+    for key, record in sessions.items():
+        snapshot = _snapshot_from_mapping(record)
+        if (
+            snapshot.logical_task_status in {"CANCELLED", "COMPLETED"}
+            and snapshot.execution_status == "RETIRED"
+            and snapshot.pending_spawn is None
+        ):
+            candidates.append(key)
+    if not candidates:
+        return False
+    del sessions[min(candidates)]
+    return True
+
+
 def new_task(
     directory: Path,
     secret: bytes,
@@ -433,7 +454,9 @@ def new_task(
     validate_snapshot(snapshot)
     with _locked_state(directory, mutate=True) as state:
         sessions = state["sessions"]
-        if tag not in sessions and len(sessions) >= _MAX_SESSIONS:
+        if tag in sessions:
+            raise _error("a task epoch already exists for this session")
+        if len(sessions) >= _MAX_SESSIONS and not _reclaim_terminal_session(sessions):
             raise _error("Luna control session capacity is exhausted")
         sessions[tag] = asdict(snapshot)
     return snapshot
@@ -451,14 +474,14 @@ def read_snapshot(
         return _snapshot_from_mapping(record)
 
 
-_PARENT_TARGET_TOOLS = {
+_PARENT_WORK_TOOLS = {
     "send_input",
     "send_message",
     "followup_task",
-    "interrupt_agent",
-    "close_agent",
     "resume_agent",
 }
+_PARENT_CLEANUP_TOOLS = {"interrupt_agent", "close_agent"}
+_PARENT_TARGET_TOOLS = _PARENT_WORK_TOOLS | _PARENT_CLEANUP_TOOLS
 
 
 def _record_for_session(state: Mapping[str, Any], tag: str) -> ControlSnapshot:
@@ -531,9 +554,7 @@ def _reconcile_spawn(
     )
 
 
-def _candidate_field(
-    candidate: Mapping[str, Any], *names: str
-) -> Any:
+def _candidate_field(candidate: Mapping[str, Any], *names: str) -> Any:
     for name in names:
         if name in candidate:
             return candidate[name]
@@ -746,6 +767,11 @@ def authorize_parent_target(
     snapshot = current_luna(directory, secret, session_id)
     if requested not in {snapshot.luna_agent_id, snapshot.luna_task_path}:
         raise _error("parent lifecycle target is not the current Luna")
+    if tool in _PARENT_WORK_TOOLS and snapshot.execution_status not in {
+        "IDLE",
+        "PAUSED_SETTLED",
+    }:
+        raise _error("parent work dispatch requires an idle or settled Luna")
 
 
 def _packet_sequence(value: Any, field: str) -> list[str]:
@@ -772,7 +798,7 @@ def begin_packet(
         snapshot = _record_for_session(state, tag)
         if snapshot.logical_task_status != "ACTIVE":
             raise _error("current task cannot begin a packet")
-        if snapshot.execution_status in {"QUIESCING", "RETIRED"}:
+        if snapshot.execution_status not in {"IDLE", "PAUSED_SETTLED"}:
             raise _error("current execution cannot begin a packet")
         generation = snapshot.packet_generation + 1
         try:
@@ -1015,8 +1041,6 @@ def retire_luna(
     tag = session_tag(secret, session_id)
     initial = read_snapshot(directory, secret, session_id)
     if initial is not None and initial.execution_status == "RUNNING" and settlement_source is None:
-        # Persist the authority freeze in its own transaction before reporting
-        # that trusted terminal evidence is still required.
         freeze_authority(
             directory,
             secret,
@@ -1058,9 +1082,15 @@ def retire_luna(
         elif snapshot.execution_status != "IDLE":
             raise _error("Luna execution cannot be retired")
 
+        if reason != "new_task_epoch" and snapshot.luna_agent_id is None:
+            raise _error("Luna replacement requires a bound Luna identity")
         retired = replace(
             snapshot,
-            logical_task_status="CANCELLED",
+            logical_task_status=(
+                "CANCELLED"
+                if reason == "new_task_epoch"
+                else snapshot.logical_task_status
+            ),
             execution_status="RETIRED",
             active_packet_id=None,
             active_child_turn_id=None,
@@ -1071,7 +1101,31 @@ def retire_luna(
         return retired
 
 
-def start_new_task_epoch(
+def _replacement_reservation(
+    *,
+    task_epoch: str,
+    luna_epoch: str,
+    root_session_tag: str,
+    parent: str,
+    tool_id: str | None,
+    expected_id: str | None,
+) -> SpawnReservation | None:
+    if tool_id is None:
+        return None
+    return SpawnReservation(
+        task_epoch=task_epoch,
+        luna_epoch=luna_epoch,
+        expected_role="luna_worker",
+        root_session_tag=root_session_tag,
+        expected_parent=parent,
+        tool_use_id=tool_id,
+        task_path=None,
+        agent_id=None,
+        expected_agent_id=expected_id,
+    )
+
+
+def replace_luna_epoch(
     directory: Path,
     secret: bytes,
     session_id: str,
@@ -1080,46 +1134,97 @@ def start_new_task_epoch(
     native_authority_profile: str,
     reason: Literal[
         "unrecoverable_runtime_identity",
-        "new_task_epoch",
         "native_authority_profile_change",
         "runtime_validated_context_reset",
-    ] | None = None,
+    ],
     tool_use_id: str | None = None,
     expected_agent_id: str | None = None,
 ) -> ControlSnapshot:
-    """Create a fresh authority epoch after the prior epoch is retired."""
-    if reason is not None and reason not in _RETIRE_REASONS:
+    """Replace only the Luna runtime epoch while preserving the task epoch."""
+    if reason not in _LUNA_REPLACEMENT_REASONS:
         raise _error("Luna replacement reason is invalid")
     parent = _text(native_parent_identity, "native_parent_identity")
     profile = _text(native_authority_profile, "native_authority_profile")
-    assert parent is not None and profile is not None
     tool_id = _text(tool_use_id, "tool_use_id", optional=True)
     expected_id = _text(expected_agent_id, "expected_agent_id", optional=True)
+    assert parent is not None and profile is not None
     tag = session_tag(secret, session_id)
     with _locked_state(Path(directory), mutate=True) as state:
         previous = _record_for_session(state, tag)
-        if previous.execution_status != "RETIRED":
-            raise _error("replacement requires a retired Luna epoch")
+        if (
+            previous.logical_task_status != "ACTIVE"
+            or previous.execution_status != "RETIRED"
+        ):
+            raise _error("Luna replacement requires an active task with a retired Luna")
         if parent != previous.native_parent_identity:
             raise _error("replacement parent identity does not match the task epoch")
-        pending = None
-        if tool_id is not None:
-            pending = SpawnReservation(
-                task_epoch=_new_epoch("task"),
-                luna_epoch=_new_epoch("luna"),
-                expected_role="luna_worker",
-                root_session_tag=tag,
-                expected_parent=parent,
-                tool_use_id=tool_id,
-                task_path=None,
-                agent_id=None,
-                expected_agent_id=expected_id,
-            )
-            task_epoch = pending.task_epoch
-            luna_epoch = pending.luna_epoch
-        else:
-            task_epoch = _new_epoch("task")
-            luna_epoch = _new_epoch("luna")
+        luna_epoch = _new_epoch("luna")
+        pending = _replacement_reservation(
+            task_epoch=previous.task_epoch,
+            luna_epoch=luna_epoch,
+            root_session_tag=tag,
+            parent=parent,
+            tool_id=tool_id,
+            expected_id=expected_id,
+        )
+        replacement = ControlSnapshot(
+            task_epoch=previous.task_epoch,
+            luna_epoch=luna_epoch,
+            root_session_tag=tag,
+            native_parent_identity=parent,
+            native_authority_profile=profile,
+            luna_agent_id=None,
+            luna_task_path=None,
+            packet_generation=previous.packet_generation,
+            active_packet_id=None,
+            active_child_turn_id=None,
+            logical_task_status="ACTIVE",
+            execution_status="IDLE",
+            pending_spawn=pending,
+        )
+        _store_snapshot(state, replacement)
+        return replacement
+
+
+def start_new_task_epoch(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    native_parent_identity: str,
+    native_authority_profile: str,
+    reason: Literal["new_task_epoch"] | None = None,
+    tool_use_id: str | None = None,
+    expected_agent_id: str | None = None,
+) -> ControlSnapshot:
+    """Create a fresh task and Luna epoch after a cancelled retired task."""
+    if reason not in {None, "new_task_epoch"}:
+        raise _error("new task epoch requires the new_task_epoch reason")
+    parent = _text(native_parent_identity, "native_parent_identity")
+    profile = _text(native_authority_profile, "native_authority_profile")
+    tool_id = _text(tool_use_id, "tool_use_id", optional=True)
+    expected_id = _text(expected_agent_id, "expected_agent_id", optional=True)
+    assert parent is not None and profile is not None
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        previous = _record_for_session(state, tag)
+        if (
+            previous.logical_task_status != "CANCELLED"
+            or previous.execution_status != "RETIRED"
+        ):
+            raise _error("new task epoch requires a cancelled retired prior task")
+        if parent != previous.native_parent_identity:
+            raise _error("replacement parent identity does not match the task epoch")
+        task_epoch = _new_epoch("task")
+        luna_epoch = _new_epoch("luna")
+        pending = _replacement_reservation(
+            task_epoch=task_epoch,
+            luna_epoch=luna_epoch,
+            root_session_tag=tag,
+            parent=parent,
+            tool_id=tool_id,
+            expected_id=expected_id,
+        )
         replacement = ControlSnapshot(
             task_epoch=task_epoch,
             luna_epoch=luna_epoch,
