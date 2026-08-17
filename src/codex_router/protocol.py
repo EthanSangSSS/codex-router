@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import os
 import re
 from typing import Any, Iterable, Mapping
 import unicodedata
@@ -12,6 +13,7 @@ STAGES = ("local_sol", "web_sol", "luna")
 RUN_PROTOCOL = "codex-router/run-state/v1"
 PACKET_PROTOCOL = "codex-router/stage-packet/v1"
 WEB_RESPONSE_PREFIX = "[CODEX_ROUTER_RESPONSE_V1]"
+LUNA_PACKET_PREFIX = "[CODEX_ROUTER_PACKET_V3_1] "
 _PACKET_KEYS = {
     "protocol",
     "driver_context_id",
@@ -23,6 +25,16 @@ _PACKET_KEYS = {
     "packet_digest",
 }
 _SHA256_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+_LUNA_PACKET_KEYS = {
+    "packet_id",
+    "generation",
+    "objective",
+    "working_directory",
+    "intended_write_scope",
+    "explicit_side_effect_authorizations",
+    "success_criteria",
+    "stop_conditions",
+}
 
 
 class ProtocolError(ValueError):
@@ -50,6 +62,107 @@ def canonical_json_bytes(value: Any) -> bytes:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8", errors="strict")
+
+
+def _luna_text(value: Any, field: str, *, nonblank: bool = False) -> str:
+    if not isinstance(value, str) or not value:
+        raise ProtocolError(f"{field} must be non-empty text")
+    if nonblank and not value.strip():
+        raise ProtocolError(f"{field} must not be blank")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ProtocolError(f"{field} must be valid UTF-8 text") from error
+    return value
+
+
+def _luna_text_list(value: Any, field: str, *, unique: bool = False) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        raise ProtocolError(f"{field} must be a list")
+    result = [_luna_text(item, f"{field} entry") for item in value]
+    if unique and len(result) != len(set(result)):
+        raise ProtocolError(f"{field} entries must be unique")
+    return result
+
+
+def _validate_luna_packet(packet: Any) -> dict[str, Any]:
+    if not isinstance(packet, dict) or set(packet) != _LUNA_PACKET_KEYS:
+        raise ProtocolError("Luna packet schema is invalid")
+    packet_id = _luna_text(packet.get("packet_id"), "packet_id")
+    generation = packet.get("generation")
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        raise ProtocolError("generation must be a positive integer")
+    objective = _luna_text(packet.get("objective"), "objective", nonblank=True)
+    working_directory = _luna_text(packet.get("working_directory"), "working_directory")
+    if not os.path.isabs(working_directory):
+        raise ProtocolError("working_directory must be absolute")
+    intended_write_scope = _luna_text_list(
+        packet.get("intended_write_scope"),
+        "intended_write_scope",
+        unique=True,
+    )
+    explicit_side_effect_authorizations = _luna_text_list(
+        packet.get("explicit_side_effect_authorizations"),
+        "explicit_side_effect_authorizations",
+    )
+    success_criteria = _luna_text_list(packet.get("success_criteria"), "success_criteria")
+    stop_conditions = _luna_text_list(packet.get("stop_conditions"), "stop_conditions")
+    return {
+        "packet_id": packet_id,
+        "generation": generation,
+        "objective": objective,
+        "working_directory": working_directory,
+        "intended_write_scope": intended_write_scope,
+        "explicit_side_effect_authorizations": explicit_side_effect_authorizations,
+        "success_criteria": success_criteria,
+        "stop_conditions": stop_conditions,
+    }
+
+
+def build_luna_packet(
+    *,
+    packet_id: str,
+    generation: int,
+    objective: str,
+    working_directory: str,
+    intended_write_scope: list[str] | tuple[str, ...],
+    explicit_side_effect_authorizations: list[str] | tuple[str, ...],
+    success_criteria: list[str] | tuple[str, ...],
+    stop_conditions: list[str] | tuple[str, ...],
+) -> str:
+    packet = _validate_luna_packet(
+        {
+            "packet_id": packet_id,
+            "generation": generation,
+            "objective": objective,
+            "working_directory": working_directory,
+            "intended_write_scope": intended_write_scope,
+            "explicit_side_effect_authorizations": explicit_side_effect_authorizations,
+            "success_criteria": success_criteria,
+            "stop_conditions": stop_conditions,
+        }
+    )
+    return LUNA_PACKET_PREFIX + canonical_json_bytes(packet).decode("utf-8")
+
+
+def parse_luna_packet(message: str) -> dict[str, Any]:
+    if not isinstance(message, str) or not message.startswith(LUNA_PACKET_PREFIX):
+        raise ProtocolError("Luna packet prefix is invalid")
+    raw = message[len(LUNA_PACKET_PREFIX) :]
+    if not raw:
+        raise ProtocolError("Luna packet payload is missing")
+    try:
+        packet = json.loads(raw)
+        canonical = canonical_json_bytes(packet).decode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise ProtocolError("Luna packet is not canonical JSON") from error
+    if raw != canonical:
+        raise ProtocolError("Luna packet JSON is not canonical")
+    return _validate_luna_packet(packet)
 
 
 def digest_json(value: Any) -> str:

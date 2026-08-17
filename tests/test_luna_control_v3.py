@@ -28,6 +28,24 @@ class LunaControlV3Tests(unittest.TestCase):
             native_authority_profile="profile-A",
         )
 
+    def begin_packet(self, *, packet_id, scope, authorizations=()):
+        try:
+            begin_packet = control.begin_packet
+        except AttributeError:
+            self.fail("V3.1 packet-generation API is not implemented")
+        return begin_packet(
+            self.directory,
+            self.secret,
+            "root-session",
+            packet_id=packet_id,
+            objective="bounded implementation",
+            working_directory="/workspace/repo",
+            intended_write_scope=scope,
+            explicit_side_effect_authorizations=authorizations,
+            success_criteria=("focused tests pass",),
+            stop_conditions=("scope expansion required",),
+        )
+
     def test_new_task_persists_initial_dual_status_snapshot(self):
         snapshot = self.new_task()
         self.assertEqual(snapshot.logical_task_status, "ACTIVE")
@@ -319,6 +337,64 @@ class LunaControlV3Tests(unittest.TestCase):
                 agent_id="late-agent",
                 agent_type="luna_worker",
             )
+
+    def test_packet_generation_replaces_scope_and_a1_authorizations(self):
+        original = self.new_task()
+        first = self.begin_packet(
+            packet_id="packet-1",
+            scope=("src/old.py",),
+            authorizations=("git_push",),
+        )
+        second = self.begin_packet(
+            packet_id="packet-2",
+            scope=("src/new.py",),
+        )
+
+        self.assertEqual(first.packet_generation, 1)
+        self.assertEqual(second.packet_generation, 2)
+        self.assertEqual(second.luna_epoch, original.luna_epoch)
+        self.assertEqual(second.intended_write_scope, ("src/new.py",))
+        self.assertEqual(second.explicit_side_effect_authorizations, ())
+
+    def test_start_execution_records_native_child_turn(self):
+        self.new_task()
+        self.begin_packet(packet_id="packet-1", scope=("src/math.py",))
+
+        try:
+            start_execution = control.start_execution
+        except AttributeError:
+            self.fail("V3.1 execution API is not implemented")
+        started = start_execution(
+            self.directory,
+            self.secret,
+            "root-session",
+            child_turn_id="child-turn-1",
+        )
+
+        self.assertEqual(started.execution_status, "RUNNING")
+        self.assertEqual(started.active_child_turn_id, "child-turn-1")
+
+    def test_delayed_prior_generation_result_is_stale_without_state_mutation(self):
+        self.new_task()
+        self.begin_packet(packet_id="packet-1", scope=("src/old.py",))
+        self.begin_packet(packet_id="packet-2", scope=("src/new.py",))
+        before = control.read_snapshot(self.directory, self.secret, "root-session")
+
+        try:
+            accept_result = control.accept_result
+        except AttributeError:
+            self.fail("V3.1 result API is not implemented")
+        result = accept_result(
+            self.directory,
+            self.secret,
+            "root-session",
+            generation=1,
+            child_turn_id=None,
+        )
+
+        after = control.read_snapshot(self.directory, self.secret, "root-session")
+        self.assertEqual(result, "STALE")
+        self.assertEqual(after, before)
 
 
 if __name__ == "__main__":

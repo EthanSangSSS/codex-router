@@ -15,6 +15,7 @@ import tempfile
 from typing import Any, Iterator, Literal, Mapping
 import uuid
 
+from .protocol import ProtocolError, build_luna_packet, parse_luna_packet
 from .state import RouterStateError
 
 
@@ -59,6 +60,16 @@ class ControlSnapshot:
     logical_task_status: TaskStatus
     execution_status: ExecutionStatus
     pending_spawn: SpawnReservation | None = None
+    intended_write_scope: tuple[str, ...] = ()
+    explicit_side_effect_authorizations: tuple[str, ...] = ()
+
+    @property
+    def active_intended_write_scope(self) -> tuple[str, ...]:
+        return self.intended_write_scope
+
+    @property
+    def active_explicit_side_effect_authorizations(self) -> tuple[str, ...]:
+        return self.explicit_side_effect_authorizations
 
 
 _SNAPSHOT_FIELDS = frozenset(ControlSnapshot.__dataclass_fields__)
@@ -74,6 +85,15 @@ def _text(value: Any, field: str, *, optional: bool = False) -> str | None:
     if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 512:
         raise _error(f"{field} is invalid")
     return value
+
+
+def _text_sequence(value: Any, field: str, *, unique: bool = False) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise _error(f"{field} is invalid")
+    result = tuple(_text(item, f"{field} entry") for item in value)
+    if unique and len(result) != len(set(result)):
+        raise _error(f"{field} entries must be unique")
+    return result
 
 
 def _secret(value: bytes) -> bytes:
@@ -132,21 +152,39 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
         raise _error("logical_task_status is invalid")
     if snapshot.execution_status not in _EXECUTION_STATUSES:
         raise _error("execution_status is invalid")
+    intended_write_scope = _text_sequence(
+        snapshot.intended_write_scope,
+        "intended_write_scope",
+        unique=True,
+    )
+    explicit_side_effect_authorizations = _text_sequence(
+        snapshot.explicit_side_effect_authorizations,
+        "explicit_side_effect_authorizations",
+    )
+    if packet_id is None and (
+        intended_write_scope or explicit_side_effect_authorizations
+    ):
+        raise _error("packet metadata requires an active packet")
     if snapshot.logical_task_status == "ACTIVE" and snapshot.execution_status == "RETIRED":
         raise _error("active task cannot have retired execution")
     if snapshot.execution_status in {"RUNNING", "QUIESCING"} and packet_id is None:
         raise _error("running or quiescing execution requires an active packet")
-    if snapshot.execution_status == "IDLE" and (
-        packet_id is not None or child_turn is not None
-    ):
+    if snapshot.execution_status == "IDLE" and child_turn is not None:
         raise _error("idle execution cannot retain active execution identity")
     if snapshot.execution_status == "RETIRED" and (
-        packet_id is not None or child_turn is not None
+        packet_id is not None
+        or child_turn is not None
+        or intended_write_scope
+        or explicit_side_effect_authorizations
     ):
         raise _error("retired execution cannot retain active execution identity")
     if child_turn is not None and packet_id is None:
         raise _error("active child turn requires an active packet")
-    if snapshot.packet_generation == 0 and packet_id is not None:
+    if snapshot.packet_generation == 0 and (
+        packet_id is not None
+        or intended_write_scope
+        or explicit_side_effect_authorizations
+    ):
         raise _error("generation zero cannot have an active packet")
     pending = snapshot.pending_spawn
     if pending is not None:
@@ -172,9 +210,20 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
 
 
 def _snapshot_from_mapping(value: Any) -> ControlSnapshot:
-    if not isinstance(value, Mapping) or set(value) != _SNAPSHOT_FIELDS:
+    if not isinstance(value, Mapping):
         raise _error("control snapshot schema is invalid")
     data = dict(value)
+    packet_metadata_fields = {
+        "intended_write_scope",
+        "explicit_side_effect_authorizations",
+    }
+    if set(data) == _SNAPSHOT_FIELDS - packet_metadata_fields:
+        data.update({field: () for field in packet_metadata_fields})
+    elif set(data) != _SNAPSHOT_FIELDS:
+        raise _error("control snapshot schema is invalid")
+    for field in packet_metadata_fields:
+        if isinstance(data[field], list):
+            data[field] = tuple(data[field])
     pending = data.get("pending_spawn")
     if pending is not None:
         if not isinstance(pending, Mapping) or set(pending) != set(
@@ -543,3 +592,138 @@ def authorize_parent_target(
     snapshot = current_luna(directory, secret, session_id)
     if requested not in {snapshot.luna_agent_id, snapshot.luna_task_path}:
         raise _error("parent lifecycle target is not the current Luna")
+
+
+def _packet_sequence(value: Any, field: str) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        raise _error(f"{field} is invalid")
+    return list(value)
+
+
+def begin_packet(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    packet_id: str,
+    objective: str,
+    working_directory: str,
+    intended_write_scope: list[str] | tuple[str, ...],
+    explicit_side_effect_authorizations: list[str] | tuple[str, ...],
+    success_criteria: list[str] | tuple[str, ...],
+    stop_conditions: list[str] | tuple[str, ...],
+) -> ControlSnapshot:
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        if snapshot.logical_task_status != "ACTIVE":
+            raise _error("current task cannot begin a packet")
+        if snapshot.execution_status in {"QUIESCING", "RETIRED"}:
+            raise _error("current execution cannot begin a packet")
+        generation = snapshot.packet_generation + 1
+        try:
+            wire = build_luna_packet(
+                packet_id=packet_id,
+                generation=generation,
+                objective=objective,
+                working_directory=working_directory,
+                intended_write_scope=_packet_sequence(
+                    intended_write_scope, "intended_write_scope"
+                ),
+                explicit_side_effect_authorizations=_packet_sequence(
+                    explicit_side_effect_authorizations,
+                    "explicit_side_effect_authorizations",
+                ),
+                success_criteria=_packet_sequence(success_criteria, "success_criteria"),
+                stop_conditions=_packet_sequence(stop_conditions, "stop_conditions"),
+            )
+            packet = parse_luna_packet(wire)
+        except ProtocolError as error:
+            raise _error(str(error)) from error
+        updated = replace(
+            snapshot,
+            packet_generation=packet["generation"],
+            active_packet_id=packet["packet_id"],
+            active_child_turn_id=None,
+            execution_status="IDLE",
+            intended_write_scope=tuple(packet["intended_write_scope"]),
+            explicit_side_effect_authorizations=tuple(
+                packet["explicit_side_effect_authorizations"]
+            ),
+        )
+        _store_snapshot(state, updated)
+        return updated
+
+
+def start_execution(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    child_turn_id: str | None,
+) -> ControlSnapshot:
+    child_turn = _text(child_turn_id, "child_turn_id", optional=True)
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        if snapshot.logical_task_status != "ACTIVE":
+            raise _error("current task cannot start execution")
+        if snapshot.execution_status in {"QUIESCING", "RETIRED"}:
+            raise _error("current execution cannot start")
+        if snapshot.active_packet_id is None:
+            raise _error("execution requires an active packet")
+        if (
+            snapshot.active_child_turn_id is not None
+            and child_turn is not None
+            and snapshot.active_child_turn_id != child_turn
+        ):
+            raise _error("execution child turn conflicts with the current packet")
+        updated = replace(
+            snapshot,
+            execution_status="RUNNING",
+            active_child_turn_id=(
+                snapshot.active_child_turn_id
+                if child_turn is None
+                else child_turn
+            ),
+        )
+        _store_snapshot(state, updated)
+        return updated
+
+
+def accept_result(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    generation: int,
+    child_turn_id: str | None,
+) -> Literal["CURRENT", "STALE"]:
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        raise _error("generation is invalid")
+    child_turn = _text(child_turn_id, "child_turn_id", optional=True)
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        if generation != snapshot.packet_generation:
+            return "STALE"
+        if snapshot.active_packet_id is None:
+            return "STALE"
+        if snapshot.execution_status in {"QUIESCING", "RETIRED"}:
+            return "STALE"
+        if snapshot.active_child_turn_id != child_turn:
+            return "STALE"
+        updated = replace(
+            snapshot,
+            active_packet_id=None,
+            active_child_turn_id=None,
+            execution_status="IDLE",
+            intended_write_scope=(),
+            explicit_side_effect_authorizations=(),
+        )
+        _store_snapshot(state, updated)
+        return "CURRENT"
