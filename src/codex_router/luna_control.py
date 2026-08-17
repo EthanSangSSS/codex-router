@@ -1158,6 +1158,11 @@ def replace_luna_epoch(
             raise _error("Luna replacement requires an active task with a retired Luna")
         if parent != previous.native_parent_identity:
             raise _error("replacement parent identity does not match the task epoch")
+        if (
+            reason != "native_authority_profile_change"
+            and profile != previous.native_authority_profile
+        ):
+            raise _error("replacement reason cannot change native authority profile")
         luna_epoch = _new_epoch("luna")
         pending = _replacement_reservation(
             task_epoch=previous.task_epoch,
