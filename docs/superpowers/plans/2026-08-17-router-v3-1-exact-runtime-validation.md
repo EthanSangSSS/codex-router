@@ -1,14 +1,14 @@
 # Router V3.1 Exact-Runtime Capability Validation Plan
 
 Date: 2026-08-17
-Status: VALIDATION PLAN; NO IMPLEMENTATION AUTHORIZED
+Status: V3.1 VALIDATION PLAN; IMPLEMENTATION COMPLETE; LIVE ACTIVATION BLOCKED
 Repository: `EthanSangSSS/codex-router`
 PR: #8
 Target design: `docs/superpowers/specs/2026-08-17-persistent-luna-minimal-control-plane-v3-1-design.md`
 
 ## Goal
 
-Collect the exact deployed runtime evidence required by V3.1 §23 gates G1–G9 without changing live `~/.codex`, Hook trust, PR state, or the current V2 installation. This is a disposable capability-validation pass, not implementation, migration, or live activation.
+Collect the exact deployed runtime evidence required by V3.1 §23 gates G1–G9 without changing live `~/.codex`, Hook trust, PR state, or any live installation. This is a disposable capability-validation pass, not live activation.
 
 The pass must answer whether V3.1 is implementable on the exact bundled Codex runtime while preserving the aligned product goals:
 
@@ -19,6 +19,31 @@ The pass must answer whether V3.1 is implementable on the exact bundled Codex ru
 - no Luna descendants;
 - minimal control-plane enforcement rather than broad per-tool policing;
 - hard A1 claims only where a deterministic pre-action gate exists.
+
+## Current normal path and evidence disposition
+
+The V3.1 normal validation path does not create new authentication, a standalone authenticated root, or a live installation. Use a current-App small-task smoke for product-runtime feasibility, then use the exact target profile for profile-dependent hard claims.
+
+```text
+NEW_OAUTH_FOR_VALIDATION=FORBIDDEN
+STANDALONE_AUTHENTICATED_ROOT=NORMAL_PATH_DROPPED
+CURRENT_APP_SMALL_TASK_SMOKE=PREFERRED_FOR_PRODUCT_RUNTIME_FEASIBILITY
+TARGET_PROFILE_ACCEPTANCE=REQUIRED_FOR_PROFILE_DEPENDENT_HARD_CLAIMS
+```
+
+Current evidence and staged acceptance gates are recorded explicitly:
+
+```text
+P1_PRODUCT_RUNTIME_FEASIBILITY=PASS
+INTERRUPT_ACK_AS_SETTLEMENT=REJECTED_BY_RUNTIME_EVIDENCE
+G9_SHORT_CONTEXT_REUSE=PASS
+G2_SETTLEMENT_OBSERVATION=ACCEPTANCE_GATE
+G3_G8_HIDDEN_RUNTIME_FIELDS=ACCEPTANCE_GATE
+G4_G7_TARGET_PROFILE_PROPERTIES=ACCEPTANCE_GATE
+G9_ECONOMICS=DEFERRED_SOAK_EVIDENCE
+```
+
+The implementation reports live activation as `BLOCKED_ACCEPTANCE_GATES` until the applicable G1–G8 identity, settlement, actor-attribution, effective-inventory, profile, A1, and recovery evidence is proven. G9 economics remains deferred soak evidence rather than a live safety blocker.
 
 ## Global invariants
 
@@ -201,7 +226,7 @@ Before continuing, prove the recorder can parse a synthetic local event and that
 
 ## Task 3 — Construct the disposable V3.1 Luna profile
 
-The validation profile should model the V3.1 target, not the current V2 `hard_mode_no_process` profile.
+The validation profile should model the V3.1 Full Executor target, not the superseded V2 hard-mode profile.
 
 Required role properties:
 

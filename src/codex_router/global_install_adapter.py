@@ -48,6 +48,7 @@ Honor `[CODEX_ROUTER_POLICY_V1]` Hook context exactly:
 - Hard Authority Pause freezes Router authority immediately. It is an authority state, not a process-death claim or a settlement shortcut.
 - There is no N/N+1 overlap before settlement. A new generation is not admitted while the prior generation is unsettled; only proven native terminal evidence can settle it.
 - A1 hard claims only on proven pre-action surfaces. Hook receipts, packet metadata, and ordinary acknowledgements do not prove terminal settlement or completed external work.
+- Live activation remains `BLOCKED_ACCEPTANCE_GATES` until G1_STRONG_IDENTITY_PROFILE, G2_SETTLEMENT_OBSERVATION, G3_ACTOR_ATTRIBUTION, G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY, G5_NESTED_CODEX, G6_NATIVE_AUTHORITY_PROFILE, G7_A1_CAPABILITY_MATRIX, and G8_RECOVERY_CORRELATION are proven on the target runtime. G9_ECONOMICS remains deferred acceptance evidence.
 - Sol remains the planner and reviewer, while the persistent Luna performs the bounded packet. Web Sol is manual operator work outside automatic Router execution.
 - Every packet must be independently bounded and must not broaden scope or access secrets, authentication, or unrelated private data.
 {_core.AGENTS_END}

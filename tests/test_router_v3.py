@@ -81,14 +81,14 @@ class RouterV3SettlementGateTests(unittest.TestCase):
 
 
 class RouterV3HookBridgeTests(unittest.TestCase):
-    def test_hook_bridge_no_longer_imports_legacy_native_lifecycle(self):
+    def test_hook_bridge_uses_v31_luna_control(self):
         hook_source = (
             Path(__file__).resolve().parents[1]
             / "src"
             / "codex_router"
             / "hook.py"
         ).read_text(encoding="utf-8")
-        self.assertNotIn("native_lifecycle", hook_source)
+        self.assertIn("luna_control", hook_source)
 
     def test_cli_keeps_legacy_stop_and_permission_entry_points_callable(self):
         from codex_router.cli import parser
