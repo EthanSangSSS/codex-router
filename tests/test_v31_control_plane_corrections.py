@@ -19,7 +19,7 @@ class V31ControlPlaneCorrectionTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.installation_dir = self.root / "installation"
         self.installation_dir.mkdir(mode=0o700)
-        self.secret = b"v3-control-plane-correction-secret!!"
+        self.secret = bytes(range(32))
         self._write_private(
             self.installation_dir / "installation-secret",
             self.secret,
@@ -324,7 +324,10 @@ class V31ControlPlaneCorrectionTests(unittest.TestCase):
         for index in range(1, 64):
             self.new_task(f"session-{index}")
 
-        created = self.new_task("session-64")
+        try:
+            created = self.new_task("session-64")
+        except RouterStateError as error:
+            self.fail(f"terminal session was not reclaimed: {error}")
 
         self.assertEqual(created.logical_task_status, "ACTIVE")
         self.assertIsNone(
