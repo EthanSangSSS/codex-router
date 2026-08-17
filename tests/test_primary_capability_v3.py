@@ -1,0 +1,138 @@
+import json
+import shlex
+import tomllib
+import unittest
+
+from codex_router import global_install_adapter as adapter
+
+
+ROLE_CONFIG = {
+    "local_sol": {
+        "requested_model": "gpt-5.6-sol",
+        "requested_reasoning": "max",
+    },
+    "web_sol": {
+        "model_claimed": "sol",
+        "reasoning_claimed": "xhigh",
+        "verification": "operator_attested",
+    },
+    "luna": {
+        "requested_model": "gpt-5.6-luna",
+        "requested_reasoning": "max",
+    },
+}
+
+
+class PrimaryCapabilityV3Tests(unittest.TestCase):
+    def test_v3_renderer_exports_full_executor_mode_and_four_hook_events(self):
+        self.assertEqual(adapter.LUNA_EXECUTION_MODE, "full_executor_v3_1")
+        self.assertEqual(
+            adapter.BASELINE_HOOK_EVENTS,
+            (
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "SubagentStart",
+            ),
+        )
+
+    def test_luna_profile_disables_only_descendant_agent_triad(self):
+        rendered = adapter.luna_agent_bytes(ROLE_CONFIG["luna"])
+        profile = tomllib.loads(rendered.decode("utf-8"))
+
+        self.assertEqual(profile["agents"], {"enabled": False})
+        self.assertEqual(
+            profile["features"],
+            {"multi_agent": False, "multi_agent_v2": False},
+        )
+        for removed_restriction in (
+            "shell_tool",
+            "unified_exec",
+            "code_mode",
+            "code_mode_only",
+            "request_permissions_tool",
+            "apps",
+            "enable_mcp_apps",
+            "plugins",
+            "tool_suggest",
+        ):
+            self.assertNotIn(removed_restriction, profile.get("features", {}))
+        self.assertNotIn("web_search", profile)
+
+    def test_hook_renderer_has_exactly_the_v3_baseline_events(self):
+        handler = {
+            "type": "command",
+            "command": shlex.join(
+                (
+                    "/usr/bin/python3",
+                    "-E",
+                    "-P",
+                    "-m",
+                    "codex_router",
+                    "hook-user-prompt",
+                    "--installation-dir",
+                    "/tmp/router-installation",
+                )
+            ),
+            "statusMessage": "Routing with Codex Router [codex-router-global-policy-v1]",
+        }
+        rendered = adapter.install_hook_v2(None, handler)
+        hooks = json.loads(rendered.decode("utf-8"))["hooks"]
+
+        self.assertEqual(
+            tuple(hooks),
+            (
+                "PostToolUse",
+                "PreToolUse",
+                "SubagentStart",
+                "UserPromptSubmit",
+            ),
+        )
+        self.assertNotIn("Stop", hooks)
+        self.assertNotIn("PermissionRequest", hooks)
+        self.assertEqual(
+            {
+                shlex.split(groups[0]["hooks"][0]["command"])[5]
+                for groups in hooks.values()
+            },
+            {
+                "hook-user-prompt",
+                "hook-pre-tool",
+                "hook-post-tool",
+                "hook-subagent-start",
+            },
+        )
+
+    def test_generated_policy_text_describes_v3_authority(self):
+        agents_block = getattr(adapter, "AGENTS_BLOCK_V3", adapter.AGENTS_BLOCK_V2)
+        instructions = getattr(
+            adapter,
+            "LUNA_DEVELOPER_INSTRUCTIONS_V3",
+            adapter.LUNA_DEVELOPER_INSTRUCTIONS_V2,
+        )
+        combined = f"{agents_block}\n{instructions}"
+
+        for required in (
+            "persistent Luna per task epoch",
+            "Full Executor ordinary inspect/research/edit/test/debug/retry/verify",
+            "no descendants",
+            "no nested Codex delegation",
+            "packet generation replaces prior authority",
+            "Hard Authority Pause freezes Router authority immediately",
+            "no N/N+1 overlap before settlement",
+            "A1 hard claims only on proven pre-action surfaces",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, combined)
+        for stale in (
+            "hard_mode_no_process",
+            "persistent_while_root_turn_active",
+            "revoke-only terminal semantics",
+            "revoke_only_security_boundary",
+        ):
+            with self.subTest(stale=stale):
+                self.assertNotIn(stale, combined)
+
+
+if __name__ == "__main__":
+    unittest.main()

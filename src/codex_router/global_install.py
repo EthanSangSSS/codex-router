@@ -1823,9 +1823,6 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
     installation_dir = home / INSTALL_DIRECTORY_NAME
     config = _private_json(installation_dir / "config.json")
     configured_handler = _configured_hook_handler(home)
-    configured_arguments = _handler_argv(
-        configured_handler, expected_installation_dir=installation_dir
-    )
     before_fingerprints = _managed_fingerprints(home)
     configured_state_root = Path(config["state_root"])
     configured_state_existed = configured_state_root.exists()
@@ -1842,6 +1839,34 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="codex-router-self-test-") as temporary:
         ephemeral_path = Path(temporary)
         ephemeral_path.chmod(0o700)
+        # V3.1 route handling initializes the durable control journal. Exercise
+        # the configured command against a private disposable copy so the
+        # offline self-test cannot mutate the installed policy or its journal.
+        hook_installation_dir = ephemeral_path / INSTALL_DIRECTORY_NAME
+        hook_installation_dir.mkdir(mode=0o700)
+        _atomic_write(
+            hook_installation_dir / "config.json",
+            _read_private_file(installation_dir / "config.json"),
+        )
+        _atomic_write(
+            hook_installation_dir / _IDENTITY_FILE_NAME,
+            _read_private_file(installation_dir / _IDENTITY_FILE_NAME),
+        )
+        try:
+            hook_arguments = shlex.split(
+                str(configured_handler["command"]), posix=True
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise _error("conflict", "configured Router hook is invalid") from error
+        if not hook_arguments:
+            raise _error("conflict", "configured Router hook is invalid")
+        hook_arguments[-1] = str(hook_installation_dir)
+        disposable_handler = dict(configured_handler)
+        disposable_handler["command"] = shlex.join(hook_arguments)
+        configured_arguments = _handler_argv(
+            disposable_handler,
+            expected_installation_dir=hook_installation_dir,
+        )
 
         def event(*, prompt: str, session: str, turn: str) -> dict[str, str]:
             return {
@@ -1917,7 +1942,7 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "protocol": HOOK_CONTEXT_PROTOCOL,
             "decision": "route",
             "reason": "substantive_request",
-            "workflow": "native_luna_worker",
+            "workflow": "persistent_native_luna",
             "sol_role": "plan_review_final_authority",
             "luna_role": "default_execution",
             "delegation_mode": "sequential_work_packets",
@@ -1926,14 +1951,17 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "luna_reasoning": config["role_config"]["luna"][
                 "requested_reasoning"
             ],
-            "luna_lifecycle": "persistent_while_root_turn_active",
-            "parent_terminal_policy": "revoke_then_cleanup",
+            "luna_lifecycle": "persistent_task_epoch",
+            "parent_terminal_policy": "hard_authority_pause",
             "capacity_failure_policy": "return_to_sol",
             "luna_descendant_policy": "forbidden",
             "luna_codex_runtime_policy": "forbidden",
             "interactive_blocker_policy": "return_to_sol_or_user",
             "initial_context_mode": "packet_only",
             "web_mode": "manual_operator",
+            "pause_semantics": "hard_authority_pause",
+            "sol_supervision": "event_driven",
+            "luna_execution_mode": "full_executor",
         }
 
         checks = {
@@ -1946,7 +1974,7 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "route_policy": all(
                 context.get("decision") == "route" for context in route_contexts
             ),
-            "stateless_native_luna_route": all(
+            "persistent_native_luna_route": all(
                 context == expected_route for context in route_contexts
             ),
             "no_router_run_created": (

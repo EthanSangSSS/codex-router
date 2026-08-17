@@ -61,6 +61,39 @@ class GlobalInstallTests(unittest.TestCase):
 
         return global_status(self.codex_home)
 
+    def test_v3_adapter_renderer_keeps_ordinary_executor_capabilities(self):
+        from codex_router import global_install_adapter as adapter
+
+        handler = {
+            "type": "command",
+            "command": shlex.join(
+                (
+                    "/usr/bin/python3",
+                    "-E",
+                    "-P",
+                    "-m",
+                    "codex_router",
+                    "hook-user-prompt",
+                    "--installation-dir",
+                    str(self.root / "installation"),
+                )
+            ),
+            "statusMessage": "Routing with Codex Router [codex-router-global-policy-v1]",
+        }
+        hooks = json.loads(adapter.install_hook_v2(None, handler).decode("utf-8"))["hooks"]
+        self.assertEqual(
+            set(hooks),
+            {"UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart"},
+        )
+        luna = tomllib.loads(
+            adapter.luna_agent_bytes(ROLE_CONFIG["luna"]).decode("utf-8")
+        )
+        self.assertEqual(luna["agents"], {"enabled": False})
+        self.assertEqual(
+            luna["features"],
+            {"multi_agent": False, "multi_agent_v2": False},
+        )
+
     def reset_case(self, name):
         case_root = self.root / name
         self.codex_home = case_root / "codex-home"

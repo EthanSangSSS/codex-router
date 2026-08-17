@@ -77,7 +77,7 @@ class GlobalSelfTestTests(unittest.TestCase):
         self.assertFalse(result["installation_activated"])
         self.assertEqual(result["hook_trust"], "unknown")
         self.assertTrue(result["checks"]["hook_command_subprocess"])
-        self.assertTrue(result["checks"]["stateless_native_luna_route"])
+        self.assertTrue(result["checks"]["persistent_native_luna_route"])
         self.assertEqual(self.snapshot(), before)
         self.assertFalse(self.state_root.exists())
         serialized = json.dumps(result, ensure_ascii=False, sort_keys=True)
@@ -98,11 +98,9 @@ class GlobalSelfTestTests(unittest.TestCase):
         from codex_router.global_install_adapter import global_self_test
         from codex_router.hook import handle_user_prompt
 
-        installation_dir = self.codex_home / ".codex-router-policy-v1"
-
-        def invoke_current_source(_arguments, *, event, cwd):
+        def invoke_current_source(arguments, *, event, cwd):
             del cwd
-            return handle_user_prompt(event, installation_dir)
+            return handle_user_prompt(event, Path(arguments[-1]))
 
         with patch.object(
             core_module,
@@ -115,7 +113,7 @@ class GlobalSelfTestTests(unittest.TestCase):
                 self.fail(str(error))
 
         self.assertEqual(result["status"], "pass")
-        self.assertTrue(result["checks"]["stateless_native_luna_route"])
+        self.assertTrue(result["checks"]["persistent_native_luna_route"])
 
     def test_cli_self_test_outputs_one_safe_json_object(self):
         environment = os.environ.copy()
