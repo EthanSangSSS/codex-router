@@ -46,6 +46,28 @@ class LunaControlV3Tests(unittest.TestCase):
             stop_conditions=("scope expansion required",),
         )
 
+    def start_packet(self, *, packet_id="packet-1", child_turn_id="turn-1"):
+        self.begin_packet(packet_id=packet_id, scope=("src/math.py",))
+        return control.start_execution(
+            self.directory,
+            self.secret,
+            "root-session",
+            child_turn_id=child_turn_id,
+        )
+
+    def freeze(self, *, reason, logical_cancel=False):
+        try:
+            freeze_authority = control.freeze_authority
+        except AttributeError:
+            self.fail("V3.1 authority-pause API is not implemented")
+        return freeze_authority(
+            self.directory,
+            self.secret,
+            "root-session",
+            reason=reason,
+            logical_cancel=logical_cancel,
+        )
+
     def test_new_task_persists_initial_dual_status_snapshot(self):
         snapshot = self.new_task()
         self.assertEqual(snapshot.logical_task_status, "ACTIVE")
@@ -395,6 +417,118 @@ class LunaControlV3Tests(unittest.TestCase):
         after = control.read_snapshot(self.directory, self.secret, "root-session")
         self.assertEqual(result, "STALE")
         self.assertEqual(after, before)
+
+    def test_pause_freezes_authority_and_interrupt_ack_cannot_settle(self):
+        self.new_task()
+        running = self.start_packet()
+
+        paused = self.freeze(reason="user_pause")
+        self.assertEqual(paused.execution_status, "QUIESCING")
+        self.assertEqual(paused.logical_task_status, "ACTIVE")
+        self.assertEqual(paused.packet_generation, running.packet_generation)
+        self.assertEqual(paused.active_child_turn_id, "turn-1")
+
+        try:
+            record_interrupt_ack = control.record_interrupt_ack
+        except AttributeError:
+            self.fail("V3.1 interrupt-ack API is not implemented")
+        acked = record_interrupt_ack(
+            self.directory,
+            self.secret,
+            "root-session",
+            previous_status="running",
+        )
+        self.assertEqual(acked.execution_status, "QUIESCING")
+        self.assertNotEqual(acked.execution_status, "PAUSED_SETTLED")
+        self.assertEqual(acked, paused)
+
+        with self.assertRaises(RouterStateError):
+            self.begin_packet(packet_id="packet-2", scope=("src/other.py",))
+
+    def test_verified_native_terminal_settlement_allows_next_generation(self):
+        self.new_task()
+        self.start_packet()
+        self.freeze(reason="user_pause")
+
+        try:
+            observe_settlement = control.observe_settlement
+        except AttributeError:
+            self.fail("V3.1 settlement API is not implemented")
+        settled = observe_settlement(
+            self.directory,
+            self.secret,
+            "root-session",
+            source="verified_native_terminal",
+            terminal_status="completed",
+            child_turn_id="turn-1",
+        )
+        self.assertEqual(settled.execution_status, "PAUSED_SETTLED")
+        self.assertEqual(settled.active_packet_id, "packet-1")
+        self.assertEqual(settled.active_child_turn_id, "turn-1")
+
+        self.assertEqual(
+            control.accept_result(
+                self.directory,
+                self.secret,
+                "root-session",
+                generation=1,
+                child_turn_id="turn-1",
+            ),
+            "STALE",
+        )
+        next_packet = self.begin_packet(
+            packet_id="packet-2",
+            scope=("src/other.py",),
+        )
+        self.assertEqual(next_packet.packet_generation, 2)
+        self.assertEqual(next_packet.execution_status, "IDLE")
+
+    def test_logical_cancellation_is_preserved_through_settlement(self):
+        self.new_task()
+        self.start_packet()
+        cancelled = self.freeze(reason="user_cancel", logical_cancel=True)
+        self.assertEqual(cancelled.logical_task_status, "CANCELLED")
+        self.assertEqual(cancelled.execution_status, "QUIESCING")
+
+        try:
+            observe_settlement = control.observe_settlement
+        except AttributeError:
+            self.fail("V3.1 settlement API is not implemented")
+        settled = observe_settlement(
+            self.directory,
+            self.secret,
+            "root-session",
+            source="verified_native_terminal",
+            terminal_status="completed",
+            child_turn_id="turn-1",
+        )
+        self.assertEqual(settled.logical_task_status, "CANCELLED")
+        self.assertEqual(settled.execution_status, "PAUSED_SETTLED")
+
+    def test_paused_settled_execution_cannot_restart_without_new_packet(self):
+        self.new_task()
+        self.start_packet()
+        self.freeze(reason="user_pause")
+        try:
+            observe_settlement = control.observe_settlement
+        except AttributeError:
+            self.fail("V3.1 settlement API is not implemented")
+        observe_settlement(
+            self.directory,
+            self.secret,
+            "root-session",
+            source="verified_native_terminal",
+            terminal_status="interrupted",
+            child_turn_id="turn-1",
+        )
+
+        with self.assertRaises(RouterStateError):
+            control.start_execution(
+                self.directory,
+                self.secret,
+                "root-session",
+                child_turn_id="turn-1",
+            )
 
 
 if __name__ == "__main__":

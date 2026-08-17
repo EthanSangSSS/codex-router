@@ -31,6 +31,8 @@ TaskStatus = Literal["ACTIVE", "COMPLETED", "CANCELLED"]
 ExecutionStatus = Literal["IDLE", "RUNNING", "QUIESCING", "PAUSED_SETTLED", "RETIRED"]
 _TASK_STATUSES = {"ACTIVE", "COMPLETED", "CANCELLED"}
 _EXECUTION_STATUSES = {"IDLE", "RUNNING", "QUIESCING", "PAUSED_SETTLED", "RETIRED"}
+_TERMINAL_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
+_SETTLEMENT_SOURCE = "verified_native_terminal"
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,8 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
         raise _error("running or quiescing execution requires an active packet")
     if snapshot.execution_status == "IDLE" and child_turn is not None:
         raise _error("idle execution cannot retain active execution identity")
+    if snapshot.execution_status == "PAUSED_SETTLED" and packet_id is None:
+        raise _error("settled execution requires the retired packet identity")
     if snapshot.execution_status == "RETIRED" and (
         packet_id is not None
         or child_turn is not None
@@ -668,7 +672,7 @@ def start_execution(
         snapshot = _record_for_session(state, tag)
         if snapshot.logical_task_status != "ACTIVE":
             raise _error("current task cannot start execution")
-        if snapshot.execution_status in {"QUIESCING", "RETIRED"}:
+        if snapshot.execution_status in {"QUIESCING", "PAUSED_SETTLED", "RETIRED"}:
             raise _error("current execution cannot start")
         if snapshot.active_packet_id is None:
             raise _error("execution requires an active packet")
@@ -713,7 +717,11 @@ def accept_result(
             return "STALE"
         if snapshot.active_packet_id is None:
             return "STALE"
-        if snapshot.execution_status in {"QUIESCING", "RETIRED"}:
+        if snapshot.execution_status in {
+            "QUIESCING",
+            "PAUSED_SETTLED",
+            "RETIRED",
+        }:
             return "STALE"
         if snapshot.active_child_turn_id != child_turn:
             return "STALE"
@@ -727,3 +735,86 @@ def accept_result(
         )
         _store_snapshot(state, updated)
         return "CURRENT"
+
+
+def freeze_authority(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    reason: str,
+    logical_cancel: bool = False,
+) -> ControlSnapshot:
+    _text(reason, "reason")
+    if not isinstance(logical_cancel, bool):
+        raise _error("logical_cancel is invalid")
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        if snapshot.logical_task_status != "ACTIVE":
+            raise _error("only an active task may freeze authority")
+        if snapshot.active_packet_id is None:
+            raise _error("authority freeze requires an active packet")
+        if snapshot.execution_status == "RETIRED":
+            raise _error("retired execution cannot freeze authority")
+        if snapshot.execution_status == "PAUSED_SETTLED":
+            raise _error("settled execution cannot freeze authority")
+        if snapshot.execution_status == "QUIESCING":
+            if not logical_cancel:
+                return snapshot
+            updated = replace(snapshot, logical_task_status="CANCELLED")
+            _store_snapshot(state, updated)
+            return updated
+        updated = replace(
+            snapshot,
+            logical_task_status=(
+                "CANCELLED" if logical_cancel else snapshot.logical_task_status
+            ),
+            execution_status="QUIESCING",
+        )
+        _store_snapshot(state, updated)
+        return updated
+
+
+def record_interrupt_ack(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    previous_status: str,
+) -> ControlSnapshot:
+    _text(previous_status, "previous_status")
+    snapshot = read_snapshot(directory, secret, session_id)
+    if snapshot is None:
+        raise _error("no current V3.1 task exists for this session")
+    if snapshot.execution_status != "QUIESCING":
+        raise _error("interrupt acknowledgment requires quiescing execution")
+    return snapshot
+
+
+def observe_settlement(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    source: Literal["verified_native_terminal"],
+    terminal_status: Literal["completed", "failed", "interrupted", "cancelled"],
+    child_turn_id: str | None,
+) -> ControlSnapshot:
+    if source != _SETTLEMENT_SOURCE:
+        raise _error("settlement source is not verified")
+    if terminal_status not in _TERMINAL_STATUSES:
+        raise _error("terminal status is invalid")
+    child_turn = _text(child_turn_id, "child_turn_id", optional=True)
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        if snapshot.execution_status != "QUIESCING":
+            raise _error("settlement requires quiescing execution")
+        if snapshot.active_packet_id is None:
+            raise _error("settlement requires an active packet")
+        if snapshot.active_child_turn_id != child_turn:
+            raise _error("settlement child turn does not match the frozen packet")
+        updated = replace(snapshot, execution_status="PAUSED_SETTLED")
+        _store_snapshot(state, updated)
+        return updated
