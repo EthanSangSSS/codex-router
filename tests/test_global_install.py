@@ -94,6 +94,30 @@ class GlobalInstallTests(unittest.TestCase):
             {"multi_agent": False, "multi_agent_v2": False},
         )
 
+    def test_v31_status_keeps_live_activation_blocked_after_install(self):
+        from codex_router import global_install_adapter as adapter
+
+        root = self.root / "adapter-status"
+        codex_home = root / "codex-home"
+        codex_home.mkdir(parents=True, mode=0o700)
+        state_root = root / "router-runs"
+        binary = root / "codex"
+        binary.write_text("synthetic binary", encoding="utf-8")
+        binary.chmod(0o700)
+        adapter.global_install(
+            codex_home=codex_home,
+            state_root=state_root,
+            codex_binary=binary,
+            defaults=ROLE_CONFIG,
+        )
+
+        status = adapter.global_status(codex_home)
+        self.assertEqual(status.router_design, "v3.1")
+        self.assertEqual(status.live_activation, "BLOCKED_ACCEPTANCE_GATES")
+        self.assertIn("G8_RECOVERY_CORRELATION", status.live_activation_blockers)
+        self.assertNotIn("G9_ECONOMICS", status.live_activation_blockers)
+        self.assertIn("G9_ECONOMICS", status.deferred_acceptance_evidence)
+
     def reset_case(self, name):
         case_root = self.root / name
         self.codex_home = case_root / "codex-home"

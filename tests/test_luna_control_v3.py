@@ -378,6 +378,234 @@ class LunaControlV3Tests(unittest.TestCase):
         self.assertEqual(second.intended_write_scope, ("src/new.py",))
         self.assertEqual(second.explicit_side_effect_authorizations, ())
 
+    def _bind_luna(self, *, agent_id="agent-1"):
+        control.reserve_spawn(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            fork_turns="none",
+        )
+        control.observe_spawn_result(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+        return control.observe_subagent_start(
+            self.directory,
+            self.secret,
+            "root-session",
+            agent_id=agent_id,
+            agent_type="luna_worker",
+        )
+
+    def test_same_native_profile_scope_change_keeps_luna_identity(self):
+        original = self.new_task()
+        bound = self._bind_luna()
+        first = self.begin_packet(packet_id="packet-1", scope=("src/old.py",))
+        second = self.begin_packet(packet_id="packet-2", scope=("src/new.py",))
+
+        self.assertEqual(first.luna_epoch, original.luna_epoch)
+        self.assertEqual(second.luna_epoch, bound.luna_epoch)
+        self.assertEqual(second.luna_agent_id, "agent-1")
+
+    def test_authority_profile_replacement_requires_verified_settlement(self):
+        self.new_task()
+        self.start_packet()
+
+        retire_luna = getattr(control, "retire_luna", None)
+        start_new_task_epoch = getattr(control, "start_new_task_epoch", None)
+        self.assertIsNotNone(retire_luna)
+        self.assertIsNotNone(start_new_task_epoch)
+        with self.assertRaises(RouterStateError):
+            retire_luna(
+                self.directory,
+                self.secret,
+                "root-session",
+                reason="native_authority_profile_change",
+            )
+        self.assertEqual(
+            control.read_snapshot(
+                self.directory, self.secret, "root-session"
+            ).execution_status,
+            "QUIESCING",
+        )
+        with self.assertRaises(RouterStateError):
+            start_new_task_epoch(
+                self.directory,
+                self.secret,
+                "root-session",
+                native_parent_identity="root-parent",
+                native_authority_profile="profile-B",
+            )
+
+        settled = control.observe_settlement(
+            self.directory,
+            self.secret,
+            "root-session",
+            source="verified_native_terminal",
+            terminal_status="interrupted",
+            child_turn_id="turn-1",
+        )
+        self.assertEqual(settled.execution_status, "PAUSED_SETTLED")
+        retired = retire_luna(
+            self.directory,
+            self.secret,
+            "root-session",
+            reason="native_authority_profile_change",
+        )
+        self.assertEqual(retired.execution_status, "RETIRED")
+        replacement = start_new_task_epoch(
+            self.directory,
+            self.secret,
+            "root-session",
+            native_parent_identity="root-parent",
+            native_authority_profile="profile-B",
+        )
+        self.assertNotEqual(replacement.task_epoch, retired.task_epoch)
+        self.assertNotEqual(replacement.luna_epoch, retired.luna_epoch)
+        self.assertEqual(replacement.native_authority_profile, "profile-B")
+        self.assertIsNone(replacement.pending_spawn)
+
+    def test_recovery_rejects_ambiguous_or_untrusted_candidates(self):
+        self.new_task()
+        self._bind_luna()
+        self.begin_packet(packet_id="packet-1", scope=("src/old.py",))
+        self.freeze(reason="profile-reset")
+        control.observe_settlement(
+            self.directory,
+            self.secret,
+            "root-session",
+            source="verified_native_terminal",
+            terminal_status="interrupted",
+            child_turn_id=None,
+        )
+        control.retire_luna(
+            self.directory,
+            self.secret,
+            "root-session",
+            reason="runtime_validated_context_reset",
+        )
+        replacement = control.start_new_task_epoch(
+            self.directory,
+            self.secret,
+            "root-session",
+            native_parent_identity="root-parent",
+            native_authority_profile="profile-A",
+        )
+        control.reserve_spawn(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-new",
+            task_name="luna_worker",
+            fork_turns="none",
+            expected_agent_id="agent-new",
+        )
+        candidate = {
+            "task_epoch": replacement.task_epoch,
+            "luna_epoch": replacement.luna_epoch,
+            "root_session_tag": replacement.root_session_tag,
+            "native_parent_identity": "root-parent",
+            "native_authority_profile": "profile-A",
+            "agent_id": "agent-new",
+            "agent_type": "luna_worker",
+            "task_path": "/root/luna_worker",
+        }
+        reconcile = getattr(control, "reconcile_recovery", None)
+        self.assertIsNotNone(reconcile)
+        with self.assertRaises(RouterStateError):
+            reconcile(
+                self.directory,
+                self.secret,
+                "root-session",
+                candidates=(candidate, dict(candidate)),
+            )
+        for field, value in (
+            ("native_parent_identity", "other-parent"),
+            ("native_authority_profile", "profile-other"),
+            ("agent_id", "agent-other"),
+            ("agent_type", "reviewer"),
+            ("task_epoch", "task-stale"),
+            ("luna_epoch", "luna-stale"),
+        ):
+            invalid = dict(candidate)
+            invalid[field] = value
+            with self.subTest(field=field):
+                with self.assertRaises(RouterStateError):
+                    reconcile(
+                        self.directory,
+                        self.secret,
+                        "root-session",
+                        candidate=invalid,
+                    )
+        with self.assertRaises(RouterStateError):
+            reconcile(
+                self.directory,
+                self.secret,
+                "root-session",
+                candidate={"resumable": True},
+            )
+        bound = reconcile(
+            self.directory,
+            self.secret,
+            "root-session",
+            candidate=candidate,
+        )
+        self.assertEqual(bound.luna_agent_id, "agent-new")
+
+    def test_delayed_old_epoch_start_cannot_bind_new_recovery(self):
+        old = self.new_task()
+        self.begin_packet(packet_id="packet-1", scope=("src/old.py",))
+        self.freeze(reason="replace")
+        control.observe_settlement(
+            self.directory,
+            self.secret,
+            "root-session",
+            source="verified_native_terminal",
+            terminal_status="interrupted",
+            child_turn_id=None,
+        )
+        control.retire_luna(
+            self.directory,
+            self.secret,
+            "root-session",
+            reason="new_task_epoch",
+        )
+        replacement = control.start_new_task_epoch(
+            self.directory,
+            self.secret,
+            "root-session",
+            native_parent_identity="root-parent",
+            native_authority_profile="profile-A",
+        )
+        control.reserve_spawn(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-new",
+            task_name="luna_worker",
+            fork_turns="none",
+        )
+        with self.assertRaises(RouterStateError):
+            control.observe_subagent_start(
+                self.directory,
+                self.secret,
+                "root-session",
+                agent_id="late-old-agent",
+                agent_type="luna_worker",
+                task_epoch=old.task_epoch,
+                luna_epoch=old.luna_epoch,
+            )
+        self.assertIsNone(
+            control.read_snapshot(
+                self.directory, self.secret, "root-session"
+            ).luna_agent_id
+        )
+
     def test_start_execution_records_native_child_turn(self):
         self.new_task()
         self.begin_packet(packet_id="packet-1", scope=("src/math.py",))

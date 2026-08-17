@@ -12,6 +12,7 @@ from unittest.mock import patch
 from codex_router import cli as cli_module
 from codex_router.protocol import web_response_marker
 from codex_router.state import RouterStateError
+from codex_router.types import GlobalStatus
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -441,6 +442,38 @@ class RouterCliTests(unittest.TestCase):
 
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("provider-not-configured", completed.stderr)
+
+    def test_global_status_payload_exposes_blocked_v31_acceptance(self):
+        status = GlobalStatus(
+            state="installed",
+            installation_dir=Path("/tmp/router-installation"),
+            hook_configured=True,
+            agents_managed=True,
+            luna_agent_configured=True,
+            config_valid=True,
+            identity_material_valid=True,
+            hook_trust="requires-user-check",
+            new_session_required=True,
+        )
+        payload = cli_module._global_status_payload(status)
+
+        self.assertEqual(payload["router_design"], "v3.1")
+        self.assertEqual(payload["live_activation"], "BLOCKED_ACCEPTANCE_GATES")
+        self.assertEqual(
+            set(payload["live_activation_blockers"]),
+            {
+                "G1_STRONG_IDENTITY_PROFILE",
+                "G2_SETTLEMENT_OBSERVATION",
+                "G3_ACTOR_ATTRIBUTION",
+                "G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY",
+                "G5_NESTED_CODEX",
+                "G6_NATIVE_AUTHORITY_PROFILE",
+                "G7_A1_CAPABILITY_MATRIX",
+                "G8_RECOVERY_CORRELATION",
+            },
+        )
+        self.assertNotIn("G9_ECONOMICS", payload["live_activation_blockers"])
+        self.assertIn("G9_ECONOMICS", payload["deferred_acceptance_evidence"])
 
 
 if __name__ == "__main__":

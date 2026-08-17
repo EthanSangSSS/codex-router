@@ -54,6 +54,10 @@ class GlobalStatus:
     compatibility: str = "UNKNOWN_REQUIRES_CAPABILITY_CHECK"
     compatibility_reason: str = "effective primary Codex capability is unverified"
     luna_execution_mode: str = "unknown"
+    router_design: str = "v3.1"
+    live_activation: str = "BLOCKED_ACCEPTANCE_GATES"
+    live_activation_blockers: tuple[str, ...] = ()
+    deferred_acceptance_evidence: tuple[str, ...] = ()
 
 
 class StageAdapter(Protocol):

@@ -24,6 +24,20 @@ BASELINE_HOOK_EVENTS = (
 COMPATIBLE = "COMPATIBLE"
 INCOMPATIBLE = "INCOMPATIBLE"
 UNKNOWN = "UNKNOWN_REQUIRES_CAPABILITY_CHECK"
+V31_LIVE_ACTIVATION_BLOCKERS = (
+    "G1_STRONG_IDENTITY_PROFILE",
+    "G2_SETTLEMENT_OBSERVATION",
+    "G3_ACTOR_ATTRIBUTION",
+    "G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY",
+    "G5_NESTED_CODEX",
+    "G6_NATIVE_AUTHORITY_PROFILE",
+    "G7_A1_CAPABILITY_MATRIX",
+    "G8_RECOVERY_CORRELATION",
+)
+V31_DEFERRED_ACCEPTANCE_EVIDENCE = ("G9_ECONOMICS",)
+# Publicly named aliases keep readiness evidence discoverable to callers.
+LIVE_ACTIVATION_BLOCKERS = V31_LIVE_ACTIVATION_BLOCKERS
+DEFERRED_ACCEPTANCE_EVIDENCE = V31_DEFERRED_ACCEPTANCE_EVIDENCE
 AGENTS_BLOCK_V3 = f"""{_core.AGENTS_BEGIN}
 This Codex task is the primary Sol coordinator and final reviewer. Luna is a persistent Luna per task epoch and the single Full Executor for that epoch.
 Honor `[CODEX_ROUTER_POLICY_V1]` Hook context exactly:
@@ -304,6 +318,10 @@ def _enrich(status: GlobalStatus, codex_home: Path | str) -> GlobalStatus:
         compatibility=compatibility,
         compatibility_reason=reason,
         luna_execution_mode=LUNA_EXECUTION_MODE,
+        router_design="v3.1",
+        live_activation="BLOCKED_ACCEPTANCE_GATES",
+        live_activation_blockers=V31_LIVE_ACTIVATION_BLOCKERS,
+        deferred_acceptance_evidence=V31_DEFERRED_ACCEPTANCE_EVIDENCE,
     )
 
 
@@ -451,7 +469,14 @@ def global_uninstall(*args, **kwargs):
 
 def global_self_test(*args, **kwargs):
     with _rendering_adapter():
-        return _core.global_self_test(*args, **kwargs)
+        result = _core.global_self_test(*args, **kwargs)
+    return {
+        **result,
+        "router_design": "v3.1",
+        "live_activation": "BLOCKED_ACCEPTANCE_GATES",
+        "live_activation_blockers": list(V31_LIVE_ACTIVATION_BLOCKERS),
+        "deferred_acceptance_evidence": list(V31_DEFERRED_ACCEPTANCE_EVIDENCE),
+    }
 
 
 _luna_agent_bytes = luna_agent_bytes

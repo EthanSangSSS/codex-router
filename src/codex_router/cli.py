@@ -7,6 +7,8 @@ from typing import Any
 
 from .adapters import adapters_for_mode
 from .global_install_adapter import (
+    DEFERRED_ACCEPTANCE_EVIDENCE,
+    LIVE_ACTIVATION_BLOCKERS,
     global_install,
     global_self_test,
     global_status,
@@ -142,6 +144,8 @@ def _print_json(value: dict[str, Any], *, stream=sys.stdout) -> None:
 
 
 def _global_status_payload(status: GlobalStatus) -> dict[str, Any]:
+    blockers = status.live_activation_blockers or LIVE_ACTIVATION_BLOCKERS
+    deferred = status.deferred_acceptance_evidence or DEFERRED_ACCEPTANCE_EVIDENCE
     return {
         "state": status.state,
         "installation_dir": str(status.installation_dir),
@@ -155,6 +159,10 @@ def _global_status_payload(status: GlobalStatus) -> dict[str, Any]:
         "compatibility": status.compatibility,
         "compatibility_reason": status.compatibility_reason,
         "luna_execution_mode": status.luna_execution_mode,
+        "router_design": status.router_design,
+        "live_activation": status.live_activation,
+        "live_activation_blockers": list(blockers),
+        "deferred_acceptance_evidence": list(deferred),
     }
 
 

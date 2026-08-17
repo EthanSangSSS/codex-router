@@ -33,6 +33,12 @@ _TASK_STATUSES = {"ACTIVE", "COMPLETED", "CANCELLED"}
 _EXECUTION_STATUSES = {"IDLE", "RUNNING", "QUIESCING", "PAUSED_SETTLED", "RETIRED"}
 _TERMINAL_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
 _SETTLEMENT_SOURCE = "verified_native_terminal"
+_RETIRE_REASONS = {
+    "unrecoverable_runtime_identity",
+    "new_task_epoch",
+    "native_authority_profile_change",
+    "runtime_validated_context_reset",
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,7 @@ class SpawnReservation:
     tool_use_id: str
     task_path: str | None
     agent_id: str | None
+    expected_agent_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +212,7 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
         _text(pending.tool_use_id, "tool_use_id")
         pending_path = _text(pending.task_path, "task_path", optional=True)
         _text(pending.agent_id, "agent_id", optional=True)
+        _text(pending.expected_agent_id, "expected_agent_id", optional=True)
         if pending_path is not None and pending_path != "/root/luna_worker":
             raise _error("pending spawn task path is invalid")
         if pending.task_path is not None and pending.agent_id is not None:
@@ -230,12 +238,17 @@ def _snapshot_from_mapping(value: Any) -> ControlSnapshot:
             data[field] = tuple(data[field])
     pending = data.get("pending_spawn")
     if pending is not None:
-        if not isinstance(pending, Mapping) or set(pending) != set(
-            SpawnReservation.__dataclass_fields__
-        ):
+        if not isinstance(pending, Mapping):
+            raise _error("pending spawn schema is invalid")
+        pending = dict(pending)
+        expected_fields = set(SpawnReservation.__dataclass_fields__)
+        legacy_fields = expected_fields - {"expected_agent_id"}
+        if set(pending) == legacy_fields:
+            pending["expected_agent_id"] = None
+        elif set(pending) != expected_fields:
             raise _error("pending spawn schema is invalid")
         try:
-            data["pending_spawn"] = SpawnReservation(**dict(pending))
+            data["pending_spawn"] = SpawnReservation(**pending)
         except TypeError as exc:
             raise _error("pending spawn schema is invalid") from exc
     try:
@@ -468,12 +481,14 @@ def reserve_spawn(
     tool_use_id: str,
     task_name: str,
     fork_turns: str,
+    expected_agent_id: str | None = None,
 ) -> ControlSnapshot:
     if task_name != "luna_worker":
         raise _error("only luna_worker may be reserved")
     if fork_turns != "none":
         raise _error("luna_worker must use fork_turns=none")
     tool_id = _text(tool_use_id, "tool_use_id")
+    expected_id = _text(expected_agent_id, "expected_agent_id", optional=True)
     assert tool_id is not None
     tag = session_tag(secret, session_id)
     with _locked_state(Path(directory), mutate=True) as state:
@@ -494,6 +509,7 @@ def reserve_spawn(
             tool_use_id=tool_id,
             task_path=None,
             agent_id=None,
+            expected_agent_id=expected_id,
         )
         updated = replace(snapshot, pending_spawn=reservation)
         _store_snapshot(state, updated)
@@ -511,6 +527,82 @@ def _reconcile_spawn(
         snapshot,
         luna_agent_id=pending.agent_id,
         luna_task_path=pending.task_path,
+        pending_spawn=None,
+    )
+
+
+def _candidate_field(
+    candidate: Mapping[str, Any], *names: str
+) -> Any:
+    for name in names:
+        if name in candidate:
+            return candidate[name]
+    return None
+
+
+def _bind_recovery_candidate(
+    snapshot: ControlSnapshot, candidate: Mapping[str, Any]
+) -> ControlSnapshot:
+    if snapshot.logical_task_status != "ACTIVE":
+        raise _error("recovery requires an active task epoch")
+    if snapshot.execution_status == "RETIRED":
+        raise _error("retired Luna epoch cannot be recovered")
+    pending = snapshot.pending_spawn
+    if pending is None:
+        raise _error("recovery requires one pending Luna spawn")
+
+    candidate_task_epoch = _candidate_field(candidate, "task_epoch")
+    candidate_luna_epoch = _candidate_field(candidate, "luna_epoch")
+    candidate_root_tag = _candidate_field(candidate, "root_session_tag", "session_tag")
+    candidate_parent = _candidate_field(
+        candidate, "native_parent_identity", "parent_identity", "parent"
+    )
+    candidate_profile = _candidate_field(
+        candidate,
+        "native_authority_profile",
+        "authority_profile_identity",
+        "authority_profile",
+    )
+    candidate_id = _candidate_field(candidate, "agent_id", "id")
+    candidate_role = _candidate_field(candidate, "agent_type", "role")
+    candidate_path = _candidate_field(candidate, "task_path", "task")
+    values = (
+        (candidate_task_epoch, "task_epoch"),
+        (candidate_luna_epoch, "luna_epoch"),
+        (candidate_root_tag, "root_session_tag"),
+        (candidate_parent, "native_parent_identity"),
+        (candidate_profile, "native_authority_profile"),
+        (candidate_id, "agent_id"),
+        (candidate_role, "agent_type"),
+        (candidate_path, "task_path"),
+    )
+    for value, field in values:
+        _text(value, field)
+    if (
+        candidate_task_epoch != snapshot.task_epoch
+        or candidate_luna_epoch != snapshot.luna_epoch
+        or candidate_root_tag != snapshot.root_session_tag
+        or candidate_parent != snapshot.native_parent_identity
+        or candidate_profile != snapshot.native_authority_profile
+    ):
+        raise _error("recovery candidate identity does not match the current epoch")
+    if candidate_role != "luna_worker":
+        raise _error("recovery candidate role is not Luna")
+    if candidate_path != "/root/luna_worker":
+        raise _error("recovery candidate task path is invalid")
+    if pending.agent_id is not None and pending.agent_id != candidate_id:
+        raise _error("recovery candidate conflicts with prior agent observation")
+    if (
+        pending.expected_agent_id is not None
+        and pending.expected_agent_id != candidate_id
+    ):
+        raise _error("recovery candidate agent identity is not authorized")
+    if pending.task_path is not None and pending.task_path != candidate_path:
+        raise _error("recovery candidate conflicts with prior task observation")
+    return replace(
+        snapshot,
+        luna_agent_id=candidate_id,
+        luna_task_path=candidate_path,
         pending_spawn=None,
     )
 
@@ -549,6 +641,11 @@ def observe_subagent_start(
     *,
     agent_id: str,
     agent_type: str,
+    task_epoch: str | None = None,
+    luna_epoch: str | None = None,
+    root_session_tag: str | None = None,
+    native_parent_identity: str | None = None,
+    native_authority_profile: str | None = None,
 ) -> ControlSnapshot:
     child_id = _text(agent_id, "agent_id")
     role = _text(agent_type, "agent_type")
@@ -563,8 +660,59 @@ def observe_subagent_start(
             raise _error("SubagentStart has no matching pending Luna reservation")
         if pending.agent_id is not None and pending.agent_id != child_id:
             raise _error("SubagentStart conflicts with prior observation")
-        pending = replace(pending, agent_id=child_id)
-        updated = _reconcile_spawn(snapshot, pending)
+        if pending.task_path is None:
+            supplied_identity = (
+                (task_epoch, snapshot.task_epoch, "task_epoch"),
+                (luna_epoch, snapshot.luna_epoch, "luna_epoch"),
+                (root_session_tag, snapshot.root_session_tag, "root_session_tag"),
+                (
+                    native_parent_identity,
+                    snapshot.native_parent_identity,
+                    "native_parent_identity",
+                ),
+                (
+                    native_authority_profile,
+                    snapshot.native_authority_profile,
+                    "native_authority_profile",
+                ),
+            )
+            for supplied, expected, field in supplied_identity:
+                if supplied is not None and supplied != expected:
+                    raise _error(f"SubagentStart {field} does not match the pending epoch")
+            if (
+                pending.expected_agent_id is not None
+                and pending.expected_agent_id != child_id
+            ):
+                raise _error("SubagentStart agent identity is not authorized")
+            updated = replace(
+                snapshot,
+                pending_spawn=replace(pending, agent_id=child_id),
+            )
+            _store_snapshot(state, updated)
+            return updated
+        candidate = {
+            "task_epoch": snapshot.task_epoch if task_epoch is None else task_epoch,
+            "luna_epoch": snapshot.luna_epoch if luna_epoch is None else luna_epoch,
+            "root_session_tag": (
+                snapshot.root_session_tag
+                if root_session_tag is None
+                else root_session_tag
+            ),
+            "native_parent_identity": (
+                snapshot.native_parent_identity
+                if native_parent_identity is None
+                else native_parent_identity
+            ),
+            "native_authority_profile": (
+                snapshot.native_authority_profile
+                if native_authority_profile is None
+                else native_authority_profile
+            ),
+            "agent_id": child_id,
+            "agent_type": role,
+            "task_path": pending.task_path or "/root/luna_worker",
+        }
+        updated = _bind_recovery_candidate(snapshot, candidate)
         _store_snapshot(state, updated)
         return updated
 
@@ -575,6 +723,8 @@ def current_luna(directory: Path, secret: bytes, session_id: str) -> ControlSnap
         snapshot is None
         or snapshot.luna_agent_id is None
         or snapshot.luna_task_path is None
+        or snapshot.logical_task_status != "ACTIVE"
+        or snapshot.execution_status == "RETIRED"
     ):
         raise _error("no Luna is currently bound")
     return snapshot
@@ -816,5 +966,224 @@ def observe_settlement(
         if snapshot.active_child_turn_id != child_turn:
             raise _error("settlement child turn does not match the frozen packet")
         updated = replace(snapshot, execution_status="PAUSED_SETTLED")
+        _store_snapshot(state, updated)
+        return updated
+
+
+def _retirement_settlement(
+    snapshot: ControlSnapshot,
+    *,
+    source: str | None,
+    terminal_status: str | None,
+    child_turn_id: str | None,
+) -> ControlSnapshot:
+    if source != _SETTLEMENT_SOURCE:
+        raise _error("Luna retirement requires verified native settlement")
+    if terminal_status not in _TERMINAL_STATUSES:
+        raise _error("terminal status is invalid")
+    child_turn = _text(child_turn_id, "child_turn_id", optional=True)
+    if snapshot.active_packet_id is None:
+        raise _error("settlement requires an active packet")
+    if snapshot.active_child_turn_id != child_turn:
+        raise _error("settlement child turn does not match the frozen packet")
+    return replace(snapshot, execution_status="PAUSED_SETTLED")
+
+
+def retire_luna(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    reason: Literal[
+        "unrecoverable_runtime_identity",
+        "new_task_epoch",
+        "native_authority_profile_change",
+        "runtime_validated_context_reset",
+    ],
+    *,
+    settlement_source: Literal["verified_native_terminal"] | None = None,
+    terminal_status: Literal["completed", "failed", "interrupted", "cancelled"]
+    | None = None,
+    child_turn_id: str | None = None,
+) -> ControlSnapshot:
+    """Retire the current Luna only after a required execution barrier."""
+    if reason not in _RETIRE_REASONS:
+        raise _error("Luna retirement reason is invalid")
+    if (settlement_source is None) != (terminal_status is None):
+        raise _error("retirement settlement evidence is incomplete")
+    if settlement_source is not None and child_turn_id is None:
+        raise _error("retirement settlement child turn is required")
+    tag = session_tag(secret, session_id)
+    initial = read_snapshot(directory, secret, session_id)
+    if initial is not None and initial.execution_status == "RUNNING" and settlement_source is None:
+        # Persist the authority freeze in its own transaction before reporting
+        # that trusted terminal evidence is still required.
+        freeze_authority(
+            directory,
+            secret,
+            session_id,
+            reason=f"retire:{reason}",
+        )
+        raise _error("Luna retirement requires verified native settlement")
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        if snapshot.execution_status == "RETIRED":
+            raise _error("Luna epoch is already retired")
+        if snapshot.pending_spawn is not None:
+            raise _error("cannot retire a Luna with an unresolved spawn")
+
+        if snapshot.execution_status == "RUNNING":
+            frozen = replace(snapshot, execution_status="QUIESCING")
+            if settlement_source is None:
+                _store_snapshot(state, frozen)
+                _write_state_unlocked(Path(directory), state)
+                raise _error("Luna retirement requires verified native settlement")
+            snapshot = _retirement_settlement(
+                frozen,
+                source=settlement_source,
+                terminal_status=terminal_status,
+                child_turn_id=child_turn_id,
+            )
+        elif snapshot.execution_status == "QUIESCING":
+            if settlement_source is None:
+                raise _error("Luna retirement requires verified native settlement")
+            snapshot = _retirement_settlement(
+                snapshot,
+                source=settlement_source,
+                terminal_status=terminal_status,
+                child_turn_id=child_turn_id,
+            )
+        elif snapshot.execution_status == "PAUSED_SETTLED":
+            if settlement_source is not None:
+                raise _error("settlement evidence is not valid for settled execution")
+        elif snapshot.execution_status != "IDLE":
+            raise _error("Luna execution cannot be retired")
+
+        retired = replace(
+            snapshot,
+            logical_task_status="CANCELLED",
+            execution_status="RETIRED",
+            active_packet_id=None,
+            active_child_turn_id=None,
+            intended_write_scope=(),
+            explicit_side_effect_authorizations=(),
+        )
+        _store_snapshot(state, retired)
+        return retired
+
+
+def start_new_task_epoch(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    native_parent_identity: str,
+    native_authority_profile: str,
+    reason: Literal[
+        "unrecoverable_runtime_identity",
+        "new_task_epoch",
+        "native_authority_profile_change",
+        "runtime_validated_context_reset",
+    ] | None = None,
+    tool_use_id: str | None = None,
+    expected_agent_id: str | None = None,
+) -> ControlSnapshot:
+    """Create a fresh authority epoch after the prior epoch is retired."""
+    if reason is not None and reason not in _RETIRE_REASONS:
+        raise _error("Luna replacement reason is invalid")
+    parent = _text(native_parent_identity, "native_parent_identity")
+    profile = _text(native_authority_profile, "native_authority_profile")
+    assert parent is not None and profile is not None
+    tool_id = _text(tool_use_id, "tool_use_id", optional=True)
+    expected_id = _text(expected_agent_id, "expected_agent_id", optional=True)
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        previous = _record_for_session(state, tag)
+        if previous.execution_status != "RETIRED":
+            raise _error("replacement requires a retired Luna epoch")
+        if parent != previous.native_parent_identity:
+            raise _error("replacement parent identity does not match the task epoch")
+        pending = None
+        if tool_id is not None:
+            pending = SpawnReservation(
+                task_epoch=_new_epoch("task"),
+                luna_epoch=_new_epoch("luna"),
+                expected_role="luna_worker",
+                root_session_tag=tag,
+                expected_parent=parent,
+                tool_use_id=tool_id,
+                task_path=None,
+                agent_id=None,
+                expected_agent_id=expected_id,
+            )
+            task_epoch = pending.task_epoch
+            luna_epoch = pending.luna_epoch
+        else:
+            task_epoch = _new_epoch("task")
+            luna_epoch = _new_epoch("luna")
+        replacement = ControlSnapshot(
+            task_epoch=task_epoch,
+            luna_epoch=luna_epoch,
+            root_session_tag=tag,
+            native_parent_identity=parent,
+            native_authority_profile=profile,
+            luna_agent_id=None,
+            luna_task_path=None,
+            packet_generation=0,
+            active_packet_id=None,
+            active_child_turn_id=None,
+            logical_task_status="ACTIVE",
+            execution_status="IDLE",
+            pending_spawn=pending,
+        )
+        _store_snapshot(state, replacement)
+        return replacement
+
+
+def reconcile_recovery(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    candidate: Mapping[str, Any] | None = None,
+    candidates: Any = None,
+    task_epoch: str | None = None,
+    luna_epoch: str | None = None,
+    root_session_tag: str | None = None,
+    native_parent_identity: str | None = None,
+    native_authority_profile: str | None = None,
+    agent_id: str | None = None,
+    agent_type: str | None = None,
+    task_path: str | None = None,
+) -> ControlSnapshot:
+    """Bind exactly one identity-qualified recovery candidate to the pending epoch."""
+    if candidate is not None and candidates is not None:
+        raise _error("recovery candidates are ambiguous")
+    if candidates is not None:
+        if isinstance(candidates, (str, bytes)):
+            raise _error("recovery candidates are invalid")
+        try:
+            values = tuple(candidates)
+        except TypeError as error:
+            raise _error("recovery candidates are invalid") from error
+        if len(values) != 1 or not isinstance(values[0], Mapping):
+            raise _error("recovery candidates are ambiguous")
+        candidate = values[0]
+    elif candidate is None:
+        candidate = {
+            "task_epoch": task_epoch,
+            "luna_epoch": luna_epoch,
+            "root_session_tag": root_session_tag,
+            "native_parent_identity": native_parent_identity,
+            "native_authority_profile": native_authority_profile,
+            "agent_id": agent_id,
+            "agent_type": agent_type,
+            "task_path": task_path,
+        }
+    if not isinstance(candidate, Mapping):
+        raise _error("recovery candidate is invalid")
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        updated = _bind_recovery_candidate(snapshot, candidate)
         _store_snapshot(state, updated)
         return updated
