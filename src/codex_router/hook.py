@@ -25,6 +25,7 @@ _BLOCK_REASON = (
 )
 
 _LUNA_PROCESS_TOOLS = {"Bash", "shell_command"}
+_LUNA_ALLOWED_TOOLS = {"Read", "apply_patch"}
 _LUNA_FORBIDDEN_TOOLS = {
     "spawn_agent",
     "send_input",
@@ -328,6 +329,10 @@ def _handle_luna_pretool(
     if _is_unknown_executor_tool(tool_name):
         return _pretool_output(
             "deny", "Luna hard mode rejects unknown executor surfaces"
+        )
+    if tool_name not in _LUNA_ALLOWED_TOOLS:
+        return _pretool_output(
+            "deny", "Luna hard mode permits only explicitly allowlisted non-process tools"
         )
     return {}
 

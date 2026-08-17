@@ -96,6 +96,37 @@ class LunaHardModeV2Tests(unittest.TestCase):
         self.assertEqual(self._luna_tool("Read", {"path": "README.md"}), {})
         self.assertEqual(self._luna_tool("apply_patch", {"patch": "synthetic"}), {})
 
+    def test_bound_luna_denies_every_non_allowlisted_tool_surface(self):
+        denied_tools = (
+            "unknown_future_tool",
+            "mcp__calendar__create_event",
+            "list_mcp_resources",
+            "list_mcp_resource_templates",
+            "read_mcp_resource",
+            "spawn_agent",
+            "send_message",
+            "followup_task",
+            "wait_agent",
+            "list_agents",
+            "Bash",
+            "shell_command",
+            "exec_command",
+            "write_stdin",
+            "exec",
+            "wait",
+            "request_permissions",
+            "request_plugin_install",
+            "list_available_plugins_to_install",
+            "tool_search",
+            "web_search",
+        )
+        for tool_name in denied_tools:
+            with self.subTest(tool_name=tool_name):
+                output = self._luna_tool(tool_name, {"args": {}})
+                self.assertEqual(
+                    output["hookSpecificOutput"]["permissionDecision"], "deny"
+                )
+
     def test_primary_sol_shell_is_not_restricted_by_luna_hard_mode(self):
         output = handle_hook_event(
             {
@@ -119,9 +150,14 @@ class LunaHardModeV2Tests(unittest.TestCase):
         self.assertFalse(parsed["features"]["shell_tool"])
         self.assertFalse(parsed["features"]["unified_exec"])
         self.assertFalse(parsed["features"]["code_mode"]["enabled"])
-        self.assertNotIn("multi_agent_v2", parsed["features"])
-        self.assertNotIn("code_mode_only", parsed["features"])
-        self.assertNotIn("request_permissions_tool", parsed["features"])
+        self.assertFalse(parsed["features"]["multi_agent_v2"])
+        self.assertFalse(parsed["features"]["code_mode_only"])
+        self.assertFalse(parsed["features"]["request_permissions_tool"])
+        self.assertFalse(parsed["features"]["apps"])
+        self.assertFalse(parsed["features"]["enable_mcp_apps"])
+        self.assertFalse(parsed["features"]["plugins"])
+        self.assertFalse(parsed["features"]["tool_suggest"])
+        self.assertEqual(parsed["web_search"], "disabled")
 
 
 if __name__ == "__main__":

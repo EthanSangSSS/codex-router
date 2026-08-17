@@ -75,12 +75,20 @@ def luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
         for key, value in values.items()
     )
     rendered += (
+        "web_search = \"disabled\"\n"
         "\n[agents]\n"
         "enabled = false\n"
         "\n[features]\n"
         "multi_agent = false\n"
+        "multi_agent_v2 = false\n"
         "shell_tool = false\n"
         "unified_exec = false\n"
+        "code_mode_only = false\n"
+        "request_permissions_tool = false\n"
+        "apps = false\n"
+        "enable_mcp_apps = false\n"
+        "plugins = false\n"
+        "tool_suggest = false\n"
         "\n[features.code_mode]\n"
         "enabled = false\n"
     )
@@ -91,11 +99,19 @@ def luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
         raise _core._error("conflict", "generated Luna agent configuration is invalid") from error
     expected = {
         **values,
+        "web_search": "disabled",
         "agents": {"enabled": False},
         "features": {
             "multi_agent": False,
+            "multi_agent_v2": False,
             "shell_tool": False,
             "unified_exec": False,
+            "code_mode_only": False,
+            "request_permissions_tool": False,
+            "apps": False,
+            "enable_mcp_apps": False,
+            "plugins": False,
+            "tool_suggest": False,
             "code_mode": {"enabled": False},
         },
     }
