@@ -74,44 +74,60 @@ def validate_packet_authorizations(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _surface_hard_ready(capability: A1SurfaceCapability) -> bool:
+    return (
+        capability.enforcement == "PROVEN_PRE_ACTION"
+        and isinstance(capability.gate, str)
+        and bool(capability.gate.strip())
+        and _actor_attribution_is_proven(capability.actor_attribution)
+    )
+
+
 def hard_claim_ready(
     matrix: Iterable[A1SurfaceCapability], category: str
 ) -> bool:
-    """Return true only for a category with a proven gate and actor identity."""
+    """Require every enabled surface in a category to have proven pre-action control."""
     if category not in A1_CATEGORIES:
         return False
     try:
-        capabilities = iter(matrix)
+        capabilities = tuple(matrix)
     except TypeError:
         return False
-    for capability in capabilities:
-        if not isinstance(capability, A1SurfaceCapability):
-            continue
-        if capability.category != category:
-            continue
-        if capability.enforcement not in _ENFORCEMENTS:
-            continue
-        if capability.enforcement != "PROVEN_PRE_ACTION":
-            continue
-        if not isinstance(capability.gate, str) or not capability.gate.strip():
-            continue
-        if not _actor_attribution_is_proven(capability.actor_attribution):
-            continue
-        return True
-    return False
+    if any(not isinstance(item, A1SurfaceCapability) for item in capabilities):
+        return False
+
+    enabled = tuple(
+        capability
+        for capability in capabilities
+        if capability.category == category
+        and capability.enforcement != "BASELINE_WITHHELD"
+    )
+    if not enabled:
+        return False
+    if any(capability.enforcement not in _ENFORCEMENTS for capability in enabled):
+        return False
+    return all(_surface_hard_ready(capability) for capability in enabled)
 
 
 def permission_request_gate_ready(
     matrix: Iterable[A1SurfaceCapability],
 ) -> bool:
-    """Check whether a proven A1 surface specifically requires PermissionRequest."""
+    """Require category-wide hard readiness before enabling PermissionRequest."""
     try:
         capabilities = tuple(matrix)
     except TypeError:
         return False
-    return any(
-        capability.gate == "PermissionRequest"
-        and hard_claim_ready((capability,), capability.category)
-        for capability in capabilities
-        if isinstance(capability, A1SurfaceCapability)
-    )
+    if any(not isinstance(item, A1SurfaceCapability) for item in capabilities):
+        return False
+
+    for category in A1_CATEGORIES:
+        if not hard_claim_ready(capabilities, category):
+            continue
+        if any(
+            capability.category == category
+            and capability.enforcement == "PROVEN_PRE_ACTION"
+            and capability.gate == "PermissionRequest"
+            for capability in capabilities
+        ):
+            return True
+    return False
