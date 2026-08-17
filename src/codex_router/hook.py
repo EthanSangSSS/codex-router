@@ -327,7 +327,7 @@ def _admit_k1_packet(
     if not isinstance(message, str) or not message.startswith(
         "[CODEX_ROUTER_PACKET_V3_1] "
     ):
-        return
+        raise _invalid("Router parent work message must use a K1 packet")
     try:
         packet = parse_luna_packet(message)
     except ProtocolError as error:

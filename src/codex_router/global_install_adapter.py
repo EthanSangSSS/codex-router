@@ -136,24 +136,25 @@ def _capability_matrix_from_record(
 ) -> tuple[_a1.A1SurfaceCapability, ...]:
     if value is None:
         return ()
-    if isinstance(value, Mapping):
-        record_type = value.get("record_type")
-        runtime = value.get("runtime")
-        exact_runtime = (
-            value.get("exact_runtime") is True
-            or record_type in {"exact_runtime", "EXACT_RUNTIME"}
-            or runtime in {"exact", "exact_runtime", "EXACT_RUNTIME"}
-        )
-        if not exact_runtime:
-            return ()
-        value = next(
-            (
-                value.get(name)
-                for name in ("capabilities", "a1_matrix", "surfaces", "matrix")
-                if name in value
-            ),
-            (),
-        )
+    if not isinstance(value, Mapping):
+        return ()
+    record_type = value.get("record_type")
+    runtime = value.get("runtime")
+    exact_runtime = (
+        value.get("exact_runtime") is True
+        or record_type in {"exact_runtime", "EXACT_RUNTIME"}
+        or runtime in {"exact", "exact_runtime", "EXACT_RUNTIME"}
+    )
+    if not exact_runtime:
+        return ()
+    value = next(
+        (
+            value.get(name)
+            for name in ("capabilities", "a1_matrix", "surfaces", "matrix")
+            if name in value
+        ),
+        (),
+    )
     if isinstance(value, (str, bytes)):
         raise _core._error("conflict", "A1 capability matrix is invalid")
     try:
