@@ -161,11 +161,24 @@ class A1CapabilityV3Tests(unittest.TestCase):
             gate="PermissionRequest",
             actor_attribution="PROVEN",
         )
-        gated = json.loads(
+        raw_tuple = json.loads(
             adapter.install_hook_v3(
                 None,
                 handler,
                 capability_matrix=(proven,),
+            ).decode("utf-8")
+        )["hooks"]
+        self.assertEqual(set(raw_tuple), set(adapter.BASELINE_HOOK_EVENTS))
+
+        exact_runtime_record = {
+            "record_type": "exact_runtime",
+            "capabilities": (proven,),
+        }
+        gated = json.loads(
+            adapter.install_hook_v3(
+                None,
+                handler,
+                runtime_record=exact_runtime_record,
             ).decode("utf-8")
         )["hooks"]
         self.assertEqual(
@@ -180,13 +193,17 @@ class A1CapabilityV3Tests(unittest.TestCase):
             gate="PermissionRequest",
             actor_attribution="PROVEN",
         )
+        cooperative_record = {
+            "record_type": "exact_runtime",
+            "capabilities": (withheld,),
+        }
         self.assertEqual(
             set(
                 json.loads(
                     adapter.install_hook_v3(
                         None,
                         handler,
-                        capability_matrix=(withheld,),
+                        runtime_record=cooperative_record,
                     ).decode("utf-8")
                 )["hooks"]
             ),

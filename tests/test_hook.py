@@ -310,9 +310,7 @@ class HookNativeDelegationTests(HookTestCase):
             actor_id="root-parent",
             actor_type="primary_sol",
         )
-        self.assertEqual(
-            handle_hook_event(spawn, self.installation_dir), {}
-        )
+        self.assertEqual(handle_hook_event(spawn, self.installation_dir), {})
         post_spawn = {
             "hook_event_name": "PostToolUse",
             "session_id": "session-parent",
@@ -345,7 +343,10 @@ class HookNativeDelegationTests(HookTestCase):
             actor_id="root-parent",
             actor_type="primary_sol",
         )
-        self.assertEqual(handle_hook_event(target_event, self.installation_dir), {})
+        target_output = handle_hook_event(target_event, self.installation_dir)
+        self.assertEqual(
+            target_output["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
 
         packet_message = build_luna_packet(
             packet_id="packet-1",

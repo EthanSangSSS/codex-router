@@ -333,7 +333,7 @@ class LunaControlV3Tests(unittest.TestCase):
             target="agent-1",
         )
 
-    def test_delayed_start_cannot_bind_after_new_task_epoch(self):
+    def test_new_task_cannot_overwrite_pending_epoch(self):
         first = self.new_task()
         control.reserve_spawn(
             self.directory,
@@ -343,22 +343,18 @@ class LunaControlV3Tests(unittest.TestCase):
             task_name="luna_worker",
             fork_turns="none",
         )
-        second = control.new_task(
-            directory=self.directory,
-            secret=self.secret,
-            session_id="root-session",
-            native_parent_identity="root-parent",
-            native_authority_profile="profile-A",
-        )
-        self.assertNotEqual(first.task_epoch, second.task_epoch)
+        before = control.read_snapshot(self.directory, self.secret, "root-session")
         with self.assertRaises(RouterStateError):
-            control.observe_subagent_start(
-                self.directory,
-                self.secret,
-                "root-session",
-                agent_id="late-agent",
-                agent_type="luna_worker",
+            control.new_task(
+                directory=self.directory,
+                secret=self.secret,
+                session_id="root-session",
+                native_parent_identity="root-parent",
+                native_authority_profile="profile-A",
             )
+        after = control.read_snapshot(self.directory, self.secret, "root-session")
+        self.assertEqual(after, before)
+        self.assertEqual(after.task_epoch, first.task_epoch)
 
     def test_packet_generation_replaces_scope_and_a1_authorizations(self):
         original = self.new_task()
@@ -413,13 +409,14 @@ class LunaControlV3Tests(unittest.TestCase):
         self.assertEqual(second.luna_agent_id, "agent-1")
 
     def test_authority_profile_replacement_requires_verified_settlement(self):
-        self.new_task()
+        original = self.new_task()
+        self._bind_luna()
         self.start_packet()
 
         retire_luna = getattr(control, "retire_luna", None)
-        start_new_task_epoch = getattr(control, "start_new_task_epoch", None)
+        replace_luna_epoch = getattr(control, "replace_luna_epoch", None)
         self.assertIsNotNone(retire_luna)
-        self.assertIsNotNone(start_new_task_epoch)
+        self.assertIsNotNone(replace_luna_epoch)
         with self.assertRaises(RouterStateError):
             retire_luna(
                 self.directory,
@@ -434,12 +431,13 @@ class LunaControlV3Tests(unittest.TestCase):
             "QUIESCING",
         )
         with self.assertRaises(RouterStateError):
-            start_new_task_epoch(
+            replace_luna_epoch(
                 self.directory,
                 self.secret,
                 "root-session",
                 native_parent_identity="root-parent",
                 native_authority_profile="profile-B",
+                reason="native_authority_profile_change",
             )
 
         settled = control.observe_settlement(
@@ -457,21 +455,23 @@ class LunaControlV3Tests(unittest.TestCase):
             "root-session",
             reason="native_authority_profile_change",
         )
+        self.assertEqual(retired.logical_task_status, "ACTIVE")
         self.assertEqual(retired.execution_status, "RETIRED")
-        replacement = start_new_task_epoch(
+        replacement = replace_luna_epoch(
             self.directory,
             self.secret,
             "root-session",
             native_parent_identity="root-parent",
             native_authority_profile="profile-B",
+            reason="native_authority_profile_change",
         )
-        self.assertNotEqual(replacement.task_epoch, retired.task_epoch)
+        self.assertEqual(replacement.task_epoch, original.task_epoch)
         self.assertNotEqual(replacement.luna_epoch, retired.luna_epoch)
         self.assertEqual(replacement.native_authority_profile, "profile-B")
         self.assertIsNone(replacement.pending_spawn)
 
     def test_recovery_rejects_ambiguous_or_untrusted_candidates(self):
-        self.new_task()
+        original = self.new_task()
         self._bind_luna()
         self.begin_packet(packet_id="packet-1", scope=("src/old.py",))
         self.freeze(reason="profile-reset")
@@ -489,13 +489,15 @@ class LunaControlV3Tests(unittest.TestCase):
             "root-session",
             reason="runtime_validated_context_reset",
         )
-        replacement = control.start_new_task_epoch(
+        replacement = control.replace_luna_epoch(
             self.directory,
             self.secret,
             "root-session",
             native_parent_identity="root-parent",
             native_authority_profile="profile-A",
+            reason="runtime_validated_context_reset",
         )
+        self.assertEqual(replacement.task_epoch, original.task_epoch)
         control.reserve_spawn(
             self.directory,
             self.secret,
@@ -605,6 +607,7 @@ class LunaControlV3Tests(unittest.TestCase):
                 self.directory, self.secret, "root-session"
             ).luna_agent_id
         )
+        self.assertNotEqual(replacement.task_epoch, old.task_epoch)
 
     def test_start_execution_records_native_child_turn(self):
         self.new_task()
