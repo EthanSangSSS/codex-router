@@ -79,6 +79,70 @@ class HookTestCase(unittest.TestCase):
 
         return handle_user_prompt(event, self.installation_dir)
 
+    def pretool_event(
+        self,
+        *,
+        tool_name,
+        session="session-a",
+        turn="turn-a",
+        tool_use_id="tool-1",
+        tool_input=None,
+        actor_id=None,
+        actor_type=None,
+        agent_id=None,
+        agent_type=None,
+    ):
+        event = {
+            "hook_event_name": "PreToolUse",
+            "session_id": session,
+            "turn_id": turn,
+            "tool_name": tool_name,
+            "tool_use_id": tool_use_id,
+            "tool_input": {} if tool_input is None else tool_input,
+        }
+        for name, value in (
+            ("actor_id", actor_id),
+            ("actor_type", actor_type),
+            ("agent_id", agent_id),
+            ("agent_type", agent_type),
+        ):
+            if value is not None:
+                event[name] = value
+        return event
+
+    def bind_luna(self, *, session="session-a", agent_id="agent-1"):
+        from codex_router import luna_control as control
+
+        control.new_task(
+            self.installation_dir,
+            self.secret,
+            session,
+            native_parent_identity="root-parent",
+            native_authority_profile="profile-A",
+        )
+        control.reserve_spawn(
+            self.installation_dir,
+            self.secret,
+            session,
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            fork_turns="none",
+        )
+        control.observe_spawn_result(
+            self.installation_dir,
+            self.secret,
+            session,
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+        return control.observe_subagent_start(
+            self.installation_dir,
+            self.secret,
+            session,
+            agent_id=agent_id,
+            agent_type="luna_worker",
+        )
+
     def parse_context(self, output):
         context = output["hookSpecificOutput"]["additionalContext"]
         prefix = "[CODEX_ROUTER_POLICY_V1] "
@@ -139,39 +203,206 @@ class HookSchemaTests(HookTestCase):
 
 
 class HookNativeDelegationTests(HookTestCase):
-    def test_routed_events_are_stateless_native_luna_contexts(self):
+    def test_routed_events_use_persistent_native_luna_context(self):
+        from codex_router import luna_control as control
+
         event = self.event()
 
         first = self.parse_context(self.handle(event))
+        first_snapshot = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
+        )
         repeated = self.parse_context(self.handle(event))
         different = self.parse_context(self.handle(self.event(turn="turn-b")))
+        final_snapshot = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
+        )
 
         self.assertEqual(first, repeated)
         self.assertEqual(first, different)
+        self.assertIsNotNone(first_snapshot)
+        self.assertIsNotNone(final_snapshot)
+        self.assertEqual(first_snapshot.task_epoch, final_snapshot.task_epoch)
+        self.assertEqual(first_snapshot.luna_epoch, final_snapshot.luna_epoch)
         self.assertEqual(
             first,
             {
                 "protocol": "codex-router/hook-context/v2",
                 "decision": "route",
                 "reason": "substantive_request",
-                "workflow": "native_luna_worker",
+                "workflow": "persistent_native_luna",
                 "sol_role": "plan_review_final_authority",
                 "luna_role": "default_execution",
                 "delegation_mode": "sequential_work_packets",
                 "luna_agent": "luna_worker",
                 "luna_model": "gpt-5.6-luna",
                 "luna_reasoning": "max",
-                "luna_lifecycle": "persistent_while_root_turn_active",
-                "parent_terminal_policy": "revoke_only_security_boundary",
+                "luna_lifecycle": "persistent_task_epoch",
+                "parent_terminal_policy": "hard_authority_pause",
                 "capacity_failure_policy": "return_to_sol",
                 "luna_descendant_policy": "forbidden",
                 "luna_codex_runtime_policy": "forbidden",
                 "interactive_blocker_policy": "return_to_sol_or_user",
                 "initial_context_mode": "packet_only",
                 "web_mode": "manual_operator",
+                "pause_semantics": "hard_authority_pause",
+                "sol_supervision": "event_driven",
+                "luna_execution_mode": "full_executor",
             },
         )
         self.assertFalse(self.state_root.exists())
+
+    def test_bound_luna_is_a_full_executor_except_for_lifecycle_tools(self):
+        from codex_router.hook import handle_hook_event
+
+        self.bind_luna()
+        ordinary_tools = (
+            "Read",
+            "apply_patch",
+            "Bash",
+            "shell_command",
+            "exec_command",
+            "mcp__filesystem__read",
+        )
+        for tool_name in ordinary_tools:
+            with self.subTest(tool_name=tool_name):
+                output = handle_hook_event(
+                    self.pretool_event(
+                        tool_name=tool_name,
+                        agent_id="agent-1",
+                        agent_type="luna_worker",
+                    ),
+                    self.installation_dir,
+                )
+                self.assertEqual(output, {})
+
+        for tool_name in ("spawn_agent", "send_message", "resume_agent"):
+            with self.subTest(tool_name=tool_name):
+                output = handle_hook_event(
+                    self.pretool_event(
+                        tool_name=tool_name,
+                        agent_id="agent-1",
+                        agent_type="luna_worker",
+                    ),
+                    self.installation_dir,
+                )
+                self.assertEqual(
+                    output["hookSpecificOutput"]["permissionDecision"], "deny"
+                )
+
+    def test_parent_lifecycle_requires_explicit_actor_and_exact_control_fields(self):
+        from codex_router import luna_control as control
+        from codex_router.hook import handle_hook_event
+        from codex_router.protocol import build_luna_packet
+
+        control.new_task(
+            self.installation_dir,
+            self.secret,
+            "session-parent",
+            native_parent_identity="root-parent",
+            native_authority_profile="profile-A",
+        )
+        spawn = self.pretool_event(
+            tool_name="spawn_agent",
+            session="session-parent",
+            tool_use_id="spawn-parent",
+            tool_input={"task_name": "luna_worker", "fork_turns": "none"},
+            actor_id="root-parent",
+            actor_type="primary_sol",
+        )
+        self.assertEqual(
+            handle_hook_event(spawn, self.installation_dir), {}
+        )
+        post_spawn = {
+            "hook_event_name": "PostToolUse",
+            "session_id": "session-parent",
+            "turn_id": "turn-a",
+            "tool_name": "spawn_agent",
+            "tool_use_id": "spawn-parent",
+            "tool_response": {"task_name": "/root/luna_worker"},
+            "actor_id": "root-parent",
+            "actor_type": "primary_sol",
+        }
+        self.assertEqual(
+            handle_hook_event(post_spawn, self.installation_dir),
+            {"hookSpecificOutput": {"hookEventName": "PostToolUse"}},
+        )
+        start = {
+            "hook_event_name": "SubagentStart",
+            "session_id": "session-parent",
+            "turn_id": "turn-a",
+            "agent_id": "agent-parent-bound",
+            "agent_type": "luna_worker",
+        }
+        self.assertEqual(
+            handle_hook_event(start, self.installation_dir),
+            {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
+        )
+        target_event = self.pretool_event(
+            tool_name="send_message",
+            session="session-parent",
+            tool_input={"target": "/root/luna_worker", "message": "continue"},
+            actor_id="root-parent",
+            actor_type="primary_sol",
+        )
+        self.assertEqual(handle_hook_event(target_event, self.installation_dir), {})
+
+        packet_message = build_luna_packet(
+            packet_id="packet-1",
+            generation=1,
+            objective="continue bounded work",
+            working_directory=str(self.root),
+            intended_write_scope=("src/example.py",),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("focused tests pass",),
+            stop_conditions=("scope expansion required",),
+        )
+        packet_event = self.pretool_event(
+            tool_name="send_message",
+            session="session-parent",
+            tool_use_id="packet-message",
+            tool_input={
+                "target": "/root/luna_worker",
+                "message": packet_message,
+            },
+            actor_id="root-parent",
+            actor_type="primary_sol",
+        )
+        self.assertEqual(handle_hook_event(packet_event, self.installation_dir), {})
+        packet_snapshot = control.read_snapshot(
+            self.installation_dir, self.secret, "session-parent"
+        )
+        self.assertEqual(packet_snapshot.active_packet_id, "packet-1")
+        self.assertEqual(packet_snapshot.packet_generation, 1)
+
+        for missing_actor in (
+            {},
+            {"actor_id": "root-parent"},
+            {"actor_type": "primary_sol"},
+            {"actor_id": "unknown", "actor_type": "ambiguous"},
+        ):
+            with self.subTest(missing_actor=missing_actor):
+                event = self.pretool_event(
+                    tool_name="send_message",
+                    session="session-parent",
+                    tool_input={"target": "/root/luna_worker"},
+                    **missing_actor,
+                )
+                output = handle_hook_event(event, self.installation_dir)
+                self.assertEqual(
+                    output["hookSpecificOutput"]["permissionDecision"], "deny"
+                )
+
+        unknown_lifecycle = self.pretool_event(
+            tool_name="agent_restart",
+            session="session-parent",
+            actor_id="root-parent",
+            actor_type="primary_sol",
+        )
+        output = handle_hook_event(unknown_lifecycle, self.installation_dir)
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
 
     def test_concurrent_routed_events_do_not_allocate_runs(self):
         event = self.event()

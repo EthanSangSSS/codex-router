@@ -80,5 +80,23 @@ class RouterV3SettlementGateTests(unittest.TestCase):
         self.assertEqual(current.execution_status, "QUIESCING")
 
 
+class RouterV3HookBridgeTests(unittest.TestCase):
+    def test_hook_bridge_no_longer_imports_legacy_native_lifecycle(self):
+        hook_source = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "codex_router"
+            / "hook.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("native_lifecycle", hook_source)
+
+    def test_cli_keeps_legacy_stop_and_permission_entry_points_callable(self):
+        from codex_router.cli import parser
+
+        subcommands = parser()._subparsers._group_actions[0].choices
+        self.assertIn("hook-stop", subcommands)
+        self.assertIn("hook-permission-request", subcommands)
+
+
 if __name__ == "__main__":
     unittest.main()
