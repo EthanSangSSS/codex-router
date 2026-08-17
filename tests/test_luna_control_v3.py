@@ -117,6 +117,209 @@ class LunaControlV3Tests(unittest.TestCase):
             self.new_task()
         self.assertGreaterEqual(len(calls), 2)
 
+    def test_spawn_binds_when_result_arrives_before_subagent_start(self):
+        original = self.new_task()
+        reserved = control.reserve_spawn(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            fork_turns="none",
+        )
+        self.assertIsNotNone(reserved.pending_spawn)
+        observed = control.observe_spawn_result(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+        self.assertIsNone(observed.luna_agent_id)
+        bound = control.observe_subagent_start(
+            self.directory,
+            self.secret,
+            "root-session",
+            agent_id="agent-1",
+            agent_type="luna_worker",
+        )
+        self.assertEqual(bound.task_epoch, original.task_epoch)
+        self.assertEqual(bound.luna_agent_id, "agent-1")
+        self.assertEqual(bound.luna_task_path, "/root/luna_worker")
+        self.assertIsNone(bound.pending_spawn)
+
+    def test_spawn_binds_when_subagent_start_arrives_before_result(self):
+        self.new_task()
+        control.reserve_spawn(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            fork_turns="none",
+        )
+        observed = control.observe_subagent_start(
+            self.directory,
+            self.secret,
+            "root-session",
+            agent_id="agent-1",
+            agent_type="luna_worker",
+        )
+        self.assertIsNone(observed.luna_agent_id)
+        bound = control.observe_spawn_result(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+        self.assertEqual(bound.luna_agent_id, "agent-1")
+        self.assertEqual(bound.luna_task_path, "/root/luna_worker")
+        self.assertIsNone(bound.pending_spawn)
+
+    def test_spawn_reservation_fails_closed_on_ambiguity_or_mismatch(self):
+        self.new_task()
+        control.reserve_spawn(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            fork_turns="none",
+        )
+        failing_calls = (
+            lambda: control.reserve_spawn(
+                self.directory,
+                self.secret,
+                "root-session",
+                tool_use_id="spawn-2",
+                task_name="luna_worker",
+                fork_turns="none",
+            ),
+            lambda: control.observe_spawn_result(
+                self.directory,
+                self.secret,
+                "root-session",
+                tool_use_id="other",
+                task_path="/root/luna_worker",
+            ),
+            lambda: control.observe_spawn_result(
+                self.directory,
+                self.secret,
+                "root-session",
+                tool_use_id="spawn-1",
+                task_path="/root/other",
+            ),
+            lambda: control.observe_subagent_start(
+                self.directory,
+                self.secret,
+                "root-session",
+                agent_id="agent-1",
+                agent_type="reviewer",
+            ),
+        )
+        for call in failing_calls:
+            with self.subTest(call=call):
+                with self.assertRaises(RouterStateError):
+                    call()
+
+    def test_spawn_requires_packet_only_context(self):
+        self.new_task()
+        for task_name, fork_turns in (
+            ("other", "none"),
+            ("luna_worker", "all"),
+            ("luna_worker", ""),
+        ):
+            with self.subTest(task_name=task_name, fork_turns=fork_turns):
+                with self.assertRaises(RouterStateError):
+                    control.reserve_spawn(
+                        self.directory,
+                        self.secret,
+                        "root-session",
+                        tool_use_id="spawn-x",
+                        task_name=task_name,
+                        fork_turns=fork_turns,
+                    )
+
+    def test_bound_luna_is_persistent_and_prevents_replacement_spawn(self):
+        original = self.new_task()
+        control.reserve_spawn(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            fork_turns="none",
+        )
+        control.observe_spawn_result(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+        bound = control.observe_subagent_start(
+            self.directory,
+            self.secret,
+            "root-session",
+            agent_id="agent-1",
+            agent_type="luna_worker",
+        )
+        self.assertEqual(
+            control.current_luna(self.directory, self.secret, "root-session"), bound
+        )
+        self.assertEqual(bound.task_epoch, original.task_epoch)
+        with self.assertRaises(RouterStateError):
+            control.reserve_spawn(
+                self.directory,
+                self.secret,
+                "root-session",
+                tool_use_id="spawn-2",
+                task_name="luna_worker",
+                fork_turns="none",
+            )
+        control.authorize_parent_target(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_name="followup_task",
+            target="/root/luna_worker",
+        )
+        control.authorize_parent_target(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_name="send_message",
+            target="agent-1",
+        )
+
+    def test_delayed_start_cannot_bind_after_new_task_epoch(self):
+        first = self.new_task()
+        control.reserve_spawn(
+            self.directory,
+            self.secret,
+            "root-session",
+            tool_use_id="spawn-old",
+            task_name="luna_worker",
+            fork_turns="none",
+        )
+        second = control.new_task(
+            directory=self.directory,
+            secret=self.secret,
+            session_id="root-session",
+            native_parent_identity="root-parent",
+            native_authority_profile="profile-A",
+        )
+        self.assertNotEqual(first.task_epoch, second.task_epoch)
+        with self.assertRaises(RouterStateError):
+            control.observe_subagent_start(
+                self.directory,
+                self.secret,
+                "root-session",
+                agent_id="late-agent",
+                agent_type="luna_worker",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
