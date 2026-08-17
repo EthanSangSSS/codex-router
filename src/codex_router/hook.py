@@ -8,6 +8,7 @@ import stat
 from typing import Any, Mapping
 
 from . import luna_control
+from .a1 import validate_packet_authorizations
 from .policy import classify_prompt
 from .protocol import ProtocolError, canonical_json_bytes, parse_luna_packet
 from .state import RouterStateError
@@ -331,6 +332,12 @@ def _admit_k1_packet(
         packet = parse_luna_packet(message)
     except ProtocolError as error:
         raise _invalid("tool_input.message is not a valid K1 packet") from error
+    try:
+        validate_packet_authorizations(
+            packet["explicit_side_effect_authorizations"]
+        )
+    except ValueError as error:
+        raise _invalid("tool_input.message contains an unknown A1 category") from error
     snapshot = luna_control.read_snapshot(installation_dir, secret, session_id)
     if snapshot is None:
         raise _invalid("K1 packet admission requires a current task epoch")
@@ -437,6 +444,19 @@ def _spawn_task_path(tool_response: Any) -> str:
     return _mapping_text(tool_response, "task_name")
 
 
+def _event_a1_category(event: Mapping[str, Any]) -> str | None:
+    value = event.get("a1_category")
+    tool_input = event.get("tool_input")
+    if value is None and isinstance(tool_input, Mapping):
+        value = tool_input.get("a1_category")
+    if value is None:
+        return None
+    try:
+        return validate_packet_authorizations((value,))[0]
+    except (IndexError, TypeError, ValueError) as error:
+        raise _invalid("A1 category is invalid") from error
+
+
 def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[str, Any]:
     name = event.get("hook_event_name") if isinstance(event, Mapping) else None
     if name == "UserPromptSubmit":
@@ -502,6 +522,7 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
 
         if name == "PermissionRequest":
             _event_base(event, name, ("session_id", "turn_id", "tool_name"))
+            _event_a1_category(event)
             if _is_bound_luna(event, Path(installation_dir), secret):
                 return _permission_deny("BLOCKED_USER_INTERACTION_REQUIRED")
             _agent_id, agent_type = _child_identity(event)

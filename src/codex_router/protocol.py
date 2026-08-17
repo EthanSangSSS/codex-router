@@ -6,6 +6,8 @@ import re
 from typing import Any, Iterable, Mapping
 import unicodedata
 
+from .a1 import validate_packet_authorizations
+
 
 PROTOCOL = "codex-router/v1"
 MARKER_PREFIX = "[CODEX_ROUTER_V1]\n"
@@ -105,10 +107,14 @@ def _validate_luna_packet(packet: Any) -> dict[str, Any]:
         "intended_write_scope",
         unique=True,
     )
-    explicit_side_effect_authorizations = _luna_text_list(
-        packet.get("explicit_side_effect_authorizations"),
-        "explicit_side_effect_authorizations",
-    )
+    try:
+        explicit_side_effect_authorizations = list(
+            validate_packet_authorizations(
+                packet.get("explicit_side_effect_authorizations")
+            )
+        )
+    except ValueError as error:
+        raise ProtocolError(str(error)) from error
     success_criteria = _luna_text_list(packet.get("success_criteria"), "success_criteria")
     stop_conditions = _luna_text_list(packet.get("stop_conditions"), "stop_conditions")
     return {

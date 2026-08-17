@@ -7,8 +7,9 @@ import json
 from pathlib import Path
 import shlex
 import tomllib
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
+from . import a1 as _a1
 from . import global_install as _core
 from .types import GlobalStatus
 
@@ -115,8 +116,79 @@ def luna_agent_matches(content: bytes | None, role: Mapping[str, Any]) -> bool:
     return parsed == expected
 
 
-def install_hook_v3(original: bytes | None, handler: Mapping[str, Any] | None = None) -> bytes:
+def _capability_matrix_from_record(
+    value: Any,
+) -> tuple[_a1.A1SurfaceCapability, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, Mapping):
+        record_type = value.get("record_type")
+        runtime = value.get("runtime")
+        exact_runtime = (
+            value.get("exact_runtime") is True
+            or record_type in {"exact_runtime", "EXACT_RUNTIME"}
+            or runtime in {"exact", "exact_runtime", "EXACT_RUNTIME"}
+        )
+        if not exact_runtime:
+            return ()
+        value = next(
+            (
+                value.get(name)
+                for name in ("capabilities", "a1_matrix", "surfaces", "matrix")
+                if name in value
+            ),
+            (),
+        )
+    if isinstance(value, (str, bytes)):
+        raise _core._error("conflict", "A1 capability matrix is invalid")
+    try:
+        matrix = tuple(value)
+    except TypeError as error:
+        raise _core._error("conflict", "A1 capability matrix is invalid") from error
+    if not all(isinstance(item, _a1.A1SurfaceCapability) for item in matrix):
+        raise _core._error("conflict", "A1 capability matrix is invalid")
+    return matrix
+
+
+def permission_request_registration_enabled(
+    capability_matrix: Iterable[_a1.A1SurfaceCapability] | Mapping[str, Any] | None,
+) -> bool:
+    """Return whether an exact runtime record proves a narrow A1 gate."""
+    matrix = _capability_matrix_from_record(capability_matrix)
+    return _a1.permission_request_gate_ready(matrix)
+
+
+def install_hook_v3(
+    original: bytes | None,
+    handler: Mapping[str, Any] | None = None,
+    capability_matrix: Iterable[_a1.A1SurfaceCapability]
+    | Mapping[str, Any]
+    | None = None,
+    *,
+    a1_matrix: Iterable[_a1.A1SurfaceCapability]
+    | Mapping[str, Any]
+    | None = None,
+    runtime_capabilities: Iterable[_a1.A1SurfaceCapability]
+    | Mapping[str, Any]
+    | None = None,
+    runtime_record: Iterable[_a1.A1SurfaceCapability]
+    | Mapping[str, Any]
+    | None = None,
+) -> bytes:
     """Render the exact V3.1 baseline Hook surfaces."""
+    candidates = tuple(
+        value
+        for value in (
+            capability_matrix,
+            a1_matrix,
+            runtime_capabilities,
+            runtime_record,
+        )
+        if value is not None
+    )
+    if len(candidates) > 1:
+        raise _core._error("invalid-input", "A1 capability matrix was specified more than once")
+    matrix = _capability_matrix_from_record(candidates[0] if candidates else None)
     if original is None:
         document: dict[str, Any] = {}
     else:
@@ -145,6 +217,8 @@ def install_hook_v3(original: bytes | None, handler: Mapping[str, Any] | None = 
         "PostToolUse": "hook-post-tool",
         "SubagentStart": "hook-subagent-start",
     }
+    if _a1.permission_request_gate_ready(matrix):
+        subcommands["PermissionRequest"] = "hook-permission-request"
     if handler is None:
         raise _core._error("invalid-input", "Router hook handler is required")
     try:
