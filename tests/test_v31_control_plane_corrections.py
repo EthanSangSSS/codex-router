@@ -148,6 +148,7 @@ class V31ControlPlaneCorrectionTests(unittest.TestCase):
 
         output = handle_hook_event(event, self.installation_dir)
 
+        self.assertIn("hookSpecificOutput", output)
         self.assertEqual(
             output["hookSpecificOutput"]["permissionDecision"],
             "deny",
