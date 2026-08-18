@@ -97,6 +97,7 @@ def install(base) -> None:
     OriginalControlSnapshot = base.ControlSnapshot
     original_validate_snapshot = base.validate_snapshot
     original_replacement_reservation = base._replacement_reservation
+    original_authorize_parent_target = base.authorize_parent_target
 
     @dataclass(frozen=True)
     class ControlSnapshot(OriginalControlSnapshot):
@@ -252,6 +253,35 @@ def install(base) -> None:
             raise base._error("no Luna is currently bound")
         return snapshot
 
+    def authorize_parent_target(
+        directory: Path,
+        secret: bytes,
+        session_id: str,
+        *,
+        tool_name: str,
+        target: str,
+    ) -> None:
+        snapshot = base.read_snapshot(directory, secret, session_id)
+        if snapshot is None or snapshot.execution_status != "QUARANTINED":
+            return original_authorize_parent_target(
+                directory,
+                secret,
+                session_id,
+                tool_name=tool_name,
+                target=target,
+            )
+        tool = base._text(tool_name, "tool_name")
+        requested = base._text(target, "target")
+        assert tool is not None and requested is not None
+        if tool not in base._PARENT_TARGET_TOOLS:
+            raise base._error("unsupported Router parent lifecycle operation")
+        if tool not in base._PARENT_CLEANUP_TOOLS:
+            raise base._error("parent work dispatch is forbidden for quarantined Luna")
+        if snapshot.luna_agent_id is None or snapshot.luna_task_path is None:
+            raise base._error("quarantined Luna identity is unavailable")
+        if requested not in {snapshot.luna_agent_id, snapshot.luna_task_path}:
+            raise base._error("parent lifecycle target is not the quarantined Luna")
+
     def start_execution(
         directory: Path,
         secret: bytes,
@@ -280,6 +310,11 @@ def install(base) -> None:
                 and snapshot.active_child_turn_id != child_turn
             ):
                 raise base._error("execution child turn conflicts with the current packet")
+            baseline = snapshot.recovery_baseline
+            if baseline is not None:
+                current_baseline = _clean_git_baseline(baseline.workspace_root)
+                if current_baseline != baseline:
+                    baseline = None
             updated = replace(
                 snapshot,
                 execution_status="RUNNING",
@@ -288,6 +323,7 @@ def install(base) -> None:
                     if child_turn is None
                     else child_turn
                 ),
+                recovery_baseline=baseline,
             )
             base._store_snapshot(state, updated)
             return updated
@@ -495,6 +531,7 @@ def install(base) -> None:
     base._snapshot_from_mapping = snapshot_from_mapping
     base.begin_packet = begin_packet
     base.current_luna = current_luna
+    base.authorize_parent_target = authorize_parent_target
     base.start_execution = start_execution
     base.accept_result = accept_result
     base.quarantine_execution = quarantine_execution
