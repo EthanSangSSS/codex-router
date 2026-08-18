@@ -371,6 +371,54 @@ def install(base) -> None:
             base._store_snapshot(state, updated)
             return "CURRENT"
 
+    def observe_turn_boundary(
+        directory: Path,
+        secret: bytes,
+        session_id: str,
+        *,
+        child_turn_id: str,
+    ) -> Literal["CURRENT", "STALE"]:
+        child_turn = base._text(child_turn_id, "child_turn_id")
+        assert child_turn is not None
+        tag = base.session_tag(secret, session_id)
+        with base._locked_state(Path(directory), mutate=True) as state:
+            snapshot = base._record_for_session(state, tag)
+            if snapshot.active_packet_id is None:
+                return "STALE"
+            if snapshot.execution_status in {
+                "QUARANTINED",
+                "PAUSED_SETTLED",
+                "RETIRED",
+            }:
+                return "STALE"
+            if (
+                snapshot.active_child_turn_id is not None
+                and snapshot.active_child_turn_id != child_turn
+            ):
+                raise base._error(
+                    "turn boundary child turn conflicts with the current packet"
+                )
+            if snapshot.execution_status == "QUIESCING":
+                if snapshot.active_child_turn_id is None:
+                    raise base._error(
+                        "quiescing turn boundary requires the active child turn"
+                    )
+                updated = replace(snapshot, execution_status="PAUSED_SETTLED")
+            elif snapshot.execution_status in {"IDLE", "RUNNING"}:
+                updated = replace(
+                    snapshot,
+                    active_packet_id=None,
+                    active_child_turn_id=None,
+                    execution_status="IDLE",
+                    intended_write_scope=(),
+                    explicit_side_effect_authorizations=(),
+                    recovery_baseline=None,
+                )
+            else:
+                return "STALE"
+            base._store_snapshot(state, updated)
+            return "CURRENT"
+
     def quarantine_execution(
         directory: Path,
         secret: bytes,
@@ -534,6 +582,7 @@ def install(base) -> None:
     base.authorize_parent_target = authorize_parent_target
     base.start_execution = start_execution
     base.accept_result = accept_result
+    base.observe_turn_boundary = observe_turn_boundary
     base.quarantine_execution = quarantine_execution
     base.observe_settlement = observe_settlement
     base.replace_quarantined_luna_epoch = replace_quarantined_luna_epoch
