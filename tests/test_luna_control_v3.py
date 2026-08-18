@@ -445,7 +445,7 @@ class LunaControlV3Tests(unittest.TestCase):
             self.secret,
             "root-session",
             source="verified_native_terminal",
-            terminal_status="interrupted",
+            terminal_status="completed",
             child_turn_id="turn-1",
         )
         self.assertEqual(settled.execution_status, "PAUSED_SETTLED")
@@ -480,7 +480,7 @@ class LunaControlV3Tests(unittest.TestCase):
             self.secret,
             "root-session",
             source="verified_native_terminal",
-            terminal_status="interrupted",
+            terminal_status="completed",
             child_turn_id=None,
         )
         control.retire_luna(
@@ -568,7 +568,7 @@ class LunaControlV3Tests(unittest.TestCase):
             self.secret,
             "root-session",
             source="verified_native_terminal",
-            terminal_status="interrupted",
+            terminal_status="completed",
             child_turn_id=None,
         )
         control.retire_luna(
@@ -749,7 +749,7 @@ class LunaControlV3Tests(unittest.TestCase):
             self.secret,
             "root-session",
             source="verified_native_terminal",
-            terminal_status="interrupted",
+            terminal_status="completed",
             child_turn_id="turn-1",
         )
 
