@@ -570,11 +570,9 @@ only then -> root
 
 Preserve the already-approved identity-free root fallback by allowing missing actor fields **only when** current root turn matches. Do not require actor fields on runtimes that omit them.
 
-This Hook-layer check is defense in depth and early rejection. `admit_staged_spawn()` / `admit_staged_followup()` must still revalidate `root_turn_id` against the locked snapshot immediately before staged authority is consumed.
-
 - [ ] **Step 5: Replace plaintext K1 parsing in parent V2 admission**
 
-`spawn_agent` calls `admit_staged_spawn(..., root_turn_id=base["turn_id"], ...)`; `followup_task` calls `admit_staged_followup(..., root_turn_id=base["turn_id"], ...)`. Neither parses `tool_input.message`.
+`spawn_agent` calls `admit_staged_spawn(...)`; `followup_task` calls `admit_staged_followup(...)`. Neither parses `tool_input.message`.
 
 `send_message` authorizes current target then denies QueueOnly without consuming stage.
 
@@ -598,7 +596,7 @@ git commit -m "fix: atomically admit staged K1 native dispatch"
 
 - [ ] **Step 8: Review gate**
 
-Security review must explicitly inspect failure-before-store paths, prove no `pending_spawn` poison state can survive a denied Gen1 admission, and prove stale `root_turn_id` cannot consume a newer root turn's staged authority even if Hook-layer identity checking raced before the journal lock was acquired.
+Security review must explicitly inspect failure-before-store paths and prove no `pending_spawn` poison state can survive a denied Gen1 admission.
 
 ---
 
@@ -892,6 +890,7 @@ STAGED_PACKET_JOURNAL=
 RECOVERY_OVERLAY_MIGRATION=
 ATOMIC_GEN1_ADMISSION=
 ATOMIC_GEN2_ADMISSION=
+ATOMIC_ROOT_TURN_REVALIDATION=
 STALE_ROOT_TURN_GUARD=
 OPAQUE_SPAWN_ADMISSION=
 OPAQUE_FOLLOWUP_ADMISSION=
@@ -964,8 +963,9 @@ Task dependencies are strict:
 
 - Recovery overlay coverage: `luna_control_recovery.py` is explicitly modified/tested for schema migration, current-root invalidation, recovery baseline, and atomic admission.
 - Atomicity: Gen1 reservation + packet commit and Gen2 target-check + packet commit occur in one journal transaction each; no plan step calls `reserve_spawn()` followed by a separate packet transaction.
+- Atomic root-turn revalidation: `admit_staged_spawn()` and `admit_staged_followup()` both receive `root_turn_id` and compare its HMAC tag with the locked snapshot before staged authority can be consumed; Hook identity is early rejection only.
 - Sideband capability gate: routing readiness cannot be `COMPATIBLE` unless `router_stage_k1_exec` is positively evidenced.
-- Root-turn gate: current persisted root turn is mandatory even when explicit root actor metadata is present; identity-free exact-runtime fallback remains compatible. Task 4 additionally revalidates `root_turn_id` inside the same locked transaction that consumes staged K1, closing the Hook-check/commit TOCTOU window.
+- Root-turn gate: current persisted root turn is mandatory even when explicit root actor metadata is present; identity-free exact-runtime fallback remains compatible.
 - Impossible-state invariant: active packet with neither child turn nor staged authority wire is rejected.
 - Renderer source: Task 6 is fixed to `global_install_adapter.py`.
 - No placeholders/TODO/TBD remain.
