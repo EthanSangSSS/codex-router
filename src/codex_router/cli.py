@@ -93,6 +93,7 @@ def parser() -> argparse.ArgumentParser:
         ("hook-permission-request", "PermissionRequest"),
         ("hook-stop", "Stop"),
         ("hook-subagent-start", "SubagentStart"),
+        ("hook-subagent-stop", "SubagentStop"),
     ):
         hook = subcommands.add_parser(command, help=f"handle one Codex {event} event")
         hook.add_argument("--installation-dir", type=Path, required=True)
