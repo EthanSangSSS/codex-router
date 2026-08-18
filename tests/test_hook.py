@@ -253,9 +253,22 @@ class HookNativeDelegationTests(HookTestCase):
         self.assertFalse(self.state_root.exists())
 
     def test_bound_luna_is_a_full_executor_except_for_lifecycle_tools(self):
+        from codex_router import luna_control as control
         from codex_router.hook import handle_hook_event
 
         self.bind_luna()
+        control.begin_packet(
+            self.installation_dir,
+            self.secret,
+            "session-a",
+            packet_id="packet-full-executor",
+            objective="exercise ordinary Full Executor tools",
+            working_directory=str(self.root),
+            intended_write_scope=(str(self.root),),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("ordinary tools remain available",),
+            stop_conditions=("scope expansion required",),
+        )
         ordinary_tools = (
             "Read",
             "apply_patch",
@@ -417,7 +430,6 @@ class HookNativeDelegationTests(HookTestCase):
             )
             for _ in range(4)
         ]
-
         for process in processes:
             process.start()
         results = [queue.get(timeout=10) for _ in processes]
