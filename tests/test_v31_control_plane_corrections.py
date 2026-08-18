@@ -237,7 +237,7 @@ class V31ControlPlaneCorrectionTests(unittest.TestCase):
             self.secret,
             "root-session",
             source="verified_native_terminal",
-            terminal_status="interrupted",
+            terminal_status="completed",
             child_turn_id="turn-1",
         )
         retired = control.retire_luna(
