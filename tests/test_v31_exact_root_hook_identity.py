@@ -64,9 +64,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         self.assertIn("hookSpecificOutput", output)
         return output
 
-    def test_exact_root_wire_without_synthetic_actor_fields_can_spawn_and_send_k1(self):
-        self._submit_root_prompt()
-
+    def _spawn_and_bind_luna(self):
         spawn = {
             "hook_event_name": "PreToolUse",
             "session_id": "session-a",
@@ -104,6 +102,10 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             ),
             {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
         )
+
+    def test_exact_root_wire_without_synthetic_actor_fields_can_spawn_and_send_k1(self):
+        self._submit_root_prompt()
+        self._spawn_and_bind_luna()
 
         snapshot = control.read_snapshot(self.installation_dir, self.secret, "session-a")
         packet = build_luna_packet(
@@ -149,6 +151,30 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         self.assertEqual(
             control.read_snapshot(self.installation_dir, self.secret, "session-a"), before
         )
+
+    def test_thread_spawn_user_prompt_does_not_replace_root_turn_authority(self):
+        self._submit_root_prompt(turn_id="root-turn-1")
+        self._spawn_and_bind_luna()
+        before = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        self.assertIsNotNone(before.current_root_turn_tag)
+
+        output = handle_user_prompt(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": "session-a",
+                "turn_id": "luna-turn-1",
+                "agent_id": "agent-1",
+                "agent_type": "luna_worker",
+                "prompt": "[CODEX_ROUTER_PACKET_V3_1] {}",
+                "cwd": str(self.root),
+            },
+            self.installation_dir,
+        )
+
+        self.assertEqual(output, {})
+        after = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        self.assertEqual(after.current_root_turn_tag, before.current_root_turn_tag)
+        self.assertEqual(after.luna_agent_id, "agent-1")
 
 
 if __name__ == "__main__":
