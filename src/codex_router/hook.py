@@ -77,6 +77,18 @@ def _validate_event(event: Mapping[str, Any]) -> dict[str, str]:
         if len(encoded) > MAX_HOOK_INPUT_BYTES:
             raise _invalid(f"{name} exceeds the hook input limit")
         validated[name] = value
+    has_agent_id = "agent_id" in event
+    has_agent_type = "agent_type" in event
+    if has_agent_id != has_agent_type:
+        raise _invalid("UserPromptSubmit child identity is incomplete")
+    if has_agent_id:
+        for name in ("agent_id", "agent_type"):
+            value = event.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise _invalid(f"{name} must be non-empty text")
+            if len(value.encode("utf-8", errors="strict")) > 512:
+                raise _invalid(f"{name} exceeds the identity limit")
+            validated[name] = value
     return validated
 
 
@@ -172,6 +184,12 @@ def handle_user_prompt(
     event: Mapping[str, Any], installation_dir: Path
 ) -> dict[str, Any]:
     validated = _validate_event(event)
+    # Exact Codex emits UserPromptSubmit for thread-spawn child input too. Child
+    # prompts must not replace root-turn authority or receive root routing context;
+    # their later tool/lifecycle events are independently admitted by identity.
+    if "agent_id" in validated:
+        return {}
+
     policy = classify_prompt(validated["prompt"])
     try:
         secret, config = _load_installation(Path(installation_dir))
@@ -187,13 +205,28 @@ def handle_user_prompt(
                 validated["session_id"],
                 reason="user_prompt_supersession",
             )
-        if policy.decision not in ("direct", "bypass") and snapshot is None:
-            luna_control.new_task(
+        if policy.decision in ("direct", "bypass"):
+            if snapshot is not None:
+                luna_control.set_current_root_turn(
+                    Path(installation_dir),
+                    secret,
+                    validated["session_id"],
+                    turn_id=None,
+                )
+        else:
+            if snapshot is None:
+                luna_control.new_task(
+                    Path(installation_dir),
+                    secret,
+                    validated["session_id"],
+                    native_parent_identity=_DEFAULT_NATIVE_PARENT_IDENTITY,
+                    native_authority_profile=_DEFAULT_NATIVE_AUTHORITY_PROFILE,
+                )
+            luna_control.set_current_root_turn(
                 Path(installation_dir),
                 secret,
                 validated["session_id"],
-                native_parent_identity=_DEFAULT_NATIVE_PARENT_IDENTITY,
-                native_authority_profile=_DEFAULT_NATIVE_AUTHORITY_PROFILE,
+                turn_id=validated["turn_id"],
             )
     except Exception:
         return {"decision": "block", "reason": _BLOCK_REASON}
@@ -313,6 +346,25 @@ def _child_identity(event: Mapping[str, Any]) -> tuple[str | None, str | None]:
     if actor_type in _CHILD_ACTOR_TYPES:
         return actor_id, actor_type
     return None, None
+
+
+def _root_lifecycle_identity(
+    event: Mapping[str, Any],
+    base: Mapping[str, Any],
+    installation_dir: Path,
+    secret: bytes,
+) -> str:
+    identity = _identity_kind(event, lifecycle=True)
+    if identity != "missing":
+        return identity
+    if luna_control.is_current_root_turn(
+        installation_dir,
+        secret,
+        base["session_id"],
+        turn_id=base["turn_id"],
+    ):
+        return "root"
+    return "missing"
 
 
 def _mapping_text(tool_input: Mapping[str, Any], name: str) -> str:
@@ -497,10 +549,17 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
                 raise _invalid("tool_input must be an object")
             lifecycle = _looks_like_agent_lifecycle_tool(base["tool_name"])
             identity = _identity_kind(event, lifecycle=lifecycle)
-            if identity in {"missing", "ambiguous"} and lifecycle:
-                return _pretool_output(
-                    "deny", "Router actor identity is missing or ambiguous"
+            if lifecycle:
+                identity = _root_lifecycle_identity(
+                    event,
+                    base,
+                    Path(installation_dir),
+                    secret,
                 )
+                if identity in {"missing", "ambiguous"}:
+                    return _pretool_output(
+                        "deny", "Router actor identity is missing or ambiguous"
+                    )
             if _is_bound_luna(event, Path(installation_dir), secret):
                 return _handle_luna_pretool(
                     event=event,
@@ -536,7 +595,12 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             )
             if base["tool_name"] != "spawn_agent":
                 return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
-            if _identity_kind(event, lifecycle=True) != "root":
+            if (
+                _root_lifecycle_identity(
+                    event, base, Path(installation_dir), secret
+                )
+                != "root"
+            ):
                 raise _invalid("Router actor identity is missing or ambiguous")
             luna_control.observe_spawn_result(
                 Path(installation_dir),
