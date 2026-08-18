@@ -24,6 +24,91 @@ ROLE_CONFIG = {
 
 
 class PrimaryCapabilityV3Tests(unittest.TestCase):
+    _PRIMARY_V2_EVIDENCE = {
+        "multi_agent_v2": True,
+        "capabilities": {
+            "spawn_agent": True,
+            "followup_task": True,
+            "send_message": True,
+        },
+    }
+
+    def _feature(self, name):
+        feature = getattr(adapter, name, None)
+        self.assertTrue(callable(feature), f"missing compatibility feature: {name}")
+        return feature
+
+    def test_primary_model_defaults_to_runtime_inheritance_not_sol_name(self):
+        inherit = getattr(adapter, "PRIMARY_MODEL_INHERIT", None)
+        self.assertEqual(inherit, "inherit")
+        self.assertNotEqual(inherit, "gpt-5.6-sol")
+
+    def test_runtime_selected_primary_model_is_admitted_by_v2_capability_evidence(self):
+        admitted = self._feature("primary_model_is_admitted")
+        self.assertTrue(
+            admitted(
+                requested_model="future-primary-model",
+                runtime_capabilities=self._PRIMARY_V2_EVIDENCE,
+            )
+        )
+
+    def test_primary_model_fails_closed_when_v2_capability_is_missing(self):
+        admitted = self._feature("primary_model_is_admitted")
+        self.assertFalse(
+            admitted(
+                requested_model="future-primary-model",
+                runtime_capabilities={
+                    "multi_agent_v2": True,
+                    "capabilities": {
+                        "spawn_agent": True,
+                        "followup_task": True,
+                    },
+                },
+            )
+        )
+
+    def test_executor_requested_model_is_rendered_explicitly(self):
+        render = self._feature("render_executor_config")
+        rendered = tomllib.loads(
+            render(
+                {
+                    "requested_model": "custom-executor-model",
+                    "requested_reasoning": "high",
+                }
+            ).decode("utf-8")
+        )
+        self.assertEqual(rendered["model"], "custom-executor-model")
+        self.assertEqual(rendered["model_reasoning_effort"], "high")
+
+    def test_changing_executor_model_does_not_change_primary_semantics(self):
+        normalize = self._feature("normalize_role_config")
+        first = normalize(
+            {
+                **ROLE_CONFIG,
+                "luna": {
+                    "requested_model": "executor-a",
+                    "requested_reasoning": "max",
+                },
+            }
+        )
+        second = normalize(
+            {
+                **ROLE_CONFIG,
+                "luna": {
+                    "requested_model": "executor-b",
+                    "requested_reasoning": "max",
+                },
+            }
+        )
+        self.assertEqual(first["local_sol"], second["local_sol"])
+        self.assertNotEqual(first["luna"]["requested_model"], second["luna"]["requested_model"])
+
+    def test_legacy_role_config_keys_remain_accepted(self):
+        normalize = self._feature("normalize_role_config")
+        normalized = normalize(ROLE_CONFIG)
+        self.assertEqual(normalized["local_sol"], ROLE_CONFIG["local_sol"])
+        self.assertEqual(normalized["luna"], ROLE_CONFIG["luna"])
+
     def test_v3_renderer_exports_full_executor_mode_and_five_hook_events(self):
         self.assertEqual(adapter.LUNA_EXECUTION_MODE, "full_executor_v3_1")
         self.assertEqual(

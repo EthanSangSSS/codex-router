@@ -25,6 +25,14 @@ BASELINE_HOOK_EVENTS = (
 COMPATIBLE = "COMPATIBLE"
 INCOMPATIBLE = "INCOMPATIBLE"
 UNKNOWN = "UNKNOWN_REQUIRES_CAPABILITY_CHECK"
+PRIMARY_MODEL_INHERIT = "inherit"
+PRIMARY_REQUIRED_CAPABILITIES = (
+    "multi_agent_v2",
+    "spawn_agent",
+    "followup_task",
+    "send_message",
+)
+_PRIMARY_TOOL_CAPABILITIES = frozenset(PRIMARY_REQUIRED_CAPABILITIES[1:])
 V31_LIVE_ACTIVATION_BLOCKERS = (
     "G1_STRONG_IDENTITY_PROFILE",
     "G2_SETTLEMENT_OBSERVATION",
@@ -78,6 +86,113 @@ LUNA_DEVELOPER_INSTRUCTIONS = LUNA_DEVELOPER_INSTRUCTIONS_V3
 LUNA_DEVELOPER_INSTRUCTIONS_V2 = LUNA_DEVELOPER_INSTRUCTIONS_V3
 
 
+def _capability_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "multiagentv2": "multi_agent_v2",
+        "multi_agent_v2_surface": "multi_agent_v2",
+        "multi_agent_v2_capability": "multi_agent_v2",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _capability_evidence(value: Any) -> tuple[set[str], bool | None]:
+    """Extract only the small V2 primary surface from runtime evidence."""
+    names: set[str] = set()
+    multi_agent_v2: bool | None = None
+
+    def record_v2(value: bool) -> None:
+        nonlocal multi_agent_v2
+        # An explicit negative is fail-closed and cannot be overwritten by a
+        # later alias or nested telemetry field.
+        if value is False or multi_agent_v2 is not False:
+            multi_agent_v2 = value
+
+    def visit(node: Any) -> None:
+        nonlocal multi_agent_v2
+        if isinstance(node, Mapping):
+            for key, child in node.items():
+                name = _capability_name(key)
+                if name == "multi_agent_v2":
+                    if isinstance(child, bool):
+                        record_v2(child)
+                    elif isinstance(child, str):
+                        record_v2(
+                            child.strip().lower()
+                            in {
+                                "1",
+                                "true",
+                                "enabled",
+                                "present",
+                                "supported",
+                            }
+                        )
+                    elif child is not None:
+                        record_v2(bool(child))
+                elif name in _PRIMARY_TOOL_CAPABILITIES:
+                    if child is True or (
+                        isinstance(child, str)
+                        and child.strip().lower()
+                        in {"1", "true", "enabled", "present", "supported"}
+                    ):
+                        names.add(name)
+                if isinstance(child, (Mapping, list, tuple, set, frozenset)):
+                    visit(child)
+        elif isinstance(node, str):
+            name = _capability_name(node)
+            if name == "multi_agent_v2":
+                record_v2(True)
+            elif name in _PRIMARY_TOOL_CAPABILITIES:
+                names.add(name)
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    return names, multi_agent_v2
+
+
+def primary_capability_gate(runtime_capabilities: Any) -> bool:
+    """Require the exact current primary Multi-Agent V2 control surface."""
+    names, multi_agent_v2 = _capability_evidence(runtime_capabilities)
+    if multi_agent_v2 is False or not _PRIMARY_TOOL_CAPABILITIES.issubset(names):
+        return False
+    # A complete V2 tool triad is itself sufficient evidence when older
+    # telemetry did not emit a separate feature flag.
+    return multi_agent_v2 is True or _PRIMARY_TOOL_CAPABILITIES.issubset(names)
+
+
+def primary_model_is_admitted(
+    requested_model: str | None = PRIMARY_MODEL_INHERIT,
+    runtime_capabilities: Any = None,
+) -> bool:
+    """Admit any selected primary model only when the V2 surface is proven."""
+    if requested_model is not None and (
+        not isinstance(requested_model, str) or not requested_model.strip()
+    ):
+        return False
+    return primary_capability_gate(runtime_capabilities)
+
+
+def normalize_role_config(
+    role_config: Mapping[str, Any],
+    *,
+    runtime_capabilities: Any = None,
+) -> dict[str, Any]:
+    """Validate legacy role keys without coupling PRIMARY to a model name."""
+    normalized = _core._validate_defaults(role_config)
+    if runtime_capabilities is not None and not primary_model_is_admitted(
+        normalized["local_sol"].get("requested_model"), runtime_capabilities
+    ):
+        raise _core._error(
+            "conflict",
+            "primary Multi-Agent V2 capability contract is not satisfied",
+        )
+    return normalized
+
+
 def luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
     """Render the V3.1 Full Executor profile with only descendant controls off."""
     model = role.get("requested_model")
@@ -120,6 +235,14 @@ def luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
     if parsed != expected:
         raise _core._error("conflict", "generated Luna agent configuration is unstable")
     return encoded
+
+
+def render_executor_config(role_config: Mapping[str, Any]) -> bytes:
+    """Render the explicitly configured persistent executor profile."""
+    role = role_config.get("luna") if isinstance(role_config, Mapping) else None
+    if isinstance(role, Mapping):
+        return luna_agent_bytes(role)
+    return luna_agent_bytes(role_config)
 
 
 def luna_agent_matches(content: bytes | None, role: Mapping[str, Any]) -> bool:
@@ -280,10 +403,26 @@ def install_hook_v3(
 install_hook_v2 = install_hook_v3
 
 
-def _primary_capability(codex_home: Path) -> tuple[str, str]:
+def _primary_capability(
+    codex_home: Path,
+    runtime_capabilities: Any = None,
+) -> tuple[str, str]:
     """Classify only statically observable primary capabilities; never mutate config."""
+    def runtime_result() -> tuple[str, str]:
+        if primary_capability_gate(runtime_capabilities):
+            return (
+                COMPATIBLE,
+                "runtime evidence satisfies the primary Multi-Agent V2 capability contract",
+            )
+        return (
+            INCOMPATIBLE,
+            "runtime evidence is missing a required primary Multi-Agent V2 capability",
+        )
+
     config_path = codex_home / "config.toml"
     if not config_path.exists():
+        if runtime_capabilities is not None:
+            return runtime_result()
         return (
             UNKNOWN,
             "primary config.toml is absent; effective layered capability requires runtime validation",
@@ -291,8 +430,12 @@ def _primary_capability(codex_home: Path) -> tuple[str, str]:
     try:
         value = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        if runtime_capabilities is not None:
+            return runtime_result()
         return (UNKNOWN, "primary config.toml could not be safely interpreted for compatibility")
     if not isinstance(value, dict):
+        if runtime_capabilities is not None:
+            return runtime_result()
         return (UNKNOWN, "primary configuration shape is unverified")
     agents = value.get("agents")
     features = value.get("features")
@@ -304,6 +447,8 @@ def _primary_capability(codex_home: Path) -> tuple[str, str]:
         return (INCOMPATIBLE, "primary features.multi_agent=false disables Router Luna management")
     if features.get("hooks") is False:
         return (INCOMPATIBLE, "primary features.hooks=false disables Router Hooks")
+    if runtime_capabilities is not None:
+        return runtime_result()
     if (
         agents.get("enabled") is True
         and features.get("multi_agent") is True
@@ -316,8 +461,14 @@ def _primary_capability(codex_home: Path) -> tuple[str, str]:
     )
 
 
-def _enrich(status: GlobalStatus, codex_home: Path | str) -> GlobalStatus:
-    compatibility, reason = _primary_capability(Path(codex_home).expanduser())
+def _enrich(
+    status: GlobalStatus,
+    codex_home: Path | str,
+    runtime_capabilities: Any = None,
+) -> GlobalStatus:
+    compatibility, reason = _primary_capability(
+        Path(codex_home).expanduser(), runtime_capabilities
+    )
     return replace(
         status,
         compatibility=compatibility,
@@ -453,6 +604,9 @@ def _rendering_adapter() -> Iterator[None]:
 
 def global_install(*args, **kwargs):
     codex_home = kwargs.get("codex_home", args[0] if args else None)
+    if "defaults" in kwargs:
+        kwargs = dict(kwargs)
+        kwargs["defaults"] = normalize_role_config(kwargs["defaults"])
     with _rendering_adapter():
         status = _core.global_install(*args, **kwargs)
     return _enrich(status, codex_home)
@@ -460,9 +614,13 @@ def global_install(*args, **kwargs):
 
 def global_status(*args, **kwargs):
     codex_home = kwargs.get("codex_home", args[0] if args else None)
+    runtime_capabilities = kwargs.pop(
+        "runtime_capabilities",
+        kwargs.pop("capability_evidence", kwargs.pop("primary_capabilities", None)),
+    )
     with _rendering_adapter():
         status = _core.global_status(*args, **kwargs)
-    return _enrich(status, codex_home)
+    return _enrich(status, codex_home, runtime_capabilities)
 
 
 def global_uninstall(*args, **kwargs):

@@ -9,6 +9,7 @@ from .adapters import adapters_for_mode
 from .global_install_adapter import (
     DEFERRED_ACCEPTANCE_EVIDENCE,
     LIVE_ACTIVATION_BLOCKERS,
+    PRIMARY_MODEL_INHERIT,
     global_install,
     global_self_test,
     global_status,
@@ -104,7 +105,7 @@ def parser() -> argparse.ArgumentParser:
     install.add_argument("--codex-home", type=Path, required=True)
     install.add_argument("--state-dir", type=Path, required=True)
     install.add_argument("--codex-bin", type=Path, required=True)
-    install.add_argument("--local-model", default="gpt-5.6-sol")
+    install.add_argument("--local-model", default=PRIMARY_MODEL_INHERIT)
     install.add_argument("--local-reasoning", default="max")
     install.add_argument("--web-model", default="sol")
     install.add_argument("--web-reasoning", default="xhigh")

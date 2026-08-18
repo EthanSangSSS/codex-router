@@ -129,7 +129,7 @@ router global-install \
   --codex-home "/absolute/path/to/active-codex-home" \
   --state-dir "/absolute/private/path/to/codex-router-runs" \
   --codex-bin "/Applications/ChatGPT.app/Contents/Resources/codex" \
-  --local-model "gpt-5.6-sol" \
+  --local-model "inherit" \
   --local-reasoning "max" \
   --web-model "sol" \
   --web-reasoning "xhigh" \
@@ -139,7 +139,7 @@ router global-install \
 
 Installation manages the five V3.1 Router command Hooks listed above, one bounded block in `AGENTS.md`, and one custom Full Executor agent at `agents/luna-worker.toml`. It preserves unrelated Hook groups and user files. The installer does not edit the user's primary `config.toml`, `AGENTS.override.md`, or unrelated agent files.
 
-Because Router does not own the primary Codex `config.toml`, `global-status` performs a read-only compatibility preflight. It classifies statically observable primary capability as `COMPATIBLE`, `INCOMPATIBLE`, or `UNKNOWN_REQUIRES_CAPABILITY_CHECK` and reports `luna_execution_mode=full_executor_v3_1`, `router_design=v3.1`, and the blocked readiness gates above. Explicitly disabled primary agents, multi-agent capability, or Hooks are incompatible. Ambiguous layered/effective configuration remains unknown and requires runtime validation rather than being guessed.
+Because Router does not own the primary Codex `config.toml`, `global-status` performs a read-only compatibility preflight. The global-install default `--local-model inherit` records that PRIMARY uses the current Codex App session model rather than selecting a Sol-named model. Readiness is capability-based: the required Multi-Agent V2 surface is `spawn_agent`, `followup_task`, and `send_message`; an exact runtime evidence record may prove it, while missing or explicitly disabled capability remains incompatible/unknown. It classifies statically observable primary capability as `COMPATIBLE`, `INCOMPATIBLE`, or `UNKNOWN_REQUIRES_CAPABILITY_CHECK` and reports `luna_execution_mode=full_executor_v3_1`, `router_design=v3.1`, and the blocked readiness gates above. Explicitly disabled primary agents, multi-agent capability, or Hooks are incompatible. Ambiguous layered/effective configuration remains unknown rather than being guessed.
 
 Original managed files are backed up byte-for-byte under `.codex-router-policy-v1/` with private permissions. The prepared manifest records original and installed digests and modes before any managed write. If the process stops after a managed write, `global-status` reports partial state; the same compatible `global-install` can complete remaining writes, while `global-uninstall` restores exact originals. Recovery validates every target before its first write and refuses post-interruption user edits.
 
