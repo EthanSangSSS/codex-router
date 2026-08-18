@@ -24,6 +24,7 @@ _BLOCK_REASON = (
     "Router safety state could not be initialized for this turn. "
     "Repair or re-trust the managed Router Hook before continuing routed work."
 )
+_CHILD_BLOCK_REASON = "Router Luna child turn is not authorized for this packet."
 
 _PARENT_CREATE_TOOLS = {"spawn_agent"}
 _PARENT_COMMUNICATE_TOOLS = {
@@ -180,15 +181,119 @@ def _hook_output(context: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _child_block() -> dict[str, str]:
+    return {"decision": "block", "reason": _CHILD_BLOCK_REASON}
+
+
+def _snapshot_matches_luna(snapshot: Any, agent_id: str) -> bool:
+    if snapshot is None or snapshot.logical_task_status != "ACTIVE":
+        return False
+    if snapshot.execution_status in {"RETIRED", "QUARANTINED"}:
+        return False
+    if snapshot.luna_agent_id == agent_id:
+        return True
+    pending = snapshot.pending_spawn
+    return pending is not None and pending.agent_id == agent_id
+
+
+def _parse_k1_message(message: Any) -> dict[str, Any]:
+    if not isinstance(message, str) or not message.startswith(
+        "[CODEX_ROUTER_PACKET_V3_1] "
+    ):
+        raise _invalid("Router parent work message must use a K1 packet")
+    try:
+        packet = parse_luna_packet(message)
+    except ProtocolError as error:
+        raise _invalid("Router work message is not a valid K1 packet") from error
+    try:
+        validate_packet_authorizations(
+            packet["explicit_side_effect_authorizations"]
+        )
+    except ValueError as error:
+        raise _invalid("Router work message contains an unknown A1 category") from error
+    return packet
+
+
+def _require_next_k1(
+    packet: Mapping[str, Any],
+    installation_dir: Path,
+    secret: bytes,
+    session_id: str,
+) -> Any:
+    snapshot = luna_control.read_snapshot(installation_dir, secret, session_id)
+    if snapshot is None:
+        raise _invalid("K1 packet admission requires a current task epoch")
+    if packet["generation"] != snapshot.packet_generation + 1:
+        raise _invalid("K1 packet generation is not the next task generation")
+    return snapshot
+
+
+def _begin_k1_packet(
+    packet: Mapping[str, Any],
+    installation_dir: Path,
+    secret: bytes,
+    session_id: str,
+) -> None:
+    luna_control.begin_packet(
+        installation_dir,
+        secret,
+        session_id,
+        packet_id=packet["packet_id"],
+        objective=packet["objective"],
+        working_directory=packet["working_directory"],
+        intended_write_scope=packet["intended_write_scope"],
+        explicit_side_effect_authorizations=packet[
+            "explicit_side_effect_authorizations"
+        ],
+        success_criteria=packet["success_criteria"],
+        stop_conditions=packet["stop_conditions"],
+    )
+
+
+def _validate_current_child_packet(snapshot: Any, packet: Mapping[str, Any]) -> None:
+    if snapshot.active_packet_id is None:
+        raise _invalid("Luna child turn has no active K1 packet")
+    if packet["packet_id"] != snapshot.active_packet_id:
+        raise _invalid("Luna child packet id does not match current authority")
+    if packet["generation"] != snapshot.packet_generation:
+        raise _invalid("Luna child packet generation does not match current authority")
+    if tuple(packet["intended_write_scope"]) != tuple(snapshot.intended_write_scope):
+        raise _invalid("Luna child write scope does not match current authority")
+    if tuple(packet["explicit_side_effect_authorizations"]) != tuple(
+        snapshot.explicit_side_effect_authorizations
+    ):
+        raise _invalid("Luna child A1 authority does not match current authority")
+
+
 def handle_user_prompt(
     event: Mapping[str, Any], installation_dir: Path
 ) -> dict[str, Any]:
     validated = _validate_event(event)
-    # Exact Codex emits UserPromptSubmit for thread-spawn child input too. Child
-    # prompts must not replace root-turn authority or receive root routing context;
-    # their later tool/lifecycle events are independently admitted by identity.
+
+    # Exact Codex runs UserPromptSubmit for a thread-spawn child before the
+    # child's tools. Use that native turn identity to bind the already-admitted
+    # K1 packet, while never letting child input replace root-turn authority.
     if "agent_id" in validated:
-        return {}
+        if validated["agent_type"] != "luna_worker":
+            return {}
+        try:
+            secret, _config = _load_installation(Path(installation_dir))
+            snapshot = luna_control.read_snapshot(
+                Path(installation_dir), secret, validated["session_id"]
+            )
+            if not _snapshot_matches_luna(snapshot, validated["agent_id"]):
+                raise _invalid("Luna child identity is not current")
+            packet = _parse_k1_message(validated["prompt"])
+            _validate_current_child_packet(snapshot, packet)
+            luna_control.start_execution(
+                Path(installation_dir),
+                secret,
+                validated["session_id"],
+                child_turn_id=validated["turn_id"],
+            )
+            return {}
+        except Exception:
+            return _child_block()
 
     policy = classify_prompt(validated["prompt"])
     try:
@@ -381,40 +486,9 @@ def _admit_k1_packet(
     secret: bytes,
     session_id: str,
 ) -> None:
-    message = tool_input.get("message")
-    if not isinstance(message, str) or not message.startswith(
-        "[CODEX_ROUTER_PACKET_V3_1] "
-    ):
-        raise _invalid("Router parent work message must use a K1 packet")
-    try:
-        packet = parse_luna_packet(message)
-    except ProtocolError as error:
-        raise _invalid("tool_input.message is not a valid K1 packet") from error
-    try:
-        validate_packet_authorizations(
-            packet["explicit_side_effect_authorizations"]
-        )
-    except ValueError as error:
-        raise _invalid("tool_input.message contains an unknown A1 category") from error
-    snapshot = luna_control.read_snapshot(installation_dir, secret, session_id)
-    if snapshot is None:
-        raise _invalid("K1 packet admission requires a current task epoch")
-    if packet["generation"] != snapshot.packet_generation + 1:
-        raise _invalid("K1 packet generation is not the next task generation")
-    luna_control.begin_packet(
-        installation_dir,
-        secret,
-        session_id,
-        packet_id=packet["packet_id"],
-        objective=packet["objective"],
-        working_directory=packet["working_directory"],
-        intended_write_scope=packet["intended_write_scope"],
-        explicit_side_effect_authorizations=packet[
-            "explicit_side_effect_authorizations"
-        ],
-        success_criteria=packet["success_criteria"],
-        stop_conditions=packet["stop_conditions"],
-    )
+    packet = _parse_k1_message(tool_input.get("message"))
+    _require_next_k1(packet, installation_dir, secret, session_id)
+    _begin_k1_packet(packet, installation_dir, secret, session_id)
 
 
 def _is_bound_luna(
@@ -427,14 +501,14 @@ def _is_bound_luna(
     if not isinstance(session_id, str) or not session_id:
         return False
     try:
-        snapshot = luna_control.current_luna(
+        snapshot = luna_control.read_snapshot(
             installation_dir,
             secret,
             session_id,
         )
     except RouterStateError:
         return False
-    return snapshot.luna_agent_id == agent_id
+    return _snapshot_matches_luna(snapshot, agent_id)
 
 
 def _handle_luna_pretool(
@@ -467,14 +541,23 @@ def _handle_parent_pretool(
 ) -> dict[str, Any]:
     tool_name = base["tool_name"]
     if tool_name in _PARENT_CREATE_TOOLS:
+        if _mapping_text(tool_input, "task_name") != "luna_worker":
+            raise _invalid("Router spawn task_name must be luna_worker")
+        if _mapping_text(tool_input, "agent_type") != "luna_worker":
+            raise _invalid("Router spawn agent_type must be luna_worker")
+        if _mapping_text(tool_input, "fork_turns") != "none":
+            raise _invalid("Router Luna spawn must use fork_turns=none")
+        packet = _parse_k1_message(tool_input.get("message"))
+        _require_next_k1(packet, installation_dir, secret, base["session_id"])
         luna_control.reserve_spawn(
             installation_dir,
             secret,
             base["session_id"],
             tool_use_id=base["tool_use_id"],
-            task_name=_mapping_text(tool_input, "task_name"),
-            fork_turns=_mapping_text(tool_input, "fork_turns"),
+            task_name="luna_worker",
+            fork_turns="none",
         )
+        _begin_k1_packet(packet, installation_dir, secret, base["session_id"])
         return {}
     if tool_name in _PARENT_COMMUNICATE_TOOLS | _PARENT_CLEANUP_TOOLS:
         luna_control.authorize_parent_target(
@@ -647,12 +730,7 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
                 snapshot = luna_control.read_snapshot(
                     Path(installation_dir), secret, base["session_id"]
                 )
-                if (
-                    snapshot is not None
-                    and snapshot.luna_agent_id == base["agent_id"]
-                    and snapshot.luna_task_path is not None
-                    and snapshot.execution_status != "RETIRED"
-                ):
+                if _snapshot_matches_luna(snapshot, base["agent_id"]):
                     luna_control.observe_turn_boundary(
                         Path(installation_dir),
                         secret,
