@@ -83,7 +83,13 @@ class GlobalInstallTests(unittest.TestCase):
         hooks = json.loads(adapter.install_hook_v2(None, handler).decode("utf-8"))["hooks"]
         self.assertEqual(
             set(hooks),
-            {"UserPromptSubmit", "PreToolUse", "PostToolUse", "SubagentStart"},
+            {
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "SubagentStart",
+                "SubagentStop",
+            },
         )
         luna = tomllib.loads(
             adapter.luna_agent_bytes(ROLE_CONFIG["luna"]).decode("utf-8")
