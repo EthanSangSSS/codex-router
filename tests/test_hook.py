@@ -305,7 +305,7 @@ class HookNativeDelegationTests(HookTestCase):
 
     def test_parent_lifecycle_requires_explicit_actor_and_exact_control_fields(self):
         from codex_router import luna_control as control
-        from codex_router.hook import handle_hook_event
+        from codex_router.hook import handle_hook_event, handle_user_prompt
         from codex_router.protocol import build_luna_packet
 
         control.new_task(
@@ -315,11 +315,27 @@ class HookNativeDelegationTests(HookTestCase):
             native_parent_identity="root-parent",
             native_authority_profile="profile-A",
         )
+        packet_message = build_luna_packet(
+            packet_id="packet-1",
+            generation=1,
+            objective="continue bounded work",
+            working_directory=str(self.root),
+            intended_write_scope=("src/example.py",),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("focused tests pass",),
+            stop_conditions=("scope expansion required",),
+        )
+        spawn_input = {
+            "message": packet_message,
+            "task_name": "luna_worker",
+            "agent_type": "luna_worker",
+            "fork_turns": "none",
+        }
         spawn = self.pretool_event(
             tool_name="spawn_agent",
             session="session-parent",
             tool_use_id="spawn-parent",
-            tool_input={"task_name": "luna_worker", "fork_turns": "none"},
+            tool_input=spawn_input,
             actor_id="root-parent",
             actor_type="primary_sol",
         )
@@ -330,6 +346,7 @@ class HookNativeDelegationTests(HookTestCase):
             "turn_id": "turn-a",
             "tool_name": "spawn_agent",
             "tool_use_id": "spawn-parent",
+            "tool_input": spawn_input,
             "tool_response": {"task_name": "/root/luna_worker"},
             "actor_id": "root-parent",
             "actor_type": "primary_sol",
@@ -341,7 +358,7 @@ class HookNativeDelegationTests(HookTestCase):
         start = {
             "hook_event_name": "SubagentStart",
             "session_id": "session-parent",
-            "turn_id": "turn-a",
+            "turn_id": "luna-turn-1",
             "agent_id": "agent-parent-bound",
             "agent_type": "luna_worker",
         }
@@ -349,6 +366,35 @@ class HookNativeDelegationTests(HookTestCase):
             handle_hook_event(start, self.installation_dir),
             {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
         )
+        self.assertEqual(
+            handle_user_prompt(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session-parent",
+                    "turn_id": "luna-turn-1",
+                    "agent_id": "agent-parent-bound",
+                    "agent_type": "luna_worker",
+                    "prompt": packet_message,
+                    "cwd": str(self.root),
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "SubagentStop",
+                    "session_id": "session-parent",
+                    "turn_id": "luna-turn-1",
+                    "agent_id": "agent-parent-bound",
+                    "agent_type": "luna_worker",
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "SubagentStop"}},
+        )
+
         target_event = self.pretool_event(
             tool_name="send_message",
             session="session-parent",
@@ -361,9 +407,9 @@ class HookNativeDelegationTests(HookTestCase):
             target_output["hookSpecificOutput"]["permissionDecision"], "deny"
         )
 
-        packet_message = build_luna_packet(
-            packet_id="packet-1",
-            generation=1,
+        packet_message_2 = build_luna_packet(
+            packet_id="packet-2",
+            generation=2,
             objective="continue bounded work",
             working_directory=str(self.root),
             intended_write_scope=("src/example.py",),
@@ -377,7 +423,7 @@ class HookNativeDelegationTests(HookTestCase):
             tool_use_id="packet-message",
             tool_input={
                 "target": "/root/luna_worker",
-                "message": packet_message,
+                "message": packet_message_2,
             },
             actor_id="root-parent",
             actor_type="primary_sol",
@@ -386,8 +432,8 @@ class HookNativeDelegationTests(HookTestCase):
         packet_snapshot = control.read_snapshot(
             self.installation_dir, self.secret, "session-parent"
         )
-        self.assertEqual(packet_snapshot.active_packet_id, "packet-1")
-        self.assertEqual(packet_snapshot.packet_generation, 1)
+        self.assertEqual(packet_snapshot.active_packet_id, "packet-2")
+        self.assertEqual(packet_snapshot.packet_generation, 2)
 
         for missing_actor in (
             {},
