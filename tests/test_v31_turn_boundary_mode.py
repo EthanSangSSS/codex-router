@@ -104,7 +104,7 @@ class TurnBoundaryFixture(unittest.TestCase):
             "hook_event_name": "PreToolUse",
             "session_id": session,
             "turn_id": "root-turn",
-            "tool_name": "send_message",
+            "tool_name": "followup_task",
             "tool_use_id": "send-1",
             "tool_input": {"target": "/root/luna_worker", "message": message},
             "actor_id": "root-parent",

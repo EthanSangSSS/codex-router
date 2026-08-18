@@ -567,6 +567,10 @@ def _handle_parent_pretool(
             tool_name=tool_name,
             target=_mapping_text(tool_input, _PARENT_TARGET_FIELDS[tool_name]),
         )
+        if tool_name == "send_message":
+            raise _invalid(
+                "Router K1 dispatch requires followup_task; send_message is queue-only"
+            )
         if tool_name == "interrupt_agent":
             snapshot = luna_control.read_snapshot(
                 installation_dir, secret, base["session_id"]
