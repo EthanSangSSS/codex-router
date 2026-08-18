@@ -24,7 +24,7 @@ ROLE_CONFIG = {
 
 
 class PrimaryCapabilityV3Tests(unittest.TestCase):
-    def test_v3_renderer_exports_full_executor_mode_and_four_hook_events(self):
+    def test_v3_renderer_exports_full_executor_mode_and_five_hook_events(self):
         self.assertEqual(adapter.LUNA_EXECUTION_MODE, "full_executor_v3_1")
         self.assertEqual(
             adapter.BASELINE_HOOK_EVENTS,
@@ -33,6 +33,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
                 "PreToolUse",
                 "PostToolUse",
                 "SubagentStart",
+                "SubagentStop",
             ),
         )
 
@@ -85,6 +86,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
                 "PostToolUse",
                 "PreToolUse",
                 "SubagentStart",
+                "SubagentStop",
                 "UserPromptSubmit",
             ),
         )
@@ -100,6 +102,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
                 "hook-pre-tool",
                 "hook-post-tool",
                 "hook-subagent-start",
+                "hook-subagent-stop",
             },
         )
 
@@ -119,7 +122,8 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "no nested Codex delegation",
             "packet generation replaces prior authority",
             "Hard Authority Pause freezes Router authority immediately",
-            "no N/N+1 overlap before settlement",
+            "native turn boundary closes Router scheduling authority",
+            "does not prove that detached or background OS processes are dead",
             "A1 hard claims only on proven pre-action surfaces",
         ):
             with self.subTest(required=required):
