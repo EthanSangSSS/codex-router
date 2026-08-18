@@ -129,7 +129,9 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "agent_type=luna_worker",
             "fork_turns=none",
             "generation-1 K1 packet as `message`",
-            "later generations use `send_message` or `followup_task`",
+            "later generations use `followup_task`",
+            "`send_message` is queue-only",
+            "must not admit a new K1 generation",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, combined)
@@ -138,6 +140,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "persistent_while_root_turn_active",
             "revoke-only terminal semantics",
             "revoke_only_security_boundary",
+            "later generations use `send_message` or `followup_task`",
         ):
             with self.subTest(stale=stale):
                 self.assertNotIn(stale, combined)
