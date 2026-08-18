@@ -125,6 +125,11 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "native turn boundary closes Router scheduling authority",
             "does not prove that detached or background OS processes are dead",
             "A1 hard claims only on proven pre-action surfaces",
+            "task_name=luna_worker",
+            "agent_type=luna_worker",
+            "fork_turns=none",
+            "generation-1 K1 packet as `message`",
+            "later generations use `send_message` or `followup_task`",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, combined)
