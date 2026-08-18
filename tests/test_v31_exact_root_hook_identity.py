@@ -64,16 +64,70 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         self.assertIn("hookSpecificOutput", output)
         return output
 
-    def _spawn_and_bind_luna(self):
+    def _packet(self, *, packet_id, generation):
+        return build_luna_packet(
+            packet_id=packet_id,
+            generation=generation,
+            objective="modify README and test",
+            working_directory=str(self.root),
+            intended_write_scope=("README.md",),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("tests pass",),
+            stop_conditions=("scope expansion required",),
+        )
+
+    def _spawn_luna_with_initial_packet(self, packet):
         spawn = {
             "hook_event_name": "PreToolUse",
             "session_id": "session-a",
             "turn_id": "root-turn-1",
             "tool_name": "spawn_agent",
             "tool_use_id": "spawn-1",
-            "tool_input": {"task_name": "luna_worker", "fork_turns": "none"},
+            "tool_input": {
+                "message": packet,
+                "task_name": "luna_worker",
+                "agent_type": "luna_worker",
+                "fork_turns": "none",
+            },
         }
         self.assertEqual(handle_hook_event(spawn, self.installation_dir), {})
+        reserved = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        self.assertEqual(reserved.active_packet_id, "packet-1")
+        self.assertEqual(reserved.packet_generation, 1)
+
+        # Exact runtime may surface SubagentStart before the parent spawn result.
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "SubagentStart",
+                    "session_id": "session-a",
+                    "turn_id": "luna-turn-1",
+                    "agent_id": "agent-1",
+                    "agent_type": "luna_worker",
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
+        )
+        self.assertEqual(
+            handle_user_prompt(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session-a",
+                    "turn_id": "luna-turn-1",
+                    "agent_id": "agent-1",
+                    "agent_type": "luna_worker",
+                    "prompt": packet,
+                    "cwd": str(self.root),
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        started = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        self.assertEqual(started.execution_status, "RUNNING")
+        self.assertEqual(started.active_child_turn_id, "luna-turn-1")
+
         self.assertEqual(
             handle_hook_event(
                 {
@@ -89,51 +143,62 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             ),
             {"hookSpecificOutput": {"hookEventName": "PostToolUse"}},
         )
-        self.assertEqual(
-            handle_hook_event(
-                {
-                    "hook_event_name": "SubagentStart",
-                    "session_id": "session-a",
-                    "turn_id": "luna-turn-1",
-                    "agent_id": "agent-1",
-                    "agent_type": "luna_worker",
-                },
-                self.installation_dir,
-            ),
-            {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
+
+    def _stop_luna(self, turn_id):
+        return handle_hook_event(
+            {
+                "hook_event_name": "SubagentStop",
+                "session_id": "session-a",
+                "turn_id": turn_id,
+                "agent_id": "agent-1",
+                "agent_type": "luna_worker",
+            },
+            self.installation_dir,
         )
 
-    def test_exact_root_wire_without_synthetic_actor_fields_can_spawn_and_send_k1(self):
+    def test_exact_root_wire_spawns_with_initial_k1_then_sends_followup_k1(self):
         self._submit_root_prompt()
-        self._spawn_and_bind_luna()
+        packet1 = self._packet(packet_id="packet-1", generation=1)
+        self._spawn_luna_with_initial_packet(packet1)
+        self._stop_luna("luna-turn-1")
 
-        snapshot = control.read_snapshot(self.installation_dir, self.secret, "session-a")
-        packet = build_luna_packet(
-            packet_id="packet-1",
-            generation=snapshot.packet_generation + 1,
-            objective="modify README and test",
-            working_directory=str(self.root),
-            intended_write_scope=("README.md",),
-            explicit_side_effect_authorizations=(),
-            success_criteria=("tests pass",),
-            stop_conditions=("scope expansion required",),
-        )
+        packet2 = self._packet(packet_id="packet-2", generation=2)
         send = {
             "hook_event_name": "PreToolUse",
             "session_id": "session-a",
             "turn_id": "root-turn-1",
             "tool_name": "send_message",
-            "tool_use_id": "send-1",
-            "tool_input": {"target": "/root/luna_worker", "message": packet},
+            "tool_use_id": "send-2",
+            "tool_input": {"target": "/root/luna_worker", "message": packet2},
         }
         self.assertEqual(handle_hook_event(send, self.installation_dir), {})
         admitted = control.read_snapshot(self.installation_dir, self.secret, "session-a")
-        self.assertEqual(admitted.active_packet_id, "packet-1")
-        self.assertEqual(admitted.packet_generation, 1)
+        self.assertEqual(admitted.active_packet_id, "packet-2")
+        self.assertEqual(admitted.packet_generation, 2)
+
+        self.assertEqual(
+            handle_user_prompt(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session-a",
+                    "turn_id": "luna-turn-2",
+                    "agent_id": "agent-1",
+                    "agent_type": "luna_worker",
+                    "prompt": packet2,
+                    "cwd": str(self.root),
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        running = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        self.assertEqual(running.execution_status, "RUNNING")
+        self.assertEqual(running.active_child_turn_id, "luna-turn-2")
 
     def test_identity_free_lifecycle_event_from_noncurrent_turn_fails_closed(self):
         self._submit_root_prompt(turn_id="root-turn-1")
         before = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        packet = self._packet(packet_id="packet-1", generation=1)
 
         output = handle_hook_event(
             {
@@ -142,7 +207,12 @@ class ExactRootHookIdentityTests(unittest.TestCase):
                 "turn_id": "internal-subagent-turn",
                 "tool_name": "spawn_agent",
                 "tool_use_id": "spawn-internal",
-                "tool_input": {"task_name": "luna_worker", "fork_turns": "none"},
+                "tool_input": {
+                    "message": packet,
+                    "task_name": "luna_worker",
+                    "agent_type": "luna_worker",
+                    "fork_turns": "none",
+                },
             },
             self.installation_dir,
         )
@@ -152,29 +222,70 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             control.read_snapshot(self.installation_dir, self.secret, "session-a"), before
         )
 
-    def test_thread_spawn_user_prompt_does_not_replace_root_turn_authority(self):
+    def test_child_user_prompt_binds_turn_without_replacing_root_authority(self):
         self._submit_root_prompt(turn_id="root-turn-1")
-        self._spawn_and_bind_luna()
-        before = control.read_snapshot(self.installation_dir, self.secret, "session-a")
-        self.assertIsNotNone(before.current_root_turn_tag)
-
-        output = handle_user_prompt(
-            {
-                "hook_event_name": "UserPromptSubmit",
-                "session_id": "session-a",
-                "turn_id": "luna-turn-1",
-                "agent_id": "agent-1",
-                "agent_type": "luna_worker",
-                "prompt": "[CODEX_ROUTER_PACKET_V3_1] {}",
-                "cwd": str(self.root),
-            },
-            self.installation_dir,
+        packet = self._packet(packet_id="packet-1", generation=1)
+        before_spawn = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
         )
+        self.assertIsNotNone(before_spawn.current_root_turn_tag)
 
-        self.assertEqual(output, {})
+        self._spawn_luna_with_initial_packet(packet)
+
         after = control.read_snapshot(self.installation_dir, self.secret, "session-a")
-        self.assertEqual(after.current_root_turn_tag, before.current_root_turn_tag)
+        self.assertEqual(after.current_root_turn_tag, before_spawn.current_root_turn_tag)
         self.assertEqual(after.luna_agent_id, "agent-1")
+        self.assertEqual(after.active_child_turn_id, "luna-turn-1")
+        self.assertEqual(after.execution_status, "RUNNING")
+
+    def test_late_old_subagent_stop_cannot_clear_new_generation(self):
+        self._submit_root_prompt()
+        packet1 = self._packet(packet_id="packet-1", generation=1)
+        self._spawn_luna_with_initial_packet(packet1)
+        self._stop_luna("luna-turn-1")
+
+        packet2 = self._packet(packet_id="packet-2", generation=2)
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn-1",
+                    "tool_name": "send_message",
+                    "tool_use_id": "send-2",
+                    "tool_input": {
+                        "target": "/root/luna_worker",
+                        "message": packet2,
+                    },
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        self.assertEqual(
+            handle_user_prompt(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "session-a",
+                    "turn_id": "luna-turn-2",
+                    "agent_id": "agent-1",
+                    "agent_type": "luna_worker",
+                    "prompt": packet2,
+                    "cwd": str(self.root),
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        before = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        self.assertEqual(before.active_child_turn_id, "luna-turn-2")
+
+        self._stop_luna("luna-turn-1")
+
+        after = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        self.assertEqual(after, before)
+        self.assertEqual(after.active_packet_id, "packet-2")
+        self.assertEqual(after.execution_status, "RUNNING")
 
 
 if __name__ == "__main__":
