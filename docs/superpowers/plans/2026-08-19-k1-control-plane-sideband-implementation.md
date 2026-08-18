@@ -438,6 +438,7 @@ admit_staged_spawn(
     secret: bytes,
     session_id: str,
     *,
+    root_turn_id: str,
     tool_use_id: str,
     task_name: str,
     agent_type: str,
@@ -449,11 +450,12 @@ admit_staged_followup(
     secret: bytes,
     session_id: str,
     *,
+    root_turn_id: str,
     target: str,
 ) -> ControlSnapshot
 ```
 
-Each function must use exactly one `_locked_state(..., mutate=True)` transaction and one final `_store_snapshot()` for the successful state mutation.
+Each function must use exactly one `_locked_state(..., mutate=True)` transaction and one final `_store_snapshot()` for the successful state mutation. The current root-turn check is part of that same transaction: before reading or consuming `authority_packet_wire`, derive the tag for `root_turn_id`, require a non-`None` persisted `current_root_turn_tag`, and compare them with `hmac.compare_digest`. Hook-layer root identity remains an early rejection only; the atomic transition is the final authority check.
 
 - [ ] **Step 1: Write RED opaque-message + atomicity tests**
 
@@ -477,9 +479,11 @@ test_followup_wrong_target_changes_neither_stage_nor_generation
 test_followup_commit_and_target_check_use_one_snapshot
 test_send_message_cannot_consume_stage_or_advance_generation
 test_stale_explicit_root_cannot_consume_current_staged_k1
+test_atomic_spawn_revalidates_root_turn_inside_transaction
+test_atomic_followup_revalidates_root_turn_inside_transaction
 ```
 
-For the stale-root test:
+For the Hook-level stale-root integration test:
 
 ```text
 persisted current root = turn-2
@@ -492,6 +496,18 @@ packet_generation unchanged
 pending_spawn unchanged
 ```
 
+For each state-transition-level atomic root-turn test:
+
+```text
+persisted current root = turn-2
+staged packet = generation N authorized by turn-2
+call admit_staged_*(root_turn_id=turn-1)
+    -> fail closed
+    -> authority_packet_wire unchanged
+    -> packet_generation unchanged
+    -> pending_spawn unchanged
+```
+
 - [ ] **Step 2: Run RED**
 
 ```bash
@@ -499,9 +515,9 @@ python -m unittest tests.test_k1_sideband_v31.K1ParentDispatchTests -v
 python -m unittest tests.test_v31_exact_root_hook_identity -v
 ```
 
-Expected: opaque positive cases fail on plaintext K1 parser; stale explicit root is incorrectly admitted by current identity helper.
+Expected: opaque positive cases fail on plaintext K1 parser; stale explicit root is incorrectly admitted by current identity helper; direct atomic stale-root tests fail because the current planned interfaces/implementation do not yet revalidate root authority inside the journal transaction.
 
-- [ ] **Step 3: Implement one-snapshot packet commit semantics**
+- [ ] **Step 3: Implement one-snapshot packet commit semantics with atomic root-turn revalidation**
 
 Inside the overlay, factor the current `begin_packet()` packet/recovery-baseline calculation into a private pure helper that accepts the already-read snapshot and staged packet wire and returns replacement fields without taking another lock. Both `begin_packet()` and the two new atomic admission functions must use that same helper so `recovery_baseline` behavior remains identical.
 
@@ -509,6 +525,9 @@ Inside the overlay, factor the current `begin_packet()` packet/recovery-baseline
 
 ```text
 read current snapshot
+expected_root_tag = _root_turn_tag(secret, root_turn_id)
+require snapshot.current_root_turn_tag is not None
+require hmac.compare_digest(snapshot.current_root_turn_tag, expected_root_tag)
 validate ACTIVE / eligible execution / current staged K1 / exact next generation
 validate task_name / agent_type / fork_turns
 validate no pending/bound executor
@@ -525,6 +544,9 @@ Any exception before `_store_snapshot()` must leave journal bytes logically unch
 
 ```text
 read current snapshot
+expected_root_tag = _root_turn_tag(secret, root_turn_id)
+require snapshot.current_root_turn_tag is not None
+require hmac.compare_digest(snapshot.current_root_turn_tag, expected_root_tag)
 validate exact current executor target
 validate IDLE/PAUSED_SETTLED
 validate staged K1 + exact next generation
@@ -533,7 +555,7 @@ commit packet metadata while retaining authority_packet_wire
 store once
 ```
 
-No separate `authorize_parent_target()` then commit transaction for follow-up.
+No separate `authorize_parent_target()` then commit transaction for follow-up, and no root-turn authorization result computed outside this lock is sufficient to consume staged authority.
 
 - [ ] **Step 4: Make current-root-turn mandatory for every root lifecycle event**
 
@@ -548,9 +570,11 @@ only then -> root
 
 Preserve the already-approved identity-free root fallback by allowing missing actor fields **only when** current root turn matches. Do not require actor fields on runtimes that omit them.
 
+This Hook-layer check is defense in depth and early rejection. `admit_staged_spawn()` / `admit_staged_followup()` must still revalidate `root_turn_id` against the locked snapshot immediately before staged authority is consumed.
+
 - [ ] **Step 5: Replace plaintext K1 parsing in parent V2 admission**
 
-`spawn_agent` calls `admit_staged_spawn(...)`; `followup_task` calls `admit_staged_followup(...)`. Neither parses `tool_input.message`.
+`spawn_agent` calls `admit_staged_spawn(..., root_turn_id=base["turn_id"], ...)`; `followup_task` calls `admit_staged_followup(..., root_turn_id=base["turn_id"], ...)`. Neither parses `tool_input.message`.
 
 `send_message` authorizes current target then denies QueueOnly without consuming stage.
 
@@ -574,7 +598,7 @@ git commit -m "fix: atomically admit staged K1 native dispatch"
 
 - [ ] **Step 8: Review gate**
 
-Security review must explicitly inspect failure-before-store paths and prove no `pending_spawn` poison state can survive a denied Gen1 admission.
+Security review must explicitly inspect failure-before-store paths, prove no `pending_spawn` poison state can survive a denied Gen1 admission, and prove stale `root_turn_id` cannot consume a newer root turn's staged authority even if Hook-layer identity checking raced before the journal lock was acquired.
 
 ---
 
@@ -941,7 +965,7 @@ Task dependencies are strict:
 - Recovery overlay coverage: `luna_control_recovery.py` is explicitly modified/tested for schema migration, current-root invalidation, recovery baseline, and atomic admission.
 - Atomicity: Gen1 reservation + packet commit and Gen2 target-check + packet commit occur in one journal transaction each; no plan step calls `reserve_spawn()` followed by a separate packet transaction.
 - Sideband capability gate: routing readiness cannot be `COMPATIBLE` unless `router_stage_k1_exec` is positively evidenced.
-- Root-turn gate: current persisted root turn is mandatory even when explicit root actor metadata is present; identity-free exact-runtime fallback remains compatible.
+- Root-turn gate: current persisted root turn is mandatory even when explicit root actor metadata is present; identity-free exact-runtime fallback remains compatible. Task 4 additionally revalidates `root_turn_id` inside the same locked transaction that consumes staged K1, closing the Hook-check/commit TOCTOU window.
 - Impossible-state invariant: active packet with neither child turn nor staged authority wire is rejected.
 - Renderer source: Task 6 is fixed to `global_install_adapter.py`.
 - No placeholders/TODO/TBD remain.
