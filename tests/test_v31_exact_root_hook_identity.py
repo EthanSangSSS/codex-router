@@ -226,6 +226,216 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             control.read_snapshot(self.installation_dir, self.secret, "session-a"), before
         )
 
+    def test_current_app_collaboration_spawn_alias_is_admitted_at_root_pretool(self):
+        self._submit_root_prompt()
+        packet = self._packet(packet_id="packet-1", generation=1)
+        spawn = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "session-a",
+            "turn_id": "root-turn-1",
+            "tool_name": "collaborationspawn_agent",
+            "tool_use_id": "spawn-alias-1",
+            "tool_input": {
+                "message": packet,
+                "task_name": "luna_worker",
+                "agent_type": "luna_worker",
+                "fork_turns": "none",
+            },
+        }
+
+        self.assertEqual(handle_hook_event(spawn, self.installation_dir), {})
+        snapshot = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
+        )
+        self.assertEqual(snapshot.active_packet_id, "packet-1")
+        self.assertEqual(snapshot.packet_generation, 1)
+        self.assertIsNotNone(snapshot.pending_spawn)
+
+    def test_current_app_collaboration_spawn_alias_is_corroborated_at_posttool(self):
+        self._submit_root_prompt()
+        packet = self._packet(packet_id="packet-1", generation=1)
+        spawn_input = {
+            "message": packet,
+            "task_name": "luna_worker",
+            "agent_type": "luna_worker",
+            "fork_turns": "none",
+        }
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn-1",
+                    "tool_name": "collaborationspawn_agent",
+                    "tool_use_id": "spawn-alias-2",
+                    "tool_input": spawn_input,
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn-1",
+                    "tool_name": "collaborationspawn_agent",
+                    "tool_use_id": "spawn-alias-2",
+                    "tool_input": spawn_input,
+                    "tool_response": {"task_name": "/root/luna_worker"},
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "PostToolUse"}},
+        )
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "SubagentStart",
+                    "session_id": "session-a",
+                    "turn_id": "luna-turn-1",
+                    "agent_id": "agent-alias-2",
+                    "agent_type": "luna_worker",
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
+        )
+        snapshot = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
+        )
+        self.assertEqual(snapshot.luna_agent_id, "agent-alias-2")
+        self.assertIsNone(snapshot.pending_spawn)
+
+    def test_current_app_collaboration_followup_alias_admits_generation_two(self):
+        self._submit_root_prompt()
+        packet1 = self._packet(packet_id="packet-1", generation=1)
+        self._spawn_luna_with_initial_packet(packet1)
+        self._stop_luna("luna-turn-1")
+        packet2 = self._packet(packet_id="packet-2", generation=2)
+
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn-1",
+                    "tool_name": "collaborationfollowup_task",
+                    "tool_use_id": "followup-alias-2",
+                    "tool_input": {
+                        "target": "/root/luna_worker",
+                        "message": packet2,
+                    },
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        snapshot = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
+        )
+        self.assertEqual(snapshot.active_packet_id, "packet-2")
+        self.assertEqual(snapshot.packet_generation, 2)
+
+    def test_current_app_collaboration_send_alias_remains_queue_only(self):
+        self._submit_root_prompt()
+        packet1 = self._packet(packet_id="packet-1", generation=1)
+        self._spawn_luna_with_initial_packet(packet1)
+        self._stop_luna("luna-turn-1")
+        before = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
+        )
+        packet2 = self._packet(packet_id="packet-2", generation=2)
+
+        output = handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-a",
+                "turn_id": "root-turn-1",
+                "tool_name": "collaborationsend_message",
+                "tool_use_id": "send-alias-2",
+                "tool_input": {
+                    "target": "/root/luna_worker",
+                    "message": packet2,
+                },
+            },
+            self.installation_dir,
+        )
+
+        self.assertEqual(
+            output.get("hookSpecificOutput", {}).get("permissionDecision"),
+            "deny",
+        )
+        self.assertIn(
+            "followup_task",
+            output.get("hookSpecificOutput", {}).get(
+                "permissionDecisionReason", ""
+            ),
+        )
+        self.assertEqual(
+            control.read_snapshot(self.installation_dir, self.secret, "session-a"),
+            before,
+        )
+
+    def test_current_app_collaboration_lifecycle_alias_remains_denied_for_luna(self):
+        self._submit_root_prompt()
+        packet = self._packet(packet_id="packet-1", generation=1)
+        self._spawn_luna_with_initial_packet(packet)
+
+        output = handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-a",
+                "turn_id": "luna-turn-1",
+                "tool_name": "collaborationfollowup_task",
+                "tool_use_id": "child-followup-alias",
+                "tool_input": {"target": "/root/luna_worker"},
+                "agent_id": "agent-1",
+                "agent_type": "luna_worker",
+            },
+            self.installation_dir,
+        )
+
+        self.assertEqual(
+            output.get("hookSpecificOutput", {}).get("permissionDecision"),
+            "deny",
+        )
+        self.assertIn(
+            "lifecycle continuation",
+            output.get("hookSpecificOutput", {}).get(
+                "permissionDecisionReason", ""
+            ),
+        )
+
+    def test_unknown_collaboration_agent_name_remains_fail_closed(self):
+        self._submit_root_prompt()
+        before = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
+        )
+
+        output = handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": "session-a",
+                "turn_id": "root-turn-1",
+                "tool_name": "collaborationevil_agent",
+                "tool_use_id": "unknown-alias",
+                "tool_input": {},
+            },
+            self.installation_dir,
+        )
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn(
+            "unknown agent lifecycle operation",
+            output["hookSpecificOutput"]["permissionDecisionReason"],
+        )
+        self.assertEqual(
+            control.read_snapshot(self.installation_dir, self.secret, "session-a"),
+            before,
+        )
+
     def test_identity_free_lifecycle_event_from_noncurrent_turn_fails_closed(self):
         self._submit_root_prompt(turn_id="root-turn-1")
         before = control.read_snapshot(self.installation_dir, self.secret, "session-a")

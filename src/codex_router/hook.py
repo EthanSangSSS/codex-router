@@ -51,6 +51,14 @@ _PARENT_TARGET_FIELDS = {
     "close_agent": "target",
     "resume_agent": "id",
 }
+_CURRENT_APP_TOOL_ALIASES = {
+    "collaborationspawn_agent": "spawn_agent",
+    "collaborationfollowup_task": "followup_task",
+    "collaborationsend_message": "send_message",
+    "collaborationwait_agent": "wait_agent",
+    "collaborationinterrupt_agent": "interrupt_agent",
+    "collaborationlist_agents": "list_agents",
+}
 _ROOT_ACTOR_TYPES = {"root", "primary", "primary_sol", "sol", "local_sol"}
 _CHILD_ACTOR_TYPES = {"child", "subagent", "luna_worker"}
 _DEFAULT_NATIVE_PARENT_IDENTITY = "root-parent"
@@ -415,6 +423,10 @@ def _looks_like_agent_lifecycle_tool(tool_name: str) -> bool:
     )
 
 
+def _canonical_hook_tool_name(name: str) -> str:
+    return _CURRENT_APP_TOOL_ALIASES.get(name, name)
+
+
 def _actor_identity(event: Mapping[str, Any]) -> tuple[str | None, str | None, bool]:
     has_actor_fields = "actor_id" in event or "actor_type" in event
     has_agent_fields = "agent_id" in event or "agent_type" in event
@@ -631,6 +643,7 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             base = _event_base(
                 event, name, ("session_id", "turn_id", "tool_name", "tool_use_id")
             )
+            base["tool_name"] = _canonical_hook_tool_name(base["tool_name"])
             tool_input = event.get("tool_input")
             if not isinstance(tool_input, Mapping):
                 raise _invalid("tool_input must be an object")
@@ -680,6 +693,7 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             base = _event_base(
                 event, name, ("session_id", "turn_id", "tool_name", "tool_use_id")
             )
+            base["tool_name"] = _canonical_hook_tool_name(base["tool_name"])
             if base["tool_name"] != "spawn_agent":
                 return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
             if (
