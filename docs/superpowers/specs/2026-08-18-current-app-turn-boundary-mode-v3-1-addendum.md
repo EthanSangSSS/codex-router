@@ -18,7 +18,7 @@ The architecture remains a Minimal Control Plane. This addendum does not add a P
 
 ## 2. Runtime fact driving the change
 
-Current-App evidence established all of the following:
+Current-App evidence established:
 
 ```text
 interrupt acknowledgement != settlement
@@ -27,9 +27,7 @@ background Unified Exec can outlive the initiating turn/interrupt path
 current App does not expose the app-server control socket needed for native background-terminal inventory
 ```
 
-Exact bundled Codex source also exposes `SubagentStop` for a thread-spawn child turn. `SubagentStop` is therefore a usable native Luna turn boundary, but it is not evidence that every OS descendant, detached process, or background terminal has terminated.
-
-Accordingly:
+Exact bundled Codex source exposes `SubagentStop` for a thread-spawn child turn. It is a usable native Luna turn boundary, but it is not evidence that every OS descendant, detached process, or background terminal has terminated.
 
 ```text
 SubagentStop = native Luna turn boundary
@@ -64,7 +62,7 @@ Router must not claim mechanical proof of:
 - physical process settlement from SubagentStop alone
 ```
 
-The Luna profile must continue to prohibit intentional daemonization, detached long-lived background work, and nested Codex delegation. On the current App, those are policy/cooperative constraints except where a separate native control is proven.
+The Luna profile continues to prohibit intentional daemonization, detached long-lived background work, and nested Codex delegation. On the current App those are policy/cooperative constraints except where a separate native control is proven.
 
 ### 3.3 A1 remains separately gated
 
@@ -94,6 +92,8 @@ SubagentStop
 
 `SubagentStop` is added only to close the native Luna turn-authority lifecycle. It is not a process-kill or process-settlement Hook.
 
+The packaged CLI must expose the corresponding `hook-subagent-stop` entry point so the installed Hook command is executable from a fresh wheel.
+
 ## 5. Runtime lifecycle wiring
 
 ### 5.1 Packet admission
@@ -107,26 +107,31 @@ parent communication tool
 -> begin_packet(...)
 ```
 
-`begin_packet` reserves the generation and packet authority. It does not by itself assert that Luna execution has started.
+`begin_packet` reserves the generation and packet authority. It does not assert that Luna execution has started.
 
 ### 5.2 Execution start
 
-The first exact bound-Luna runtime event for the admitted packet that provides the native child turn identity starts the execution record.
-
-Preferred source:
+Every ordinary bound-Luna `PreToolUse` event must be reconciled against the current active packet before the tool executes.
 
 ```text
 bound-Luna PreToolUse
 -> start_execution(..., child_turn_id=event.turn_id)
 ```
 
-If the Luna turn completes without invoking any tool, `SubagentStop` may close the admitted packet directly only when the bound Luna identity and current generation are unambiguous.
+The first event changes `IDLE + active_packet` to `RUNNING` and binds `active_child_turn_id`.
 
-Repeated tool events for the same already-bound child turn are idempotent. A different child turn for the same active generation fails closed.
+Repeated tool events with the same child turn are idempotent. A different child turn for the same active generation fails closed. A bound Luna ordinary tool call when no active K1 packet exists fails closed rather than running as unscheduled work.
 
 ### 5.3 Immediate authority freeze
 
-A superseding substantive user instruction or explicit Router pause freezes the old generation's Router authority immediately when an execution is active:
+Router freezes the old generation before later authority can be issued when either condition occurs:
+
+```text
+A. a new UserPromptSubmit arrives while the current execution is RUNNING
+B. primary Sol issues interrupt_agent against the exact current Luna while RUNNING
+```
+
+The transition is:
 
 ```text
 RUNNING -> QUIESCING
@@ -137,53 +142,81 @@ After freeze:
 ```text
 - no new parent work may be sent to that Luna turn
 - stale output cannot advance authority
-- interrupt/close cleanup targeting may remain allowed
+- interrupt/close cleanup targeting remains allowed
 ```
 
-An interrupt acknowledgement never settles the turn.
+A repeated freeze is idempotent. An interrupt acknowledgement never settles the turn.
 
-### 5.4 Native turn boundary
+A new user prompt received while the Luna is already `IDLE` does not replace the Luna or advance `task_epoch`; the persistent task-epoch model remains unchanged.
 
-For an exact bound Luna, matching `SubagentStop` closes the Router scheduling boundary for that Luna turn.
+### 5.4 Exact turn-boundary transition
 
-Normal completion path:
+The control plane adds one explicit native-turn transition:
+
+```python
+observe_turn_boundary(
+    directory,
+    secret,
+    session_id,
+    *,
+    child_turn_id,
+) -> Literal["CURRENT", "STALE"]
+```
+
+The Hook validates exact `session_id`, bound Luna `agent_id`, and `agent_type=luna_worker` before calling it.
+
+Its state contract is:
 
 ```text
-RUNNING
--> SubagentStop(exact bound Luna / exact active child turn)
--> IDLE or equivalent packet-complete scheduling state
+IDLE + active_packet + active_child_turn_id=None
+  + exact bound-Luna SubagentStop
+  -> clear active packet metadata
+  -> remain IDLE
+  -> CURRENT
+  # valid no-tool Luna turn
+
+RUNNING + matching active_child_turn_id
+  + exact bound-Luna SubagentStop
+  -> clear active packet + child-turn metadata
+  -> IDLE
+  -> CURRENT
+
+QUIESCING + matching active_child_turn_id
+  + exact bound-Luna SubagentStop
+  -> retain retired packet identity required by PAUSED_SETTLED
+  -> PAUSED_SETTLED
+  -> CURRENT
+
+no active packet, PAUSED_SETTLED, RETIRED, or historical event
+  -> no authority mutation
+  -> STALE
 ```
 
-Paused path:
+A mismatched non-null `active_child_turn_id` is a conflict and fails closed; it is not silently treated as stale.
 
-```text
-QUIESCING
--> SubagentStop(exact bound Luna / exact active child turn)
--> PAUSED_SETTLED for Router scheduling authority
-```
+For the `IDLE + active_packet` no-tool case, there is no previously accepted turn waiting for a late `SubagentStop`: normal packet completion is driven by this same Hook. The Router still serializes one packet/turn per bound Luna.
 
-The resulting state means:
+The resulting boundary means:
 
 ```text
 ROUTER_TURN_AUTHORITY_SETTLED=YES
 PHYSICAL_OS_PROCESS_SETTLEMENT=NOT_CLAIMED
 ```
 
-This boundary permits the next Router-authorized generation while preserving the explicit policy prohibition on detached/background work.
+### 5.5 SubagentStop Hook behavior
 
-### 5.5 Identity mismatch and incomplete evidence
-
-Any of the following fails closed:
+`SubagentStop` must require:
 
 ```text
-- SubagentStop for an unbound or historical Luna
-- wrong session/task/luna epoch
-- wrong active child turn when one is recorded
-- ambiguous child actor identity
-- conflicting native turn identity for the same generation
+session_id
+turn_id
+agent_id
+agent_type
 ```
 
-When runtime identity cannot be reconciled safely, Router uses the existing quarantine path rather than guessing settlement.
+For the exact current `luna_worker`, it invokes `observe_turn_boundary(..., child_turn_id=turn_id)`.
+
+A historical/unbound Luna, ambiguous child actor, or conflicting current turn fails closed and cannot mutate the active generation. A `SubagentStop` with no active packet is a stale lifecycle observation and performs no authority mutation.
 
 ## 6. Quarantine interaction
 
@@ -203,29 +236,36 @@ The existing clean-baseline independent-repository recovery escape hatch remains
 
 ## 7. Minimal implementation delta
 
-Implementation should be limited to the existing lifecycle/control seams:
+Implementation is limited to existing lifecycle/control seams:
 
 ```text
+src/codex_router/cli.py
 src/codex_router/global_install_adapter.py
 src/codex_router/hook.py
 src/codex_router/luna_control.py and/or the existing recovery overlay only if required
-existing focused tests
+focused tests
 README/manual acceptance wording
 ```
 
 No new subsystem is authorized.
 
-Required implementation behaviors:
+Required behaviors:
 
 ```text
 1. baseline installer renders SubagentStop as the fifth managed Hook
-2. exact bound-Luna PreToolUse binds/starts the active child turn idempotently
-3. matching SubagentStop closes the current Router turn boundary
-4. QUIESCING + matching SubagentStop reaches Router scheduling settlement
-5. Interrupted remains non-settling
-6. stale/mismatched SubagentStop fails closed and cannot mutate current authority
-7. quarantined cleanup-only targeting remains unchanged
-8. README/status wording stops claiming physical process settlement on current App
+2. fresh-wheel CLI exposes hook-subagent-stop
+3. exact bound-Luna PreToolUse starts/binds execution idempotently
+4. unscheduled bound-Luna ordinary tools fail closed
+5. new UserPromptSubmit freezes a RUNNING generation before processing new authority
+6. interrupt_agent freezes RUNNING authority before native interrupt executes
+7. exact SubagentStop invokes observe_turn_boundary
+8. normal RUNNING SubagentStop clears the packet and returns to IDLE
+9. QUIESCING SubagentStop reaches PAUSED_SETTLED for Router scheduling authority
+10. no-tool exact SubagentStop safely clears an admitted packet
+11. Interrupted remains non-settling
+12. stale/mismatched SubagentStop cannot mutate current authority
+13. quarantined cleanup-only targeting remains unchanged
+14. README/status wording stops claiming physical process settlement on current App
 ```
 
 ## 8. Non-goals
@@ -246,19 +286,22 @@ Explicitly out of scope:
 
 ## 9. Offline acceptance
 
-Repository implementation is acceptable only when all existing tests still pass and new focused tests prove at least:
+Repository implementation is acceptable only when all existing tests still pass and focused tests prove:
 
 ```text
-- five baseline Hooks exactly, including SubagentStop
-- SubagentStop handler is installed and callable from the packaged wheel
+- exactly five baseline Hooks including SubagentStop
+- packaged `hook-subagent-stop` CLI path exists
 - first bound-Luna tool event starts execution once
 - repeated same-turn events are idempotent
-- mismatched turn id fails closed
-- no-tool Luna turn can close safely through exact SubagentStop identity
-- RUNNING + exact SubagentStop closes the scheduling boundary
-- QUIESCING + exact SubagentStop closes Router scheduling authority
+- unscheduled bound-Luna ordinary tool call is denied
+- different active child turn fails closed
+- no-tool Luna turn closes through exact SubagentStop identity
+- RUNNING + exact SubagentStop returns to IDLE with packet authority cleared
+- QUIESCING + exact SubagentStop reaches PAUSED_SETTLED
+- new UserPromptSubmit freezes an active RUNNING generation
+- interrupt_agent freezes before cleanup dispatch
 - Interrupted still cannot settle
-- old/stale SubagentStop cannot mutate a replacement Luna/generation
+- old/unbound/mismatched SubagentStop cannot mutate replacement/current authority
 - quarantine recovery regressions remain green
 ```
 
@@ -312,6 +355,9 @@ SUBAGENT_STOP!=PROCESS_DEATH_PROOF
 BASELINE_HOOK_COUNT=5
 BASELINE_HOOKS=UserPromptSubmit,PreToolUse,PostToolUse,SubagentStart,SubagentStop
 
+BOUND_LUNA_TOOL_WITHOUT_ACTIVE_PACKET=DENY
+NEW_USER_PROMPT_WHILE_RUNNING=FREEZE_OLD_AUTHORITY
+INTERRUPT_AGENT_WHILE_RUNNING=FREEZE_BEFORE_NATIVE_INTERRUPT
 INTERRUPT_ACK=NOT_SETTLED
 AMBIGUOUS_IDENTITY=FAIL_CLOSED
 QUARANTINE=EXCEPTION_PATH
