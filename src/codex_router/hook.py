@@ -175,20 +175,26 @@ def handle_user_prompt(
     policy = classify_prompt(validated["prompt"])
     try:
         secret, config = _load_installation(Path(installation_dir))
-        if policy.decision not in ("direct", "bypass"):
-            snapshot = luna_control.read_snapshot(
+        snapshot = luna_control.read_snapshot(
+            Path(installation_dir),
+            secret,
+            validated["session_id"],
+        )
+        if snapshot is not None and snapshot.execution_status == "RUNNING":
+            snapshot = luna_control.freeze_authority(
                 Path(installation_dir),
                 secret,
                 validated["session_id"],
+                reason="user_prompt_supersession",
             )
-            if snapshot is None:
-                luna_control.new_task(
-                    Path(installation_dir),
-                    secret,
-                    validated["session_id"],
-                    native_parent_identity=_DEFAULT_NATIVE_PARENT_IDENTITY,
-                    native_authority_profile=_DEFAULT_NATIVE_AUTHORITY_PROFILE,
-                )
+        if policy.decision not in ("direct", "bypass") and snapshot is None:
+            luna_control.new_task(
+                Path(installation_dir),
+                secret,
+                validated["session_id"],
+                native_parent_identity=_DEFAULT_NATIVE_PARENT_IDENTITY,
+                native_authority_profile=_DEFAULT_NATIVE_AUTHORITY_PROFILE,
+            )
     except Exception:
         return {"decision": "block", "reason": _BLOCK_REASON}
 
@@ -383,12 +389,20 @@ def _handle_luna_pretool(
     *,
     event: Mapping[str, Any],
     base: Mapping[str, Any],
+    installation_dir: Path,
+    secret: bytes,
 ) -> dict[str, Any]:
     tool_name = base["tool_name"]
     if _looks_like_agent_lifecycle_tool(tool_name):
         return _pretool_output(
             "deny", "Luna tool surface forbids agent lifecycle continuation"
         )
+    luna_control.start_execution(
+        installation_dir,
+        secret,
+        base["session_id"],
+        child_turn_id=base["turn_id"],
+    )
     return {}
 
 
@@ -418,6 +432,17 @@ def _handle_parent_pretool(
             tool_name=tool_name,
             target=_mapping_text(tool_input, _PARENT_TARGET_FIELDS[tool_name]),
         )
+        if tool_name == "interrupt_agent":
+            snapshot = luna_control.read_snapshot(
+                installation_dir, secret, base["session_id"]
+            )
+            if snapshot is not None and snapshot.execution_status == "RUNNING":
+                luna_control.freeze_authority(
+                    installation_dir,
+                    secret,
+                    base["session_id"],
+                    reason="parent_interrupt",
+                )
         if tool_name in _PARENT_COMMUNICATE_TOOLS:
             _admit_k1_packet(
                 tool_input=tool_input,
@@ -480,6 +505,8 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
                 return _handle_luna_pretool(
                     event=event,
                     base=base,
+                    installation_dir=Path(installation_dir),
+                    secret=secret,
                 )
             _agent_id, agent_type = _child_identity(event)
             if agent_type == "luna_worker":
@@ -549,8 +576,26 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             return {}
 
         if name == "SubagentStop":
-            _event_base(event, name, ("session_id", "turn_id"))
-            return {}
+            base = _event_base(
+                event, name, ("session_id", "turn_id", "agent_id", "agent_type")
+            )
+            if base["agent_type"] == "luna_worker":
+                snapshot = luna_control.read_snapshot(
+                    Path(installation_dir), secret, base["session_id"]
+                )
+                if (
+                    snapshot is not None
+                    and snapshot.luna_agent_id == base["agent_id"]
+                    and snapshot.luna_task_path is not None
+                    and snapshot.execution_status != "RETIRED"
+                ):
+                    luna_control.observe_turn_boundary(
+                        Path(installation_dir),
+                        secret,
+                        base["session_id"],
+                        child_turn_id=base["turn_id"],
+                    )
+            return {"hookSpecificOutput": {"hookEventName": "SubagentStop"}}
 
         raise _invalid("unsupported hook event")
     except RouterStateError as error:
