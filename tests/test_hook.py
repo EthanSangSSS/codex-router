@@ -418,7 +418,7 @@ class HookNativeDelegationTests(HookTestCase):
             stop_conditions=("scope expansion required",),
         )
         packet_event = self.pretool_event(
-            tool_name="send_message",
+            tool_name="followup_task",
             session="session-parent",
             tool_use_id="packet-message",
             tool_input={
