@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-19-k1-control-plane-sideband-design.md`
 
+**Implementation authorization:** Approved by the user on 2026-08-19. Repository task execution may begin only after the exact planning head containing this note has passing CI + Secret Scan and the local worktree passes the pre-implementation sync gate.
+
 ## Global Constraints
 
 - K1 plaintext is Router authoritative control plane; native collaboration message plaintext is never an authority source.
