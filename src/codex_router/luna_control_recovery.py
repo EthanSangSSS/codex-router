@@ -8,6 +8,8 @@ single persistence implementation.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+import hashlib
+import hmac
 from pathlib import Path
 import re
 import subprocess
@@ -102,6 +104,7 @@ def install(base) -> None:
     @dataclass(frozen=True)
     class ControlSnapshot(OriginalControlSnapshot):
         recovery_baseline: RecoveryBaseline | None = None
+        current_root_turn_tag: str | None = None
 
     def validate_recovery_baseline(value: RecoveryBaseline) -> None:
         if not isinstance(value, RecoveryBaseline):
@@ -122,6 +125,9 @@ def install(base) -> None:
             validate_recovery_baseline(baseline)
             if snapshot.active_packet_id is None:
                 raise base._error("recovery baseline requires an active packet")
+        root_turn_tag = snapshot.current_root_turn_tag
+        if root_turn_tag is not None and base._TAG_RE.fullmatch(root_turn_tag) is None:
+            raise base._error("current root turn tag is invalid")
         if snapshot.execution_status == "QUARANTINED" and snapshot.active_packet_id is None:
             raise base._error("quarantined execution requires an active packet")
 
@@ -138,6 +144,8 @@ def install(base) -> None:
                 data[field] = ()
         if "recovery_baseline" not in data:
             data["recovery_baseline"] = None
+        if "current_root_turn_tag" not in data:
+            data["current_root_turn_tag"] = None
         expected_fields = set(ControlSnapshot.__dataclass_fields__)
         if set(data) != expected_fields:
             raise base._error("control snapshot schema is invalid")
@@ -180,6 +188,46 @@ def install(base) -> None:
             raise base._error("control snapshot schema is invalid") from error
         validate_snapshot(snapshot)
         return snapshot
+
+    def _root_turn_tag(secret: bytes, turn_id: str) -> str:
+        key = base._secret(secret)
+        turn = base._text(turn_id, "root turn_id")
+        assert turn is not None
+        return hmac.new(
+            key,
+            b"v3.1-root-turn\0" + turn.encode("utf-8", errors="strict"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def set_current_root_turn(
+        directory: Path,
+        secret: bytes,
+        session_id: str,
+        *,
+        turn_id: str | None,
+    ) -> ControlSnapshot:
+        turn_tag = None if turn_id is None else _root_turn_tag(secret, turn_id)
+        tag = base.session_tag(secret, session_id)
+        with base._locked_state(Path(directory), mutate=True) as state:
+            snapshot = base._record_for_session(state, tag)
+            if turn_tag is not None and snapshot.logical_task_status != "ACTIVE":
+                raise base._error("only an active task may bind root turn authority")
+            updated = replace(snapshot, current_root_turn_tag=turn_tag)
+            base._store_snapshot(state, updated)
+            return updated
+
+    def is_current_root_turn(
+        directory: Path,
+        secret: bytes,
+        session_id: str,
+        *,
+        turn_id: str,
+    ) -> bool:
+        snapshot = base.read_snapshot(directory, secret, session_id)
+        if snapshot is None or snapshot.current_root_turn_tag is None:
+            return False
+        candidate = _root_turn_tag(secret, turn_id)
+        return hmac.compare_digest(snapshot.current_root_turn_tag, candidate)
 
     def begin_packet(
         directory: Path,
@@ -551,6 +599,7 @@ def install(base) -> None:
                 intended_write_scope=(),
                 explicit_side_effect_authorizations=(),
                 recovery_baseline=None,
+                current_root_turn_tag=previous.current_root_turn_tag,
             )
             base._store_snapshot(state, replacement_snapshot)
             return replacement_snapshot
@@ -577,6 +626,8 @@ def install(base) -> None:
     base._SNAPSHOT_FIELDS = frozenset(ControlSnapshot.__dataclass_fields__)
     base.validate_snapshot = validate_snapshot
     base._snapshot_from_mapping = snapshot_from_mapping
+    base.set_current_root_turn = set_current_root_turn
+    base.is_current_root_turn = is_current_root_turn
     base.begin_packet = begin_packet
     base.current_luna = current_luna
     base.authorize_parent_target = authorize_parent_target
