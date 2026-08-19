@@ -17,7 +17,7 @@ from .global_install_adapter import (
 )
 from . import luna_control
 from .hook import MAX_HOOK_INPUT_BYTES, _load_installation, handle_hook_event, read_hook_event
-from .protocol import ProtocolError, parse_luna_packet
+from .protocol import ProtocolError, build_luna_packet, parse_luna_packet
 from .pipeline import Router, RouterRunError
 from .state import RouterStateError, fail_stage, get_status, start_run, submit_stage
 from .types import GlobalStatus, TransitionResult
@@ -42,6 +42,21 @@ def _bounded_parser_message(message: str) -> str:
 class RouterArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
         raise RouterStateError("invalid-input", _bounded_parser_message(message))
+
+
+class _UniqueStore(argparse.Action):
+    """Reject duplicate structured packet singleton options during parsing."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        value: str,
+        option_string: str | None = None,
+    ) -> None:
+        if getattr(namespace, self.dest, None) is not None:
+            raise argparse.ArgumentError(self, f"{option_string} may occur once")
+        setattr(namespace, self.dest, value)
 
 
 def _add_transition_identity_arguments(command: argparse.ArgumentParser) -> None:
@@ -106,6 +121,23 @@ def parser() -> argparse.ArgumentParser:
     stage_k1.add_argument("--session-id", required=True)
     stage_k1.add_argument("--root-turn-id", required=True)
     stage_k1.add_argument("--capability", required=True)
+
+    stage_fields = subcommands.add_parser(
+        "stage-k1-fields", help="stage one canonical K1 authority packet from fields"
+    )
+    stage_fields.add_argument("--installation-dir", type=Path, required=True)
+    stage_fields.add_argument("--session-id", required=True)
+    stage_fields.add_argument("--root-turn-id", required=True)
+    stage_fields.add_argument("--capability", required=True)
+    stage_fields.add_argument("--packet-id", action=_UniqueStore, required=True)
+    stage_fields.add_argument("--objective", action=_UniqueStore, required=True)
+    stage_fields.add_argument("--working-directory", action=_UniqueStore, required=True)
+    stage_fields.add_argument("--intended-write-scope", action="append", default=[])
+    stage_fields.add_argument(
+        "--explicit-side-effect-authorization", action="append", default=[]
+    )
+    stage_fields.add_argument("--success-criterion", action="append", default=[])
+    stage_fields.add_argument("--stop-condition", action="append", default=[])
 
     install = subcommands.add_parser(
         "global-install", help="install the reversible global Router policy"
@@ -221,6 +253,77 @@ def _read_stage_packet() -> str:
         raise RouterStateError("invalid-input", "K1 packet must be UTF-8") from error
 
 
+def _validate_structured_packet_text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise RouterStateError("invalid-input", f"{field} must be non-empty text")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise RouterStateError("invalid-input", f"{field} must be valid UTF-8") from error
+    if len(encoded) > MAX_HOOK_INPUT_BYTES:
+        raise RouterStateError("invalid-input", f"{field} exceeds the input limit")
+    return value
+
+
+def _validated_structured_packet_list(value: object, field: str) -> list[str]:
+    if not isinstance(value, list):
+        raise RouterStateError("invalid-input", f"{field} is invalid")
+    return [_validate_structured_packet_text(item, field) for item in value]
+
+
+def _stage_k1_fields(args: argparse.Namespace) -> dict[str, object]:
+    packet_id = _validate_structured_packet_text(args.packet_id, "packet_id")
+    objective = _validate_structured_packet_text(args.objective, "objective")
+    working_directory = _validate_structured_packet_text(
+        args.working_directory, "working_directory"
+    )
+    if not Path(working_directory).is_absolute():
+        raise RouterStateError("invalid-input", "working_directory must be absolute")
+    intended_write_scope = _validated_structured_packet_list(
+        args.intended_write_scope, "intended_write_scope"
+    )
+    authorizations = _validated_structured_packet_list(
+        args.explicit_side_effect_authorization,
+        "explicit_side_effect_authorizations",
+    )
+    success_criteria = _validated_structured_packet_list(
+        args.success_criterion, "success_criteria"
+    )
+    stop_conditions = _validated_structured_packet_list(
+        args.stop_condition, "stop_conditions"
+    )
+    secret, _config = _load_installation(args.installation_dir)
+    snapshot = luna_control.read_snapshot(args.installation_dir, secret, args.session_id)
+    if snapshot is None:
+        raise RouterStateError("invalid-input", "current task is unavailable")
+    try:
+        packet_wire = build_luna_packet(
+            packet_id=packet_id,
+            generation=snapshot.packet_generation + 1,
+            objective=objective,
+            working_directory=working_directory,
+            intended_write_scope=intended_write_scope,
+            explicit_side_effect_authorizations=authorizations,
+            success_criteria=success_criteria,
+            stop_conditions=stop_conditions,
+        )
+        staged = luna_control.stage_authority_packet(
+            args.installation_dir,
+            secret,
+            args.session_id,
+            root_turn_id=args.root_turn_id,
+            capability=args.capability,
+            packet_wire=packet_wire,
+        )
+    except ProtocolError as error:
+        raise RouterStateError("invalid-input", "structured K1 packet is invalid") from error
+    return {
+        "status": "staged",
+        "packet_id": packet_id,
+        "generation": staged.packet_generation + 1,
+    }
+
+
 def _role_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "local_sol": {
@@ -296,6 +399,9 @@ def main(argv=None) -> int:
                     "packet_id": packet["packet_id"],
                 }
             )
+            return 0
+        if args.command == "stage-k1-fields":
+            _print_json(_stage_k1_fields(args))
             return 0
         if args.command == "global-install":
             global_result = global_install(
