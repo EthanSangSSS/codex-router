@@ -185,6 +185,24 @@ class K1SidebandStateTests(unittest.TestCase):
         self.assertEqual(staged.execution_status, before.execution_status)
         self.assertIsNone(staged.pending_spawn)
 
+    def test_valid_canonical_k1_over_identity_limit_can_stage_and_persist(self):
+        snapshot = control.read_snapshot(self.state, self.secret, self.session_id)
+        packet = build_luna_packet(
+            packet_id="packet-large",
+            generation=snapshot.packet_generation + 1,
+            objective="x" * 600,
+            working_directory=str(self.state),
+            intended_write_scope=("README.md",),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("focused tests pass",),
+            stop_conditions=("scope expansion required",),
+        )
+        self.assertGreater(len(packet.encode("utf-8")), 512)
+
+        staged = self.stage(packet)
+
+        self.assertEqual(staged.authority_packet_wire, packet)
+
     def test_identical_stage_retry_is_idempotent(self):
         packet = self.packet()
         first = self.stage(packet)

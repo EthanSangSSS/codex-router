@@ -24,6 +24,7 @@ _STATE = "luna-control-v3-1.json"
 _LOCK = "luna-control-v3-1.lock"
 _MAX_SESSIONS = 64
 _MAX_STATE_BYTES = 256 * 1024
+_MAX_K1_WIRE_BYTES = 1024 * 1024
 _EPOCH_RE = re.compile(r"(?:task|luna)-[0-9a-f]{32}\Z")
 _TAG_RE = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -98,6 +99,20 @@ def _text(value: Any, field: str, *, optional: bool = False) -> str | None:
     return value
 
 
+def _authority_packet_wire(value: Any, *, optional: bool = False) -> str | None:
+    if optional and value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise _error("authority_packet_wire is invalid")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise _error("authority_packet_wire is invalid") from error
+    if len(encoded) > _MAX_K1_WIRE_BYTES:
+        raise _error("authority_packet_wire exceeds the K1 input limit")
+    return value
+
+
 def _text_sequence(value: Any, field: str, *, unique: bool = False) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise _error(f"{field} is invalid")
@@ -151,8 +166,8 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
     child_turn = _text(
         snapshot.active_child_turn_id, "active_child_turn_id", optional=True
     )
-    authority_packet_wire = _text(
-        snapshot.authority_packet_wire, "authority_packet_wire", optional=True
+    authority_packet_wire = _authority_packet_wire(
+        snapshot.authority_packet_wire, optional=True
     )
     if (luna_agent_id is None) != (luna_task_path is None):
         raise _error("Luna identity and task path must be bound together")
