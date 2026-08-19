@@ -8,7 +8,7 @@ from codex_router import luna_control as control
 from codex_router.cli import parser
 from codex_router.global_install_adapter import BASELINE_HOOK_EVENTS, install_hook_v3
 from codex_router.hook import handle_hook_event, handle_user_prompt
-from codex_router.protocol import build_luna_packet
+from codex_router.protocol import build_k1_stage_capability, build_luna_packet
 from codex_router.state import RouterStateError
 
 
@@ -65,6 +65,9 @@ class TurnBoundaryFixture(unittest.TestCase):
             native_parent_identity="root-parent",
             native_authority_profile="profile-A",
         )
+        control.set_current_root_turn(
+            self.installation_dir, self.secret, session, turn_id="root-turn"
+        )
         control.reserve_spawn(
             self.installation_dir,
             self.secret,
@@ -100,13 +103,27 @@ class TurnBoundaryFixture(unittest.TestCase):
             success_criteria=("bounded work completes",),
             stop_conditions=("scope expansion required",),
         )
+        control.stage_authority_packet(
+            self.installation_dir,
+            self.secret,
+            session,
+            root_turn_id="root-turn",
+            capability=build_k1_stage_capability(
+                self.secret,
+                session_tag=control.session_tag(self.secret, session),
+                root_turn_tag=snapshot.current_root_turn_tag,
+                task_epoch=snapshot.task_epoch,
+                generation=snapshot.packet_generation + 1,
+            ),
+            packet_wire=message,
+        )
         event = {
             "hook_event_name": "PreToolUse",
             "session_id": session,
             "turn_id": "root-turn",
             "tool_name": "followup_task",
             "tool_use_id": "send-1",
-            "tool_input": {"target": "/root/luna_worker", "message": message},
+            "tool_input": {"target": "/root/luna_worker", "message": "enc_01J9opaque_native_payload"},
             "actor_id": "root-parent",
             "actor_type": "primary_sol",
         }

@@ -5,7 +5,7 @@ import unittest
 
 from codex_router import luna_control as control
 from codex_router.hook import handle_hook_event
-from codex_router.protocol import build_luna_packet
+from codex_router.protocol import build_k1_stage_capability, build_luna_packet
 
 
 class V31ControlPlaneCorrectionTests(unittest.TestCase):
@@ -104,6 +104,9 @@ class V31ControlPlaneCorrectionTests(unittest.TestCase):
 
     def test_valid_k1_followup_task_is_still_admitted_for_bound_luna(self):
         self.bind_luna()
+        control.set_current_root_turn(
+            self.installation_dir, self.secret, "session-a", turn_id="root-turn"
+        )
         packet = build_luna_packet(
             packet_id="packet-1",
             generation=1,
@@ -122,11 +125,27 @@ class V31ControlPlaneCorrectionTests(unittest.TestCase):
             "tool_use_id": "followup-1",
             "tool_input": {
                 "target": "/root/luna_worker",
-                "message": packet,
+                "message": "enc_01J9opaque_native_payload",
             },
             "actor_id": "root-parent",
             "actor_type": "primary_sol",
         }
+
+        snapshot = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        control.stage_authority_packet(
+            self.installation_dir,
+            self.secret,
+            "session-a",
+            root_turn_id="root-turn",
+            capability=build_k1_stage_capability(
+                self.secret,
+                session_tag=control.session_tag(self.secret, "session-a"),
+                root_turn_tag=snapshot.current_root_turn_tag,
+                task_epoch=snapshot.task_epoch,
+                generation=1,
+            ),
+            packet_wire=packet,
+        )
 
         self.assertEqual(handle_hook_event(event, self.installation_dir), {})
         snapshot = control.read_snapshot(

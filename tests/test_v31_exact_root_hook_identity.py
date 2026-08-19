@@ -6,7 +6,7 @@ import unittest
 
 from codex_router import luna_control as control
 from codex_router.hook import handle_hook_event, handle_user_prompt
-from codex_router.protocol import build_luna_packet
+from codex_router.protocol import build_k1_stage_capability, build_luna_packet
 
 
 ROLE_CONFIG = {
@@ -77,6 +77,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         )
 
     def _spawn_luna_with_initial_packet(self, packet):
+        self._stage(packet)
         spawn = {
             "hook_event_name": "PreToolUse",
             "session_id": "session-a",
@@ -84,7 +85,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             "tool_name": "spawn_agent",
             "tool_use_id": "spawn-1",
             "tool_input": {
-                "message": packet,
+                "message": "enc_01J9opaque_native_payload",
                 "task_name": "luna_worker",
                 "agent_type": "luna_worker",
                 "fork_turns": "none",
@@ -127,6 +128,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         started = control.read_snapshot(self.installation_dir, self.secret, "session-a")
         self.assertEqual(started.execution_status, "RUNNING")
         self.assertEqual(started.active_child_turn_id, "luna-turn-1")
+        control.clear_staged_authority(self.installation_dir, self.secret, "session-a")
 
         self.assertEqual(
             handle_hook_event(
@@ -157,6 +159,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         )
 
     def _dispatch_followup(self, packet, *, tool_use_id="followup-2"):
+        self._stage(packet)
         return handle_hook_event(
             {
                 "hook_event_name": "PreToolUse",
@@ -164,9 +167,23 @@ class ExactRootHookIdentityTests(unittest.TestCase):
                 "turn_id": "root-turn-1",
                 "tool_name": "followup_task",
                 "tool_use_id": tool_use_id,
-                "tool_input": {"target": "/root/luna_worker", "message": packet},
+                "tool_input": {"target": "/root/luna_worker", "message": "enc_01J9opaque_native_payload"},
             },
             self.installation_dir,
+        )
+
+    def _stage(self, packet):
+        snapshot = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        capability = build_k1_stage_capability(
+            self.secret,
+            session_tag=control.session_tag(self.secret, "session-a"),
+            root_turn_tag=snapshot.current_root_turn_tag,
+            task_epoch=snapshot.task_epoch,
+            generation=snapshot.packet_generation + 1,
+        )
+        return control.stage_authority_packet(
+            self.installation_dir, self.secret, "session-a",
+            root_turn_id="root-turn-1", capability=capability, packet_wire=packet,
         )
 
     def test_exact_root_wire_spawns_with_initial_k1_then_triggers_followup_k1(self):
@@ -229,6 +246,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
     def test_current_app_collaboration_spawn_alias_is_admitted_at_root_pretool(self):
         self._submit_root_prompt()
         packet = self._packet(packet_id="packet-1", generation=1)
+        self._stage(packet)
         spawn = {
             "hook_event_name": "PreToolUse",
             "session_id": "session-a",
@@ -236,7 +254,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             "tool_name": "collaborationspawn_agent",
             "tool_use_id": "spawn-alias-1",
             "tool_input": {
-                "message": packet,
+                "message": "enc_01J9opaque_native_payload",
                 "task_name": "luna_worker",
                 "agent_type": "luna_worker",
                 "fork_turns": "none",
@@ -254,8 +272,9 @@ class ExactRootHookIdentityTests(unittest.TestCase):
     def test_current_app_collaboration_spawn_alias_is_corroborated_at_posttool(self):
         self._submit_root_prompt()
         packet = self._packet(packet_id="packet-1", generation=1)
+        self._stage(packet)
         spawn_input = {
-            "message": packet,
+            "message": "enc_01J9opaque_native_payload",
             "task_name": "luna_worker",
             "agent_type": "luna_worker",
             "fork_turns": "none",
@@ -314,6 +333,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         self._spawn_luna_with_initial_packet(packet1)
         self._stop_luna("luna-turn-1")
         packet2 = self._packet(packet_id="packet-2", generation=2)
+        self._stage(packet2)
 
         self.assertEqual(
             handle_hook_event(
@@ -325,7 +345,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
                     "tool_use_id": "followup-alias-2",
                     "tool_input": {
                         "target": "/root/luna_worker",
-                        "message": packet2,
+                        "message": "enc_01J9opaque_native_payload",
                     },
                 },
                 self.installation_dir,

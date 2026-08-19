@@ -295,6 +295,77 @@ def install(base) -> None:
             base._store_snapshot(state, updated)
             return updated
 
+    def _commit_staged_packet(snapshot: ControlSnapshot) -> ControlSnapshot:
+        if snapshot.logical_task_status != "ACTIVE":
+            raise base._error("current task cannot admit staged authority")
+        if snapshot.execution_status not in {"IDLE", "PAUSED_SETTLED"}:
+            raise base._error("current execution cannot admit staged authority")
+        if snapshot.authority_packet_wire is None:
+            raise base._error("current dispatch has no staged authority")
+        try:
+            packet = parse_luna_packet(snapshot.authority_packet_wire)
+        except ProtocolError as error:
+            raise base._error(str(error)) from error
+        if packet["generation"] != snapshot.packet_generation + 1:
+            raise base._error("staged authority generation is not current")
+        return replace(
+            snapshot,
+            packet_generation=packet["generation"],
+            active_packet_id=packet["packet_id"],
+            active_child_turn_id=None,
+            execution_status="IDLE",
+            intended_write_scope=tuple(packet["intended_write_scope"]),
+            explicit_side_effect_authorizations=tuple(
+                packet["explicit_side_effect_authorizations"]
+            ),
+            recovery_baseline=_clean_git_baseline(packet["working_directory"]),
+        )
+
+    def _require_current_root(snapshot: ControlSnapshot, secret: bytes, root_turn_id: str) -> None:
+        expected = _root_turn_tag(secret, root_turn_id)
+        if snapshot.current_root_turn_tag is None or not hmac.compare_digest(snapshot.current_root_turn_tag, expected):
+            raise base._error("dispatch root turn is not current")
+
+    def admit_staged_spawn(
+        directory: Path, secret: bytes, session_id: str, *, root_turn_id: str,
+        tool_use_id: str, task_name: str, agent_type: str, fork_turns: str,
+    ) -> ControlSnapshot:
+        if task_name != "luna_worker" or agent_type != "luna_worker" or fork_turns != "none":
+            raise base._error("Luna spawn identity is invalid")
+        tool_id = base._text(tool_use_id, "tool_use_id")
+        assert tool_id is not None
+        tag = base.session_tag(secret, session_id)
+        with base._locked_state(Path(directory), mutate=True) as state:
+            snapshot = base._record_for_session(state, tag)
+            _require_current_root(snapshot, secret, root_turn_id)
+            if snapshot.pending_spawn is not None or snapshot.luna_agent_id is not None:
+                raise base._error("a Luna spawn is already pending or bound")
+            committed = _commit_staged_packet(snapshot)
+            reservation = base.SpawnReservation(
+                task_epoch=committed.task_epoch, luna_epoch=committed.luna_epoch,
+                expected_role="luna_worker", root_session_tag=committed.root_session_tag,
+                expected_parent=committed.native_parent_identity, tool_use_id=tool_id,
+                task_path=None, agent_id=None,
+            )
+            updated = replace(committed, pending_spawn=reservation)
+            base._store_snapshot(state, updated)
+            return updated
+
+    def admit_staged_followup(
+        directory: Path, secret: bytes, session_id: str, *, root_turn_id: str, target: str,
+    ) -> ControlSnapshot:
+        requested = base._text(target, "target")
+        assert requested is not None
+        tag = base.session_tag(secret, session_id)
+        with base._locked_state(Path(directory), mutate=True) as state:
+            snapshot = base._record_for_session(state, tag)
+            _require_current_root(snapshot, secret, root_turn_id)
+            if snapshot.luna_agent_id is None or snapshot.luna_task_path is None or requested not in {snapshot.luna_agent_id, snapshot.luna_task_path}:
+                raise base._error("parent lifecycle target is not the current Luna")
+            updated = _commit_staged_packet(snapshot)
+            base._store_snapshot(state, updated)
+            return updated
+
     def freeze_authority(
         directory: Path,
         secret: bytes,
@@ -563,6 +634,7 @@ def install(base) -> None:
                 snapshot,
                 active_packet_id=None,
                 active_child_turn_id=None,
+                authority_packet_wire=None,
                 execution_status="IDLE",
                 intended_write_scope=(),
                 explicit_side_effect_authorizations=(),
@@ -609,6 +681,7 @@ def install(base) -> None:
                     snapshot,
                     active_packet_id=None,
                     active_child_turn_id=None,
+                    authority_packet_wire=None,
                     execution_status="IDLE",
                     intended_write_scope=(),
                     explicit_side_effect_authorizations=(),
@@ -783,6 +856,8 @@ def install(base) -> None:
     base.is_current_root_turn = is_current_root_turn
     base.stage_authority_packet = stage_authority_packet
     base.clear_staged_authority = clear_staged_authority
+    base.admit_staged_spawn = admit_staged_spawn
+    base.admit_staged_followup = admit_staged_followup
     base.begin_packet = begin_packet
     base.current_luna = current_luna
     base.authorize_parent_target = authorize_parent_target

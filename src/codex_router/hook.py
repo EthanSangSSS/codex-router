@@ -511,7 +511,7 @@ def _root_lifecycle_identity(
     secret: bytes,
 ) -> str:
     identity = _identity_kind(event, lifecycle=True)
-    if identity != "missing":
+    if identity in {"ambiguous", "child"}:
         return identity
     if luna_control.is_current_root_turn(
         installation_dir,
@@ -519,7 +519,7 @@ def _root_lifecycle_identity(
         base["session_id"],
         turn_id=base["turn_id"],
     ):
-        return "root"
+        return "root" if identity in {"missing", "root"} else "ambiguous"
     return "missing"
 
 
@@ -598,25 +598,22 @@ def _handle_parent_pretool(
             raise _invalid("Router spawn agent_type must be luna_worker")
         if _mapping_text(tool_input, "fork_turns") != "none":
             raise _invalid("Router Luna spawn must use fork_turns=none")
-        packet = _parse_k1_message(tool_input.get("message"))
-        _require_next_k1(packet, installation_dir, secret, base["session_id"])
-        luna_control.reserve_spawn(
+        luna_control.admit_staged_spawn(
             installation_dir,
             secret,
             base["session_id"],
-            tool_use_id=base["tool_use_id"],
-            task_name="luna_worker",
-            fork_turns="none",
+            root_turn_id=base["turn_id"], tool_use_id=base["tool_use_id"],
+            task_name="luna_worker", agent_type="luna_worker", fork_turns="none",
         )
-        _begin_k1_packet(packet, installation_dir, secret, base["session_id"])
         return {}
     if tool_name in _PARENT_COMMUNICATE_TOOLS | _PARENT_CLEANUP_TOOLS:
+        target = _mapping_text(tool_input, _PARENT_TARGET_FIELDS[tool_name])
         luna_control.authorize_parent_target(
             installation_dir,
             secret,
             base["session_id"],
             tool_name=tool_name,
-            target=_mapping_text(tool_input, _PARENT_TARGET_FIELDS[tool_name]),
+            target=target,
         )
         if tool_name == "send_message":
             raise _invalid(
@@ -633,12 +630,10 @@ def _handle_parent_pretool(
                     base["session_id"],
                     reason="parent_interrupt",
                 )
-        if tool_name in _PARENT_COMMUNICATE_TOOLS:
-            _admit_k1_packet(
-                tool_input=tool_input,
-                installation_dir=installation_dir,
-                secret=secret,
-                session_id=base["session_id"],
+        if tool_name == "followup_task":
+            luna_control.admit_staged_followup(
+                installation_dir, secret, base["session_id"],
+                root_turn_id=base["turn_id"], target=target,
             )
         return {}
     if tool_name in _PARENT_OBSERVE_TOOLS:
