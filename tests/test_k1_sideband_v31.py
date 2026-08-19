@@ -249,6 +249,48 @@ class K1SidebandStateTests(unittest.TestCase):
 
         self.assertIsNone(snapshot.authority_packet_wire)
 
+    def test_root_supersession_after_commit_cancels_unstarted_authority_safely(self):
+        self.stage()
+        control.admit_staged_spawn(
+            self.state,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            agent_type="luna_worker",
+            fork_turns="none",
+        )
+        control.observe_spawn_result(
+            self.state,
+            self.secret,
+            self.session_id,
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+        control.observe_subagent_start(
+            self.state,
+            self.secret,
+            self.session_id,
+            agent_id="agent-1",
+            agent_type="luna_worker",
+        )
+        before = control.read_snapshot(self.state, self.secret, self.session_id)
+
+        superseded = control.set_current_root_turn(
+            self.state,
+            self.secret,
+            self.session_id,
+            turn_id="root-turn-b",
+        )
+
+        self.assertNotEqual(superseded.current_root_turn_tag, before.current_root_turn_tag)
+        self.assertEqual(superseded.packet_generation, before.packet_generation)
+        self.assertIsNone(superseded.active_packet_id)
+        self.assertIsNone(superseded.active_child_turn_id)
+        self.assertIsNone(superseded.authority_packet_wire)
+        self.assertEqual(superseded.execution_status, "IDLE")
+
     def test_same_root_turn_rebind_does_not_destroy_current_stage(self):
         staged = self.stage()
 

@@ -228,13 +228,27 @@ def install(base) -> None:
                 and snapshot.current_root_turn_tag is not None
                 and hmac.compare_digest(snapshot.current_root_turn_tag, turn_tag)
             )
-            updated = replace(
-                snapshot,
-                current_root_turn_tag=turn_tag,
-                authority_packet_wire=(
-                    snapshot.authority_packet_wire if unchanged else None
-                ),
-            )
+            if not unchanged and snapshot.active_packet_id is not None and snapshot.active_child_turn_id is None:
+                updated = replace(
+                    snapshot,
+                    current_root_turn_tag=turn_tag,
+                    active_packet_id=None,
+                    active_child_turn_id=None,
+                    authority_packet_wire=None,
+                    pending_spawn=None,
+                    execution_status="IDLE",
+                    intended_write_scope=(),
+                    explicit_side_effect_authorizations=(),
+                    recovery_baseline=None,
+                )
+            else:
+                updated = replace(
+                    snapshot,
+                    current_root_turn_tag=turn_tag,
+                    authority_packet_wire=(
+                        snapshot.authority_packet_wire if unchanged else None
+                    ),
+                )
             base._store_snapshot(state, updated)
             return updated
 
