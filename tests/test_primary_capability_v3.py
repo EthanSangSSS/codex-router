@@ -262,7 +262,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "`send_message` is QueueOnly and cannot advance K1",
             "Native collaboration messages are transport triggers, not work authority.",
             "The authoritative work packet is `[CODEX_ROUTER_PACKET_V3_1]` injected by Router as developer context.",
-            "Do not perform tool work for a new generation until Router performs the first-tool authority handshake.",
+            "Only after canonical `[CODEX_ROUTER_PACKET_V3_1]` is present may substantive packet work begin.",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, combined)
