@@ -1928,16 +1928,6 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             )
         )
 
-        route_contexts = (route, duplicate, changed_session, changed_turn)
-        output_text = json.dumps(
-            {
-                "direct": direct,
-                "bypass": bypass,
-                "routes": route_contexts,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
         expected_route = {
             "protocol": HOOK_CONTEXT_PROTOCOL,
             "decision": "route",
@@ -1964,6 +1954,58 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "luna_execution_mode": "full_executor",
         }
 
+        def valid_sideband_route_context(
+            context: Mapping[str, Any], *, session: str, turn: str
+        ) -> bool:
+            static_context = dict(context)
+            capability = static_context.pop("K1_STAGE_CAPABILITY", None)
+            command = static_context.pop("K1_STAGE_COMMAND", None)
+            if static_context != expected_route:
+                return False
+            if not isinstance(capability, str) or not capability:
+                return False
+            if not isinstance(command, str) or not command:
+                return False
+            try:
+                arguments = shlex.split(command, posix=True)
+            except ValueError:
+                return False
+            return arguments == [
+                sys.executable,
+                "-E",
+                "-P",
+                "-m",
+                "codex_router",
+                "stage-k1",
+                "--installation-dir",
+                str(hook_installation_dir),
+                "--session-id",
+                session,
+                "--root-turn-id",
+                turn,
+                "--capability",
+                capability,
+            ]
+
+        route_contexts = (route, duplicate, changed_session, changed_turn)
+        route_contexts_without_sideband = tuple(
+            {
+                key: value
+                for key, value in context.items()
+                if key not in {"K1_STAGE_CAPABILITY", "K1_STAGE_COMMAND"}
+            }
+            for context in route_contexts
+        )
+        output_text = json.dumps(
+            {
+                "direct": direct,
+                "bypass": bypass,
+                "routes": route_contexts_without_sideband,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
         checks = {
             "hook_protocol": all(
                 context.get("protocol") == HOOK_CONTEXT_PROTOCOL
@@ -1974,8 +2016,20 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "route_policy": all(
                 context.get("decision") == "route" for context in route_contexts
             ),
-            "persistent_native_luna_route": all(
-                context == expected_route for context in route_contexts
+            "persistent_native_luna_route": (
+                valid_sideband_route_context(route, session=session_a, turn=turn_a)
+                and valid_sideband_route_context(
+                    duplicate, session=session_a, turn=turn_a
+                )
+                and valid_sideband_route_context(
+                    changed_session, session=session_b, turn=turn_a
+                )
+                and valid_sideband_route_context(
+                    changed_turn, session=session_a, turn=turn_b
+                )
+                and route == duplicate
+                and route != changed_session
+                and route != changed_turn
             ),
             "no_router_run_created": (
                 configured_state_root.exists() == configured_state_existed
