@@ -24,7 +24,6 @@ _STATE = "luna-control-v3-1.json"
 _LOCK = "luna-control-v3-1.lock"
 _MAX_SESSIONS = 64
 _MAX_STATE_BYTES = 256 * 1024
-_MAX_K1_WIRE_BYTES = 1024 * 1024
 _EPOCH_RE = re.compile(r"(?:task|luna)-[0-9a-f]{32}\Z")
 _TAG_RE = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -108,8 +107,8 @@ def _authority_packet_wire(value: Any, *, optional: bool = False) -> str | None:
         encoded = value.encode("utf-8", errors="strict")
     except UnicodeEncodeError as error:
         raise _error("authority_packet_wire is invalid") from error
-    if len(encoded) > _MAX_K1_WIRE_BYTES:
-        raise _error("authority_packet_wire exceeds the K1 input limit")
+    if len(encoded) > _MAX_STATE_BYTES:
+        raise _error("authority_packet_wire exceeds Luna control journal capacity")
     return value
 
 
@@ -528,6 +527,12 @@ def _record_for_session(state: Mapping[str, Any], tag: str) -> ControlSnapshot:
 
 def _store_snapshot(state: dict[str, Any], snapshot: ControlSnapshot) -> None:
     validate_snapshot(snapshot)
+    candidate = dict(state)
+    candidate_sessions = dict(state["sessions"])
+    candidate_sessions[snapshot.root_session_tag] = asdict(snapshot)
+    candidate["sessions"] = candidate_sessions
+    if len(_canonical_state_bytes(candidate)) > _MAX_STATE_BYTES:
+        raise _error("Luna control journal capacity is insufficient for this authority")
     state["sessions"][snapshot.root_session_tag] = asdict(snapshot)
 
 
@@ -1135,6 +1140,7 @@ def retire_luna(
             authority_packet_wire=None,
             intended_write_scope=(),
             explicit_side_effect_authorizations=(),
+            recovery_baseline=None,
         )
         _store_snapshot(state, retired)
         return retired

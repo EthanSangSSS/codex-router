@@ -235,7 +235,6 @@ def install(base) -> None:
                     active_packet_id=None,
                     active_child_turn_id=None,
                     authority_packet_wire=None,
-                    pending_spawn=None,
                     execution_status="IDLE",
                     intended_write_scope=(),
                     explicit_side_effect_authorizations=(),

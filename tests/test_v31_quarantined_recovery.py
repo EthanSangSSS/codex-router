@@ -2,6 +2,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_router import luna_control as control
 from codex_router.state import RouterStateError
@@ -147,6 +148,57 @@ class QuarantinedRecoveryTests(unittest.TestCase):
         self.assertEqual(baseline.workspace_root, str(repo.resolve()))
         self.assertEqual(baseline.head_commit, head)
         self.assertTrue(Path(baseline.git_common_dir).is_absolute())
+
+    def test_retirement_clears_recovery_baseline_in_the_authority_transaction(self):
+        repo, _head = self.init_repo()
+        self.new_task()
+        self.bind_luna()
+        committed = self.begin(repo)
+        self.assertIsNotNone(committed.recovery_baseline)
+
+        with patch.object(
+            control, "_locked_state", wraps=control._locked_state
+        ) as locked:
+            retired = control.retire_luna(
+                self.state,
+                self.secret,
+                self.session_id,
+                reason="new_task_epoch",
+            )
+
+        mutate_calls = [call for call in locked.call_args_list if call.kwargs["mutate"]]
+        self.assertEqual(len(mutate_calls), 1)
+        self.assertIsNone(retired.active_packet_id)
+        self.assertIsNone(retired.active_child_turn_id)
+        self.assertIsNone(retired.authority_packet_wire)
+        self.assertEqual(retired.intended_write_scope, ())
+        self.assertEqual(retired.explicit_side_effect_authorizations, ())
+        self.assertIsNone(retired.recovery_baseline)
+
+    def test_retirement_final_store_failure_keeps_prior_recovery_baseline_journal(self):
+        repo, _head = self.init_repo()
+        self.new_task()
+        self.bind_luna()
+        committed = self.begin(repo)
+        self.assertIsNotNone(committed.recovery_baseline)
+        journal = self.state / control._STATE
+        before = journal.read_bytes()
+
+        with patch.object(
+            control,
+            "_write_state_unlocked",
+            side_effect=RouterStateError("conflict", "injected final store failure"),
+        ) as write:
+            with self.assertRaisesRegex(RouterStateError, "injected final store failure"):
+                control.retire_luna(
+                    self.state,
+                    self.secret,
+                    self.session_id,
+                    reason="new_task_epoch",
+                )
+
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual(journal.read_bytes(), before)
 
     def test_dirty_or_non_git_packet_remains_runnable_without_recovery_baseline(self):
         repo, _head = self.init_repo()

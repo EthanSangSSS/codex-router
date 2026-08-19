@@ -203,6 +203,77 @@ class K1SidebandStateTests(unittest.TestCase):
 
         self.assertEqual(staged.authority_packet_wire, packet)
 
+    def test_k1_larger_than_the_journal_is_rejected_before_a_write(self):
+        packet = build_luna_packet(
+            packet_id="packet-oversize",
+            generation=1,
+            objective="x" * (307 * 1024),
+            working_directory=str(self.state),
+            intended_write_scope=("README.md",),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("focused tests pass",),
+            stop_conditions=("scope expansion required",),
+        )
+        self.assertGreater(len(packet.encode("utf-8")), control._MAX_STATE_BYTES)
+        journal = self.state / control._STATE
+        before = journal.read_bytes()
+
+        with patch.object(
+            control, "_write_state_unlocked", wraps=control._write_state_unlocked
+        ) as write:
+            with self.assertRaisesRegex(RouterStateError, "journal capacity"):
+                self.stage(packet)
+
+        self.assertEqual(write.call_count, 0)
+        self.assertEqual(journal.read_bytes(), before)
+
+    def test_large_k1_that_fits_the_journal_persists(self):
+        packet = build_luna_packet(
+            packet_id="packet-journal-large",
+            generation=1,
+            objective="x" * (128 * 1024),
+            working_directory=str(self.state),
+            intended_write_scope=("README.md",),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("focused tests pass",),
+            stop_conditions=("scope expansion required",),
+        )
+        self.assertGreater(len(packet.encode("utf-8")), 512)
+
+        staged = self.stage(packet)
+
+        self.assertEqual(staged.authority_packet_wire, packet)
+        self.assertLessEqual(
+            len((self.state / control._STATE).read_bytes()), control._MAX_STATE_BYTES
+        )
+
+    def test_capacity_exhausting_k1_leaves_the_journal_unchanged(self):
+        packet = build_luna_packet(
+            packet_id="packet-capacity-edge",
+            generation=1,
+            objective="x" * (control._MAX_STATE_BYTES - 600),
+            working_directory=str(self.state),
+            intended_write_scope=("README.md",),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("focused tests pass",),
+            stop_conditions=("scope expansion required",),
+        )
+        self.assertLess(len(packet.encode("utf-8")), control._MAX_STATE_BYTES)
+        journal = self.state / control._STATE
+        before = journal.read_bytes()
+        candidate = json.loads(before)
+        candidate["sessions"][control.session_tag(self.secret, self.session_id)][
+            "authority_packet_wire"
+        ] = packet
+        self.assertGreater(
+            len(control._canonical_state_bytes(candidate)), control._MAX_STATE_BYTES
+        )
+
+        with self.assertRaisesRegex(RouterStateError, "journal capacity"):
+            self.stage(packet)
+
+        self.assertEqual(journal.read_bytes(), before)
+
     def test_identical_stage_retry_is_idempotent(self):
         packet = self.packet()
         first = self.stage(packet)
@@ -290,6 +361,107 @@ class K1SidebandStateTests(unittest.TestCase):
         self.assertIsNone(superseded.active_child_turn_id)
         self.assertIsNone(superseded.authority_packet_wire)
         self.assertEqual(superseded.execution_status, "IDLE")
+
+    def test_root_supersession_preserves_unreconciled_spawn_reservation(self):
+        self.stage()
+        admitted = control.admit_staged_spawn(
+            self.state,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            agent_type="luna_worker",
+            fork_turns="none",
+        )
+
+        superseded = control.set_current_root_turn(
+            self.state,
+            self.secret,
+            self.session_id,
+            turn_id="root-turn-b",
+        )
+
+        self.assertEqual(superseded.pending_spawn, admitted.pending_spawn)
+        self.assertIsNone(superseded.active_packet_id)
+        self.assertIsNone(superseded.active_child_turn_id)
+        self.assertIsNone(superseded.authority_packet_wire)
+        self.assertEqual(superseded.intended_write_scope, ())
+        self.assertEqual(superseded.explicit_side_effect_authorizations, ())
+        self.assertIsNone(superseded.recovery_baseline)
+
+    def test_superseded_pending_spawn_still_accepts_matching_spawn_result(self):
+        self.stage()
+        control.admit_staged_spawn(
+            self.state,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            agent_type="luna_worker",
+            fork_turns="none",
+        )
+        control.set_current_root_turn(
+            self.state, self.secret, self.session_id, turn_id="root-turn-b"
+        )
+
+        observed = control.observe_spawn_result(
+            self.state,
+            self.secret,
+            self.session_id,
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+
+        self.assertIsNotNone(observed.pending_spawn)
+        self.assertEqual(observed.pending_spawn.task_path, "/root/luna_worker")
+        self.assertIsNone(observed.active_packet_id)
+        self.assertIsNone(observed.authority_packet_wire)
+
+    def test_superseded_pending_spawn_binds_but_cannot_use_old_k1(self):
+        self.stage()
+        control.admit_staged_spawn(
+            self.state,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            agent_type="luna_worker",
+            fork_turns="none",
+        )
+        control.set_current_root_turn(
+            self.state, self.secret, self.session_id, turn_id="root-turn-b"
+        )
+        control.observe_spawn_result(
+            self.state,
+            self.secret,
+            self.session_id,
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+
+        bound = control.observe_subagent_start(
+            self.state,
+            self.secret,
+            self.session_id,
+            agent_id="agent-1",
+            agent_type="luna_worker",
+        )
+
+        self.assertEqual(bound.luna_agent_id, "agent-1")
+        self.assertIsNone(bound.pending_spawn)
+        self.assertIsNone(bound.active_packet_id)
+        self.assertIsNone(bound.authority_packet_wire)
+        with self.assertRaises(RouterStateError):
+            control.authorize_executor_tool(
+                self.state,
+                self.secret,
+                self.session_id,
+                agent_id="agent-1",
+                child_turn_id="luna-turn-1",
+            )
 
     def test_same_root_turn_rebind_does_not_destroy_current_stage(self):
         staged = self.stage()
