@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from codex_router import cli
 from codex_router import luna_control as control
+from codex_router import hook
 from codex_router.protocol import build_k1_stage_capability, build_luna_packet
 
 
@@ -149,6 +150,22 @@ class RuntimeOperatorContractTests(unittest.TestCase):
         self.assertIsNone(payload)
         self.assertNotIn(self.capability(), stderr)
         self.assertEqual(self.snapshot(), before)
+
+    def test_v1_native_tool_normalization_is_exact(self) -> None:
+        spawn = hook._canonical_hook_tool_name("multi_agent_v1__spawn_agent")
+        collapsed_wait = hook._canonical_hook_tool_name("multi_agent_v1wait_agent")
+
+        self.assertEqual(getattr(spawn, "surface_profile", None), "multi_agent_v1")
+        self.assertEqual(getattr(spawn, "canonical_operation", None), "spawn_agent")
+        self.assertEqual(getattr(spawn, "input_schema", None), "v1_spawn")
+        self.assertEqual(
+            getattr(collapsed_wait, "canonical_operation", None), "wait_agent"
+        )
+        self.assertEqual(getattr(collapsed_wait, "input_schema", None), "v1_wait")
+
+    def test_unlisted_v1_names_do_not_normalize(self) -> None:
+        self.assertIsNone(hook._canonical_hook_tool_name("multi_agent_v1__list_agents"))
+        self.assertIsNone(hook._canonical_hook_tool_name("multi_agent_v1spawn_agents"))
 
 
 if __name__ == "__main__":

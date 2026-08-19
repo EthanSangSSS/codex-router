@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import shlex
 import stat
 import sys
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 from . import luna_control
 from .a1 import validate_packet_authorizations
@@ -53,7 +54,40 @@ _PARENT_TARGET_FIELDS = {
     "close_agent": "target",
     "resume_agent": "id",
 }
-_CURRENT_APP_TOOL_ALIASES = {
+_ROOT_ACTOR_TYPES = {"root", "primary", "primary_sol", "sol", "local_sol"}
+_CHILD_ACTOR_TYPES = {"child", "subagent", "luna_worker"}
+_DEFAULT_NATIVE_PARENT_IDENTITY = "root-parent"
+_DEFAULT_NATIVE_AUTHORITY_PROFILE = "profile-A"
+
+
+@dataclass(frozen=True)
+class NativeToolMatch:
+    raw_name: str
+    surface_profile: Literal[
+        "direct_v2",
+        "collaboration_v2",
+        "multi_agent_v1",
+        "collapsed_v1_spawn",
+        "forbidden_legacy",
+    ]
+    canonical_operation: str
+    input_schema: Literal["v2", "v1_spawn", "v1_wait", "none"]
+
+
+_DIRECT_V2_TOOL_NAMES = frozenset(
+    {
+        "spawn_agent",
+        "wait_agent",
+        "list_agents",
+        "followup_task",
+        "send_message",
+        "interrupt_agent",
+        "close_agent",
+        "send_input",
+        "resume_agent",
+    }
+)
+_COLLABORATION_V2_TOOL_NAMES = {
     "collaborationspawn_agent": "spawn_agent",
     "collaborationfollowup_task": "followup_task",
     "collaborationsend_message": "send_message",
@@ -61,10 +95,18 @@ _CURRENT_APP_TOOL_ALIASES = {
     "collaborationinterrupt_agent": "interrupt_agent",
     "collaborationlist_agents": "list_agents",
 }
-_ROOT_ACTOR_TYPES = {"root", "primary", "primary_sol", "sol", "local_sol"}
-_CHILD_ACTOR_TYPES = {"child", "subagent", "luna_worker"}
-_DEFAULT_NATIVE_PARENT_IDENTITY = "root-parent"
-_DEFAULT_NATIVE_AUTHORITY_PROFILE = "profile-A"
+_MULTI_AGENT_V1_TOOL_NAMES = {
+    "multi_agent_v1__spawn_agent": ("spawn_agent", "v1_spawn"),
+    "multi_agent_v1spawn_agent": ("spawn_agent", "v1_spawn"),
+    "multi_agent_v1__wait_agent": ("wait_agent", "v1_wait"),
+    "multi_agent_v1wait_agent": ("wait_agent", "v1_wait"),
+}
+_MULTI_AGENT_V1_FORBIDDEN_NAMES = {
+    "multi_agent_v1__send_input": "send_input",
+    "multi_agent_v1send_input": "send_input",
+    "multi_agent_v1__resume_agent": "resume_agent",
+    "multi_agent_v1resume_agent": "resume_agent",
+}
 
 
 def _invalid(message: str) -> RouterStateError:
@@ -379,13 +421,35 @@ def _permission_deny(message: str) -> dict[str, Any]:
 def _looks_like_agent_lifecycle_tool(tool_name: str) -> bool:
     return (
         tool_name in _KNOWN_AGENT_TOOLS
+        or tool_name.startswith("multi_agent_v")
         or tool_name.startswith("agent_")
         or tool_name.endswith("_agent")
     )
 
 
-def _canonical_hook_tool_name(name: str) -> str:
-    return _CURRENT_APP_TOOL_ALIASES.get(name, name)
+def _canonical_hook_tool_name(name: str) -> NativeToolMatch | None:
+    if name in _DIRECT_V2_TOOL_NAMES:
+        return NativeToolMatch(name, "direct_v2", name, "v2")
+    canonical = _COLLABORATION_V2_TOOL_NAMES.get(name)
+    if canonical is not None:
+        return NativeToolMatch(name, "collaboration_v2", canonical, "v2")
+    v1 = _MULTI_AGENT_V1_TOOL_NAMES.get(name)
+    if v1 is not None:
+        canonical, input_schema = v1
+        return NativeToolMatch(name, "multi_agent_v1", canonical, input_schema)
+    forbidden = _MULTI_AGENT_V1_FORBIDDEN_NAMES.get(name)
+    if forbidden is not None:
+        return NativeToolMatch(name, "forbidden_legacy", forbidden, "none")
+    return None
+
+
+def _normalize_event_tool_name(base: dict[str, Any]) -> None:
+    raw_name = base["tool_name"]
+    match = _canonical_hook_tool_name(raw_name)
+    base["raw_tool_name"] = raw_name
+    base["native_tool_match"] = match
+    if match is not None:
+        base["tool_name"] = match.canonical_operation
 
 
 def _actor_identity(event: Mapping[str, Any]) -> tuple[str | None, str | None, bool]:
@@ -601,7 +665,7 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             base = _event_base(
                 event, name, ("session_id", "turn_id", "tool_name", "tool_use_id")
             )
-            base["tool_name"] = _canonical_hook_tool_name(base["tool_name"])
+            _normalize_event_tool_name(base)
             tool_input = event.get("tool_input")
             if not isinstance(tool_input, Mapping):
                 raise _invalid("tool_input must be an object")
@@ -651,7 +715,7 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             base = _event_base(
                 event, name, ("session_id", "turn_id", "tool_name", "tool_use_id")
             )
-            base["tool_name"] = _canonical_hook_tool_name(base["tool_name"])
+            _normalize_event_tool_name(base)
             if base["tool_name"] != "spawn_agent":
                 return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
             if (
