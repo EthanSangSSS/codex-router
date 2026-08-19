@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_router import cli
+from codex_router import global_install_adapter as adapter
 from codex_router import luna_control as control
 from codex_router import hook
 from codex_router.protocol import build_k1_stage_capability, build_luna_packet
@@ -166,6 +167,38 @@ class RuntimeOperatorContractTests(unittest.TestCase):
     def test_unlisted_v1_names_do_not_normalize(self) -> None:
         self.assertIsNone(hook._canonical_hook_tool_name("multi_agent_v1__list_agents"))
         self.assertIsNone(hook._canonical_hook_tool_name("multi_agent_v1spawn_agents"))
+
+    def test_surface_classification_is_pure_and_does_not_authorize_hook_lifecycle(self) -> None:
+        inventory = {
+            "sideband_structured_k1_staging": True,
+            "multi_agent_v1__spawn_agent": True,
+            "followup_task": False,
+        }
+        original = dict(inventory)
+        value = adapter.native_surface_compatibility(inventory)
+
+        self.assertEqual(inventory, original)
+        self.assertEqual(value.primary_gen1_readiness, "PASS")
+        self.assertEqual(value.persistent_followup_availability, "UNAVAILABLE")
+        denied = hook.handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": self.session_id,
+                "turn_id": self.root_turn_id,
+                "tool_name": "multi_agent_v1__spawn_agent",
+                "tool_use_id": "classification-must-not-authorize",
+                "tool_input": {
+                    "agent_type": "luna_worker",
+                    "fork_context": False,
+                    "message": "opaque",
+                },
+            },
+            self.installation,
+        )
+        self.assertEqual(
+            denied["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
 
 
 if __name__ == "__main__":

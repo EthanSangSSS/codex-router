@@ -99,6 +99,66 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "INCOMPATIBLE",
         )
 
+    def test_v1_gen1_ready_and_followup_unavailable_are_independent(self):
+        classify = self._feature("native_surface_compatibility")
+        value = classify(
+            {
+                "sideband_structured_k1_staging": True,
+                "multi_agent_v1__spawn_agent": True,
+                "followup_task": False,
+            }
+        )
+        self.assertEqual(value.spawn_profile, "multi_agent_v1")
+        self.assertEqual(value.primary_gen1_readiness, "PASS")
+        self.assertEqual(value.persistent_followup_availability, "UNAVAILABLE")
+
+    def test_incomplete_runtime_inventory_is_unknown(self):
+        classify = self._feature("native_surface_compatibility")
+        value = classify({"router_stage_k1_exec": True})
+        self.assertIsNone(value.spawn_profile)
+        self.assertEqual(value.primary_gen1_readiness, "UNKNOWN")
+        self.assertEqual(value.persistent_followup_availability, "UNKNOWN")
+
+    def test_full_v2_inventory_is_gen1_ready_with_available_followup(self):
+        classify = self._feature("native_surface_compatibility")
+        value = classify(
+            {
+                "multi_agent_v2": True,
+                "router_stage_k1_exec": True,
+                "capabilities": {
+                    "spawn_agent": True,
+                    "followup_task": True,
+                },
+            }
+        )
+        self.assertEqual(value.spawn_profile, "direct_v2")
+        self.assertEqual(value.primary_gen1_readiness, "PASS")
+        self.assertEqual(value.persistent_followup_availability, "AVAILABLE")
+
+    def test_explicit_negative_followup_dominates_positive_alias(self):
+        classify = self._feature("native_surface_compatibility")
+        value = classify(
+            {
+                "sideband_structured_k1_staging": True,
+                "multi_agent_v1__spawn_agent": True,
+                "followup_task": False,
+                "collaborationfollowup_task": True,
+            }
+        )
+        self.assertEqual(value.persistent_followup_availability, "UNAVAILABLE")
+
+    def test_explicitly_unsupported_v2_spawn_is_incompatible(self):
+        classify = self._feature("native_surface_compatibility")
+        value = classify(
+            {
+                "multi_agent_v2": True,
+                "sideband_structured_k1_staging": True,
+                "spawn_agent": False,
+            }
+        )
+        self.assertIsNone(value.spawn_profile)
+        self.assertEqual(value.primary_gen1_readiness, "INCOMPATIBLE")
+
     def test_static_config_without_sideband_evidence_is_unknown(self):
         with tempfile.TemporaryDirectory() as temporary:
             codex_home = Path(temporary)

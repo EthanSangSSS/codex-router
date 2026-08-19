@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import shlex
@@ -28,6 +28,12 @@ UNKNOWN = "UNKNOWN_REQUIRES_CAPABILITY_CHECK"
 SIDEBAND_STAGE_AVAILABLE = "AVAILABLE"
 SIDEBAND_STAGE_UNAVAILABLE = "UNAVAILABLE"
 SIDEBAND_STAGE_UNKNOWN = UNKNOWN
+PRIMARY_GEN1_PASS = "PASS"
+PRIMARY_GEN1_INCOMPATIBLE = "INCOMPATIBLE"
+PRIMARY_GEN1_UNKNOWN = "UNKNOWN"
+PERSISTENT_FOLLOWUP_AVAILABLE = "AVAILABLE"
+PERSISTENT_FOLLOWUP_UNAVAILABLE = "UNAVAILABLE"
+PERSISTENT_FOLLOWUP_UNKNOWN = "UNKNOWN"
 PRIMARY_MODEL_INHERIT = "inherit"
 PRIMARY_REQUIRED_CAPABILITIES = (
     "multi_agent_v2",
@@ -90,6 +96,33 @@ LUNA_DEVELOPER_INSTRUCTIONS = LUNA_DEVELOPER_INSTRUCTIONS_V3
 LUNA_DEVELOPER_INSTRUCTIONS_V2 = LUNA_DEVELOPER_INSTRUCTIONS_V3
 
 
+@dataclass(frozen=True)
+class NativeSurfaceCompatibility:
+    spawn_profile: str | None
+    primary_gen1_readiness: str
+    persistent_followup_availability: str
+    reason_code: str
+
+
+@dataclass(frozen=True)
+class _ExplicitRuntimeInventory:
+    sideband_structured_k1_staging: bool | None = None
+    multi_agent_v2: bool | None = None
+    v2_spawn: bool | None = None
+    v2_direct_spawn: bool | None = None
+    v2_collaboration_spawn: bool | None = None
+    v1_spawn: bool | None = None
+    followup: bool | None = None
+    direct_followup: bool | None = None
+    collaboration_followup: bool | None = None
+
+
+@dataclass(frozen=True)
+class _SpawnProfileClassification:
+    profile: str | None
+    readiness: str
+
+
 def _capability_name(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -100,6 +133,186 @@ def _capability_name(value: Any) -> str | None:
         "multi_agent_v2_capability": "multi_agent_v2",
     }
     return aliases.get(normalized, normalized)
+
+
+_RUNTIME_INVENTORY_FACTS = {
+    "sideband_structured_k1_staging": ("sideband_structured_k1_staging",),
+    "router_stage_k1_exec": ("sideband_structured_k1_staging",),
+    "router_stage_k1_fields_exec": ("sideband_structured_k1_staging",),
+    "multi_agent_v2": ("multi_agent_v2",),
+    "spawn_agent": ("v2_spawn", "v2_direct_spawn"),
+    "collaborationspawn_agent": ("v2_spawn", "v2_collaboration_spawn"),
+    "multi_agent_v1__spawn_agent": ("v1_spawn",),
+    "multi_agent_v1spawn_agent": ("v1_spawn",),
+    "followup_task": ("followup", "direct_followup"),
+    "collaborationfollowup_task": ("followup", "collaboration_followup"),
+}
+_RUNTIME_INVENTORY_LIST_KEYS = frozenset(
+    {
+        "capabilities",
+        "native_tools",
+        "supported_tools",
+        "available_tools",
+        "tools",
+    }
+)
+_RUNTIME_TRUE_VALUES = frozenset(
+    {"1", "true", "enabled", "present", "supported", "available"}
+)
+_RUNTIME_FALSE_VALUES = frozenset(
+    {
+        "0",
+        "false",
+        "disabled",
+        "absent",
+        "unsupported",
+        "unavailable",
+        "not_exposed",
+        "not_supported",
+        "not-supported",
+    }
+)
+
+
+def _explicit_runtime_fact(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _RUNTIME_TRUE_VALUES:
+            return True
+        if normalized in _RUNTIME_FALSE_VALUES:
+            return False
+    return None
+
+
+def _merge_explicit_fact(current: bool | None, value: bool) -> bool:
+    # A negative fact dominates a positive alias, regardless of traversal order.
+    if current is False or value is False:
+        return False
+    return True
+
+
+def _collect_explicit_runtime_inventory(
+    runtime_capabilities: Any,
+) -> _ExplicitRuntimeInventory:
+    facts: dict[str, bool | None] = {
+        field.name: None for field in _ExplicitRuntimeInventory.__dataclass_fields__.values()
+    }
+
+    def record(name: Any, value: Any) -> None:
+        normalized = _capability_name(name)
+        if normalized is None:
+            return
+        fields = _RUNTIME_INVENTORY_FACTS.get(normalized)
+        if fields is None:
+            return
+        fact = _explicit_runtime_fact(value)
+        if fact is None:
+            return
+        for field in fields:
+            facts[field] = _merge_explicit_fact(facts[field], fact)
+
+    def visit(node: Any, *, allow_tool_names: bool = False) -> None:
+        if isinstance(node, Mapping):
+            for key, child in node.items():
+                record(key, child)
+                normalized_key = _capability_name(key)
+                if isinstance(child, Mapping):
+                    visit(child, allow_tool_names=normalized_key in _RUNTIME_INVENTORY_LIST_KEYS)
+                elif isinstance(child, (list, tuple, set, frozenset)):
+                    visit(child, allow_tool_names=normalized_key in _RUNTIME_INVENTORY_LIST_KEYS)
+        elif isinstance(node, (list, tuple, set, frozenset)) and allow_tool_names:
+            for child in node:
+                if isinstance(child, str):
+                    record(child, True)
+                elif isinstance(child, Mapping):
+                    visit(child, allow_tool_names=True)
+
+    visit(runtime_capabilities, allow_tool_names=True)
+    return _ExplicitRuntimeInventory(**facts)
+
+
+def _classify_supported_spawn_profile(
+    evidence: _ExplicitRuntimeInventory,
+) -> _SpawnProfileClassification:
+    v2_profile: str | None = None
+    if evidence.v2_spawn is True and evidence.multi_agent_v2 is not False:
+        if evidence.v2_direct_spawn is True:
+            v2_profile = "direct_v2"
+        elif evidence.v2_collaboration_spawn is True:
+            v2_profile = "collaboration_v2"
+        else:
+            v2_profile = "direct_v2"
+
+    # An exact V2 surface takes precedence only when it is explicitly proven;
+    # an exact V1 surface remains independently usable on a V1-only runtime.
+    if v2_profile is not None and evidence.multi_agent_v2 is True:
+        return _SpawnProfileClassification(v2_profile, PRIMARY_GEN1_PASS)
+    if evidence.v1_spawn is True:
+        return _SpawnProfileClassification("multi_agent_v1", PRIMARY_GEN1_PASS)
+    if v2_profile is not None:
+        return _SpawnProfileClassification(v2_profile, PRIMARY_GEN1_PASS)
+
+    explicit_unsupported = (
+        evidence.multi_agent_v2 is False
+        or evidence.v2_spawn is False
+        or evidence.v1_spawn is False
+        or (
+            evidence.multi_agent_v2 is True
+            and evidence.v2_spawn is False
+        )
+    )
+    if explicit_unsupported:
+        return _SpawnProfileClassification(None, PRIMARY_GEN1_INCOMPATIBLE)
+    return _SpawnProfileClassification(None, PRIMARY_GEN1_UNKNOWN)
+
+
+def _classify_persistent_followup(
+    evidence: _ExplicitRuntimeInventory,
+) -> str:
+    if evidence.followup is True:
+        return PERSISTENT_FOLLOWUP_AVAILABLE
+    if evidence.followup is False:
+        return PERSISTENT_FOLLOWUP_UNAVAILABLE
+    return PERSISTENT_FOLLOWUP_UNKNOWN
+
+
+def native_surface_compatibility(
+    runtime_capabilities: Any,
+) -> NativeSurfaceCompatibility:
+    evidence = _collect_explicit_runtime_inventory(runtime_capabilities)
+    spawn = _classify_supported_spawn_profile(evidence)
+    if (
+        evidence.sideband_structured_k1_staging is False
+        or spawn.readiness == PRIMARY_GEN1_INCOMPATIBLE
+    ):
+        gen1_readiness = PRIMARY_GEN1_INCOMPATIBLE
+    elif (
+        evidence.sideband_structured_k1_staging is True
+        and spawn.profile is not None
+    ):
+        gen1_readiness = PRIMARY_GEN1_PASS
+    else:
+        gen1_readiness = PRIMARY_GEN1_UNKNOWN
+    followup = _classify_persistent_followup(evidence)
+    if gen1_readiness == PRIMARY_GEN1_INCOMPATIBLE:
+        reason_code = "NATIVE_SURFACE_INCOMPATIBLE"
+    elif (
+        gen1_readiness == PRIMARY_GEN1_PASS
+        and followup == PERSISTENT_FOLLOWUP_UNAVAILABLE
+    ):
+        reason_code = "BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE"
+    elif gen1_readiness == PRIMARY_GEN1_UNKNOWN or followup == PERSISTENT_FOLLOWUP_UNKNOWN:
+        reason_code = "NATIVE_SURFACE_UNKNOWN"
+    else:
+        reason_code = "NATIVE_SURFACE_COMPATIBLE"
+    return NativeSurfaceCompatibility(
+        spawn_profile=spawn.profile,
+        primary_gen1_readiness=gen1_readiness,
+        persistent_followup_availability=followup,
+        reason_code=reason_code,
+    )
 
 
 def _capability_evidence(value: Any) -> tuple[set[str], bool | None]:
