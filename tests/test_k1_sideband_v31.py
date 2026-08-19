@@ -312,6 +312,23 @@ class K1SidebandStateTests(unittest.TestCase):
 
         self.assertIsNone(retired.authority_packet_wire)
 
+    def test_retirement_clears_k1_in_the_same_locked_transaction(self):
+        self.stage()
+
+        with patch.object(control, "_locked_state", wraps=control._locked_state) as locked:
+            retired = control.retire_luna(
+                self.state, self.secret, self.session_id, "new_task_epoch"
+            )
+
+        mutate_calls = [
+            call for call in locked.call_args_list if call.kwargs.get("mutate")
+        ]
+        self.assertEqual(len(mutate_calls), 1)
+        self.assertIsNone(retired.authority_packet_wire)
+        raw = json.loads((self.state / control._STATE).read_text(encoding="utf-8"))
+        record = raw["sessions"][control.session_tag(self.secret, self.session_id)]
+        self.assertIsNone(record["authority_packet_wire"])
+
     def test_logical_cancel_clears_staged_authority(self):
         control.begin_packet(
             self.state,

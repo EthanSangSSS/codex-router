@@ -524,7 +524,7 @@ def install(base) -> None:
         | None = None,
         child_turn_id: str | None = None,
     ) -> ControlSnapshot:
-        original_retire_luna(
+        return original_retire_luna(
             directory,
             secret,
             session_id,
@@ -533,7 +533,6 @@ def install(base) -> None:
             terminal_status=terminal_status,
             child_turn_id=child_turn_id,
         )
-        return clear_staged_authority(directory, secret, session_id)
 
     def is_current_root_turn(
         directory: Path,

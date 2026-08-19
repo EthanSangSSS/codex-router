@@ -1132,6 +1132,7 @@ def retire_luna(
             execution_status="RETIRED",
             active_packet_id=None,
             active_child_turn_id=None,
+            authority_packet_wire=None,
             intended_write_scope=(),
             explicit_side_effect_authorizations=(),
         )
