@@ -295,6 +295,64 @@ def install(base) -> None:
             base._store_snapshot(state, updated)
             return updated
 
+    def authorize_executor_tool(
+        directory: Path,
+        secret: bytes,
+        session_id: str,
+        *,
+        agent_id: str,
+        child_turn_id: str,
+    ) -> tuple[ControlSnapshot, str | None]:
+        """Authorize one executor tool and conditionally consume the K1 wire.
+
+        The state read, authority-state check, turn binding, and matching-wire
+        clear are one locked journal transition.  The returned string is the
+        exact K1 developer context for the first-tool handshake, or ``None``
+        once that handshake has already been established.
+        """
+        child = base._text(child_turn_id, "child_turn_id")
+        agent = base._text(agent_id, "agent_id")
+        assert child is not None and agent is not None
+        tag = base.session_tag(secret, session_id)
+        with base._locked_state(Path(directory), mutate=True) as state:
+            snapshot = base._record_for_session(state, tag)
+            if (
+                snapshot.logical_task_status != "ACTIVE"
+                or snapshot.luna_agent_id != agent
+                or snapshot.luna_task_path is None
+            ):
+                raise base._error("executor identity is not currently bound")
+            if snapshot.active_packet_id is None:
+                raise base._error("Luna tool has no active K1 authority")
+            if snapshot.execution_status in {
+                "QUIESCING",
+                "QUARANTINED",
+                "PAUSED_SETTLED",
+                "RETIRED",
+            }:
+                raise base._error("Luna authority is no longer running")
+            if snapshot.active_child_turn_id is None:
+                if snapshot.execution_status != "IDLE":
+                    raise base._error("executor handshake state is invalid")
+                if snapshot.authority_packet_wire is None:
+                    raise base._error("Luna authority handshake state fails closed")
+                updated = replace(
+                    snapshot,
+                    execution_status="RUNNING",
+                    active_child_turn_id=child,
+                )
+                base._store_snapshot(state, updated)
+                return updated, snapshot.authority_packet_wire
+            if snapshot.active_child_turn_id != child:
+                raise base._error("Luna executor turn does not match current K1 authority")
+            if snapshot.execution_status != "RUNNING":
+                raise base._error("Luna authority is no longer running")
+            if snapshot.authority_packet_wire is None:
+                return snapshot, None
+            updated = replace(snapshot, authority_packet_wire=None)
+            base._store_snapshot(state, updated)
+            return updated, None
+
     def _commit_staged_packet(snapshot: ControlSnapshot) -> ControlSnapshot:
         if snapshot.logical_task_status != "ACTIVE":
             raise base._error("current task cannot admit staged authority")
@@ -881,6 +939,7 @@ def install(base) -> None:
     base.is_current_root_turn = is_current_root_turn
     base.stage_authority_packet = stage_authority_packet
     base.clear_staged_authority = clear_staged_authority
+    base.authorize_executor_tool = authorize_executor_tool
     base.admit_staged_spawn = admit_staged_spawn
     base.admit_staged_followup = admit_staged_followup
     base.begin_packet = begin_packet

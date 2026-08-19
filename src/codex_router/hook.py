@@ -479,34 +479,21 @@ def _handle_luna_pretool(
     installation_dir: Path,
     secret: bytes,
 ) -> dict[str, Any]:
-    snapshot = luna_control.read_snapshot(
-        installation_dir, secret, base["session_id"]
+    agent_id = event.get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id:
+        return _pretool_output("deny", "unbound Luna identity fails closed")
+    snapshot, handshake_context = luna_control.authorize_executor_tool(
+        installation_dir,
+        secret,
+        base["session_id"],
+        agent_id=agent_id,
+        child_turn_id=base["turn_id"],
     )
-    if snapshot is None or snapshot.active_packet_id is None:
-        return _pretool_output("deny", "Luna tool has no active K1 authority")
-    if snapshot.active_child_turn_id is None:
-        if snapshot.authority_packet_wire is None:
-            return _pretool_output(
-                "deny", "Luna authority handshake state fails closed"
-            )
-        luna_control.start_execution(
-            installation_dir,
-            secret,
-            base["session_id"],
-            child_turn_id=base["turn_id"],
-        )
+    if handshake_context is not None:
         return _pretool_output(
             "deny",
             "Router authority handshake retry required before executor tool work",
-            additional_context=snapshot.authority_packet_wire,
-        )
-    if snapshot.active_child_turn_id != base["turn_id"]:
-        return _pretool_output(
-            "deny", "Luna executor turn does not match current K1 authority"
-        )
-    if snapshot.authority_packet_wire is not None:
-        luna_control.clear_staged_authority(
-            installation_dir, secret, base["session_id"]
+            additional_context=handshake_context,
         )
     tool_name = base["tool_name"]
     if _looks_like_agent_lifecycle_tool(tool_name):

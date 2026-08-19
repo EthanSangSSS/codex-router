@@ -435,6 +435,7 @@ class K1ExecutorHandshakeTests(unittest.TestCase):
 
         output = handle_hook_event(self._pretool(), self.installation)
 
+        self.assertNotEqual(output, {})
         self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertEqual(output["hookSpecificOutput"]["additionalContext"], packet)
         self.assertIn("authority handshake", output["hookSpecificOutput"]["permissionDecisionReason"])
@@ -477,6 +478,45 @@ class K1ExecutorHandshakeTests(unittest.TestCase):
         self.assertIsNotNone(
             control.read_snapshot(self.installation, self.secret, self.session_id).authority_packet_wire
         )
+
+    def test_quiescing_same_turn_executor_tool_is_denied_without_side_effect(self):
+        self._bind_luna_with_staged_packet()
+        handle_hook_event(self._pretool(), self.installation)
+        control.freeze_authority(
+            self.installation,
+            self.secret,
+            self.session_id,
+            reason="review-hard-pause",
+        )
+
+        output = handle_hook_event(
+            self._pretool(tool_name="Write"), self.installation
+        )
+
+        self.assertNotEqual(output, {})
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        snapshot = control.read_snapshot(
+            self.installation, self.secret, self.session_id
+        )
+        self.assertEqual(snapshot.execution_status, "QUIESCING")
+        self.assertIsNotNone(snapshot.authority_packet_wire)
+
+    def test_matching_wire_clear_is_atomic_after_authority_check(self):
+        self._bind_luna_with_staged_packet()
+        handle_hook_event(self._pretool(), self.installation)
+
+        with patch.object(
+            control,
+            "clear_staged_authority",
+            side_effect=AssertionError("separate wire clear is forbidden"),
+        ):
+            output = handle_hook_event(self._pretool(), self.installation)
+
+        self.assertEqual(output, {})
+        snapshot = control.read_snapshot(
+            self.installation, self.secret, self.session_id
+        )
+        self.assertIsNone(snapshot.authority_packet_wire)
 
     def test_forbidden_lifecycle_tool_remains_forbidden_after_handshake(self):
         packet = self._bind_luna_with_staged_packet()
