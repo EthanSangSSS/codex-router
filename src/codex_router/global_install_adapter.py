@@ -503,7 +503,10 @@ def _primary_capability(
         and features.get("multi_agent") is True
         and features.get("hooks") is True
     ):
-        return (COMPATIBLE, "required primary agents, multi-agent, and Hook capabilities are explicitly enabled")
+        return (
+            UNKNOWN,
+            "static primary capabilities are enabled but router_stage_k1_exec is unproven",
+        )
     return (
         UNKNOWN,
         "required primary capabilities are not all explicit; effective layered config needs validation",

@@ -1,5 +1,7 @@
 import json
 import shlex
+from pathlib import Path
+import tempfile
 import tomllib
 import unittest
 
@@ -96,6 +98,18 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             status(self._PRIMARY_V2_EVIDENCE | {"router_stage_k1_exec": False}),
             "INCOMPATIBLE",
         )
+
+    def test_static_config_without_sideband_evidence_is_unknown(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            codex_home = Path(temporary)
+            (codex_home / "config.toml").write_text(
+                "[agents]\nenabled = true\n[features]\nmulti_agent = true\nhooks = true\n",
+                encoding="utf-8",
+            )
+
+            compatibility, _reason = adapter._primary_capability(codex_home)
+
+        self.assertEqual(compatibility, adapter.UNKNOWN)
 
     def test_executor_requested_model_is_rendered_explicitly(self):
         render = self._feature("render_executor_config")
