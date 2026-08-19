@@ -315,6 +315,34 @@ def native_surface_compatibility(
     )
 
 
+def primary_gen2_readiness(runtime_capabilities: Any) -> dict[str, str | None]:
+    """Return a non-authorizing PRIMARY decision before any Gen2 staging."""
+    compatibility = native_surface_compatibility(runtime_capabilities)
+    if (
+        compatibility.primary_gen1_readiness == PRIMARY_GEN1_PASS
+        and compatibility.persistent_followup_availability
+        == PERSISTENT_FOLLOWUP_UNAVAILABLE
+    ):
+        code = "BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE"
+    elif compatibility.primary_gen1_readiness == PRIMARY_GEN1_INCOMPATIBLE:
+        code = PRIMARY_GEN1_INCOMPATIBLE
+    elif (
+        compatibility.primary_gen1_readiness == PRIMARY_GEN1_PASS
+        and compatibility.persistent_followup_availability
+        == PERSISTENT_FOLLOWUP_AVAILABLE
+    ):
+        code = "READY"
+    else:
+        code = PRIMARY_GEN1_UNKNOWN
+    return {
+        "code": code,
+        "spawn_profile": compatibility.spawn_profile,
+        "primary_gen1_readiness": compatibility.primary_gen1_readiness,
+        "persistent_followup_availability": compatibility.persistent_followup_availability,
+        "reason_code": compatibility.reason_code,
+    }
+
+
 def _capability_evidence(value: Any) -> tuple[set[str], bool | None]:
     """Extract only the small V2 primary surface from runtime evidence."""
     names: set[str] = set()

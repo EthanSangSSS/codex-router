@@ -159,6 +159,22 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
         self.assertIsNone(value.spawn_profile)
         self.assertEqual(value.primary_gen1_readiness, "INCOMPATIBLE")
 
+    def test_primary_gen2_readiness_blocks_known_unavailable_followup(self):
+        decide = self._feature("primary_gen2_readiness")
+        decision = decide(
+            {
+                "sideband_structured_k1_staging": True,
+                "multi_agent_v1__spawn_agent": True,
+                "followup_task": False,
+            }
+        )
+        self.assertEqual(decision["code"], "BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE")
+
+    def test_primary_gen2_readiness_does_not_infer_unavailable_from_incomplete_inventory(self):
+        decide = self._feature("primary_gen2_readiness")
+        decision = decide({"router_stage_k1_exec": True})
+        self.assertEqual(decision["code"], "UNKNOWN")
+
     def test_static_config_without_sideband_evidence_is_unknown(self):
         with tempfile.TemporaryDirectory() as temporary:
             codex_home = Path(temporary)
