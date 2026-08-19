@@ -291,6 +291,81 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         self.assertEqual(snapshot.packet_generation, 1)
         self.assertIsNotNone(snapshot.pending_spawn)
 
+    def test_exact_v1_spawn_accepts_omitted_fork_context_and_binds_agent_id(self):
+        self._submit_root_prompt()
+        packet = self._packet(packet_id="packet-1", generation=1)
+        self._stage(packet)
+        spawn_input = {
+            "message": "enc_01J9opaque_native_payload",
+            "agent_type": "luna_worker",
+        }
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn-1",
+                    "tool_name": "multi_agent_v1__spawn_agent",
+                    "tool_use_id": "v1-spawn-1",
+                    "tool_input": spawn_input,
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn-1",
+                    "tool_name": "multi_agent_v1__spawn_agent",
+                    "tool_use_id": "v1-spawn-1",
+                    "tool_input": spawn_input,
+                    "tool_response": {"agent_id": "native-v1-1", "nickname": "luna"},
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "PostToolUse"}},
+        )
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "SubagentStart",
+                    "session_id": "session-a",
+                    "turn_id": "luna-turn-v1-1",
+                    "agent_id": "native-v1-1",
+                    "agent_type": "luna_worker",
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
+        )
+        snapshot = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        self.assertEqual(snapshot.luna_agent_id, "native-v1-1")
+        self.assertIsNone(snapshot.luna_task_path)
+        self.assertIsNone(snapshot.pending_spawn)
+
+    def test_collapsed_v1_spawn_requires_explicit_false(self):
+        self._submit_root_prompt()
+        packet = self._packet(packet_id="packet-1", generation=1)
+        self._stage(packet)
+        base = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "session-a",
+            "turn_id": "root-turn-1",
+            "tool_name": "spawn_agent",
+            "tool_use_id": "collapsed-v1-spawn",
+            "tool_input": {
+                "message": "enc_01J9opaque_native_payload",
+                "agent_type": "luna_worker",
+            },
+        }
+        denied = handle_hook_event(base, self.installation_dir)
+        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        base["tool_input"] = base["tool_input"] | {"fork_context": False}
+        self.assertEqual(handle_hook_event(base, self.installation_dir), {})
+
     def test_current_app_collaboration_spawn_alias_is_corroborated_at_posttool(self):
         self._submit_root_prompt()
         packet = self._packet(packet_id="packet-1", generation=1)

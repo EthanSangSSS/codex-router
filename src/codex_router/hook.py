@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -452,6 +452,23 @@ def _normalize_event_tool_name(base: dict[str, Any]) -> None:
         base["tool_name"] = match.canonical_operation
 
 
+def _discriminate_spawn_profile(
+    base: dict[str, Any], tool_input: Mapping[str, Any]
+) -> None:
+    match = base.get("native_tool_match")
+    if (
+        isinstance(match, NativeToolMatch)
+        and match.raw_name == "spawn_agent"
+        and "task_name" not in tool_input
+        and "fork_turns" not in tool_input
+    ):
+        base["native_tool_match"] = replace(
+            match,
+            surface_profile="collapsed_v1_spawn",
+            input_schema="v1_spawn",
+        )
+
+
 def _actor_identity(event: Mapping[str, Any]) -> tuple[str | None, str | None, bool]:
     has_actor_fields = "actor_id" in event or "actor_type" in event
     has_agent_fields = "agent_id" in event or "agent_type" in event
@@ -514,6 +531,26 @@ def _mapping_text(tool_input: Mapping[str, Any], name: str) -> str:
     if not isinstance(value, str) or not value:
         raise _invalid(f"tool_input.{name} must be non-empty text")
     return value
+
+
+def _v1_spawn_projection(
+    tool_input: Mapping[str, Any],
+    surface_profile: Literal["multi_agent_v1", "collapsed_v1_spawn"],
+) -> dict[str, str]:
+    if {"task_name", "fork_turns"} & tool_input.keys():
+        raise _invalid("V1 spawn schema is mixed")
+    if tool_input.get("agent_type") != "luna_worker":
+        raise _invalid("V1 spawn agent_type must be luna_worker")
+    fork_context = tool_input.get("fork_context")
+    if fork_context is not None and fork_context is not False:
+        raise _invalid("V1 spawn must be no-history")
+    if surface_profile == "collapsed_v1_spawn" and fork_context is not False:
+        raise _invalid("collapsed V1 spawn requires fork_context=false")
+    return {
+        "task_name": "luna_worker",
+        "agent_type": "luna_worker",
+        "fork_turns": "none",
+    }
 
 
 def _is_bound_luna(
@@ -580,18 +617,32 @@ def _handle_parent_pretool(
             "deny", "legacy parent work surface is forbidden"
         )
     if tool_name in _PARENT_CREATE_TOOLS:
-        if _mapping_text(tool_input, "task_name") != "luna_worker":
-            raise _invalid("Router spawn task_name must be luna_worker")
-        if _mapping_text(tool_input, "agent_type") != "luna_worker":
-            raise _invalid("Router spawn agent_type must be luna_worker")
-        if _mapping_text(tool_input, "fork_turns") != "none":
-            raise _invalid("Router Luna spawn must use fork_turns=none")
+        match = base.get("native_tool_match")
+        if (
+            isinstance(match, NativeToolMatch)
+            and match.surface_profile in {"multi_agent_v1", "collapsed_v1_spawn"}
+        ):
+            projection = _v1_spawn_projection(tool_input, match.surface_profile)
+        else:
+            if "fork_context" in tool_input:
+                raise _invalid("V2 spawn does not accept fork_context")
+            projection = {
+                "task_name": _mapping_text(tool_input, "task_name"),
+                "agent_type": _mapping_text(tool_input, "agent_type"),
+                "fork_turns": _mapping_text(tool_input, "fork_turns"),
+            }
+            if projection != {
+                "task_name": "luna_worker",
+                "agent_type": "luna_worker",
+                "fork_turns": "none",
+            }:
+                raise _invalid("Router Luna spawn identity is invalid")
         luna_control.admit_staged_spawn(
             installation_dir,
             secret,
             base["session_id"],
             root_turn_id=base["turn_id"], tool_use_id=base["tool_use_id"],
-            task_name="luna_worker", agent_type="luna_worker", fork_turns="none",
+            **projection,
         )
         return {}
     if tool_name in _PARENT_COMMUNICATE_TOOLS | _PARENT_CLEANUP_TOOLS:
@@ -642,6 +693,17 @@ def _spawn_task_path(tool_response: Any) -> str:
     return _mapping_text(tool_response, "task_name")
 
 
+def _spawn_agent_id(tool_response: Any) -> str:
+    if isinstance(tool_response, str):
+        try:
+            tool_response = json.loads(tool_response)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise _invalid("spawn tool_response must be a JSON object") from error
+    if not isinstance(tool_response, Mapping):
+        raise _invalid("spawn tool_response must be an object")
+    return _mapping_text(tool_response, "agent_id")
+
+
 def _event_a1_category(event: Mapping[str, Any]) -> str | None:
     value = event.get("a1_category")
     tool_input = event.get("tool_input")
@@ -669,6 +731,7 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             tool_input = event.get("tool_input")
             if not isinstance(tool_input, Mapping):
                 raise _invalid("tool_input must be an object")
+            _discriminate_spawn_profile(base, tool_input)
             lifecycle = _looks_like_agent_lifecycle_tool(base["tool_name"])
             identity = _identity_kind(event, lifecycle=lifecycle)
             if lifecycle:
@@ -725,13 +788,23 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
                 != "root"
             ):
                 raise _invalid("Router actor identity is missing or ambiguous")
-            luna_control.observe_spawn_result(
-                Path(installation_dir),
-                secret,
-                base["session_id"],
-                tool_use_id=base["tool_use_id"],
-                task_path=_spawn_task_path(event.get("tool_response")),
-            )
+            match = base.get("native_tool_match")
+            if isinstance(match, NativeToolMatch) and match.surface_profile == "multi_agent_v1":
+                luna_control.observe_v1_spawn_result(
+                    Path(installation_dir),
+                    secret,
+                    base["session_id"],
+                    tool_use_id=base["tool_use_id"],
+                    agent_id=_spawn_agent_id(event.get("tool_response")),
+                )
+            else:
+                luna_control.observe_spawn_result(
+                    Path(installation_dir),
+                    secret,
+                    base["session_id"],
+                    tool_use_id=base["tool_use_id"],
+                    task_path=_spawn_task_path(event.get("tool_response")),
+                )
             return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
 
         if name == "PermissionRequest":

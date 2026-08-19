@@ -330,7 +330,7 @@ def install(base) -> None:
         with base._locked_state(Path(directory), mutate=True) as state:
             snapshot = base._record_for_session(state, tag)
             pending = snapshot.pending_spawn
-            bound_identity = snapshot.luna_agent_id == agent and snapshot.luna_task_path is not None
+            bound_identity = snapshot.luna_agent_id == agent
             pending_identity = pending is not None and pending.agent_id == agent
             if (
                 snapshot.logical_task_status != "ACTIVE"
@@ -441,7 +441,10 @@ def install(base) -> None:
         with base._locked_state(Path(directory), mutate=True) as state:
             snapshot = base._record_for_session(state, tag)
             _require_current_root(snapshot, secret, root_turn_id)
-            if snapshot.luna_agent_id is None or snapshot.luna_task_path is None or requested not in {snapshot.luna_agent_id, snapshot.luna_task_path}:
+            targets = {snapshot.luna_agent_id} if snapshot.luna_agent_id is not None else set()
+            if snapshot.luna_task_path is not None:
+                targets.add(snapshot.luna_task_path)
+            if not targets or requested not in targets:
                 raise base._error("parent lifecycle target is not the current Luna")
             updated = _commit_staged_packet(snapshot)
             base._store_snapshot(state, updated)
@@ -612,7 +615,6 @@ def install(base) -> None:
         if (
             snapshot is None
             or snapshot.luna_agent_id is None
-            or snapshot.luna_task_path is None
             or snapshot.logical_task_status != "ACTIVE"
             or snapshot.execution_status in {"RETIRED", "QUARANTINED"}
         ):

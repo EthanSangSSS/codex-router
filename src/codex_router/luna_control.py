@@ -168,8 +168,8 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
     authority_packet_wire = _authority_packet_wire(
         snapshot.authority_packet_wire, optional=True
     )
-    if (luna_agent_id is None) != (luna_task_path is None):
-        raise _error("Luna identity and task path must be bound together")
+    if luna_agent_id is None and luna_task_path is not None:
+        raise _error("Luna task path requires a bound identity")
     if (
         not isinstance(snapshot.packet_generation, int)
         or isinstance(snapshot.packet_generation, bool)
@@ -695,6 +695,45 @@ def observe_spawn_result(
         return updated
 
 
+def observe_v1_spawn_result(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    tool_use_id: str,
+    agent_id: str,
+) -> ControlSnapshot:
+    tool_id = _text(tool_use_id, "tool_use_id")
+    child_id = _text(agent_id, "agent_id")
+    assert tool_id is not None and child_id is not None
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        pending = snapshot.pending_spawn
+        if pending is None or pending.tool_use_id != tool_id or pending.task_path is not None:
+            raise _error("V1 spawn result does not match the pending reservation")
+        if pending.agent_id is not None and pending.agent_id != child_id:
+            raise _error("V1 spawn result conflicts with prior agent observation")
+        if pending.expected_agent_id is not None and pending.expected_agent_id != child_id:
+            raise _error("V1 spawn result conflicts with the expected agent")
+        if pending.agent_id == child_id:
+            updated = replace(
+                snapshot,
+                luna_agent_id=child_id,
+                luna_task_path=None,
+                pending_spawn=None,
+            )
+        else:
+            updated = replace(
+                snapshot,
+                pending_spawn=replace(
+                    pending, agent_id=child_id, expected_agent_id=child_id
+                ),
+            )
+        _store_snapshot(state, updated)
+        return updated
+
+
 def observe_subagent_start(
     directory: Path,
     secret: bytes,
@@ -745,6 +784,18 @@ def observe_subagent_start(
                 and pending.expected_agent_id != child_id
             ):
                 raise _error("SubagentStart agent identity is not authorized")
+            if (
+                pending.agent_id == child_id
+                and pending.expected_agent_id == child_id
+            ):
+                updated = replace(
+                    snapshot,
+                    luna_agent_id=child_id,
+                    luna_task_path=None,
+                    pending_spawn=None,
+                )
+                _store_snapshot(state, updated)
+                return updated
             updated = replace(
                 snapshot,
                 pending_spawn=replace(pending, agent_id=child_id),
@@ -783,7 +834,6 @@ def current_luna(directory: Path, secret: bytes, session_id: str) -> ControlSnap
     if (
         snapshot is None
         or snapshot.luna_agent_id is None
-        or snapshot.luna_task_path is None
         or snapshot.logical_task_status != "ACTIVE"
         or snapshot.execution_status == "RETIRED"
     ):
@@ -807,7 +857,10 @@ def authorize_parent_target(
     if tool in _LEGACY_PARENT_WORK_TOOLS:
         raise _error("legacy parent work surface is forbidden")
     snapshot = current_luna(directory, secret, session_id)
-    if requested not in {snapshot.luna_agent_id, snapshot.luna_task_path}:
+    targets = {snapshot.luna_agent_id}
+    if snapshot.luna_task_path is not None:
+        targets.add(snapshot.luna_task_path)
+    if requested not in targets:
         raise _error("parent lifecycle target is not the current Luna")
     if tool in _PARENT_WORK_TOOLS and snapshot.execution_status not in {
         "IDLE",

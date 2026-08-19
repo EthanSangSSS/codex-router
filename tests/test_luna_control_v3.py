@@ -104,7 +104,7 @@ class LunaControlV3Tests(unittest.TestCase):
             replace(snapshot, packet_generation=-1),
             replace(snapshot, task_epoch="bad-task"),
             replace(snapshot, luna_epoch="bad-luna"),
-            replace(snapshot, luna_agent_id="agent-1"),
+            replace(snapshot, luna_task_path="/root/luna_worker"),
             replace(snapshot, execution_status="RUNNING"),
             replace(snapshot, execution_status="QUIESCING"),
             replace(snapshot, active_child_turn_id="child-turn-1"),
