@@ -243,10 +243,12 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "task_name=luna_worker",
             "agent_type=luna_worker",
             "fork_turns=none",
-            "generation-1 K1 packet as `message`",
-            "later generations use `followup_task`",
-            "`send_message` is queue-only",
-            "must not admit a new K1 generation",
+            "stage canonical K1 through `router stage-k1` first",
+            "Native `spawn_agent`/`followup_task` message is a transport trigger, not authority",
+            "`send_message` is QueueOnly and cannot advance K1",
+            "Native collaboration messages are transport triggers, not work authority.",
+            "The authoritative work packet is `[CODEX_ROUTER_PACKET_V3_1]` injected by Router as developer context.",
+            "Do not perform tool work for a new generation until Router performs the first-tool authority handshake.",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, combined)
@@ -256,6 +258,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "revoke-only terminal semantics",
             "revoke_only_security_boundary",
             "later generations use `send_message` or `followup_task`",
+            "generation-1 K1 packet as `message`",
         ):
             with self.subTest(stale=stale):
                 self.assertNotIn(stale, combined)

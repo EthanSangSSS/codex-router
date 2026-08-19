@@ -82,6 +82,28 @@ class K1StageCapabilityTests(unittest.TestCase):
         self.assertNotEqual(mac, bare_mac)
 
 
+class K1RenderedContractTests(unittest.TestCase):
+    def test_renderer_declares_sideband_authority_and_first_tool_handshake(self):
+        from codex_router import global_install_adapter as adapter
+
+        combined = (
+            f"{adapter.AGENTS_BLOCK_V3}\n"
+            f"{adapter.LUNA_DEVELOPER_INSTRUCTIONS_V3}"
+        )
+
+        for required in (
+            "stage canonical K1 through `router stage-k1` first",
+            "Native `spawn_agent`/`followup_task` message is a transport trigger, not authority",
+            "`send_message` is QueueOnly and cannot advance K1",
+            "Native collaboration messages are transport triggers, not work authority.",
+            "The authoritative work packet is `[CODEX_ROUTER_PACKET_V3_1]` injected by Router as developer context.",
+            "Do not perform tool work for a new generation until Router performs the first-tool authority handshake.",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, combined)
+        self.assertNotIn("generation-1 K1 packet as `message`", combined)
+
+
 class K1SidebandStateTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
