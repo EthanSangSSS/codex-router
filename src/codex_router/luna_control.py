@@ -69,6 +69,7 @@ class ControlSnapshot:
     active_child_turn_id: str | None
     logical_task_status: TaskStatus
     execution_status: ExecutionStatus
+    authority_packet_wire: str | None = None
     pending_spawn: SpawnReservation | None = None
     intended_write_scope: tuple[str, ...] = ()
     explicit_side_effect_authorizations: tuple[str, ...] = ()
@@ -150,6 +151,9 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
     child_turn = _text(
         snapshot.active_child_turn_id, "active_child_turn_id", optional=True
     )
+    authority_packet_wire = _text(
+        snapshot.authority_packet_wire, "authority_packet_wire", optional=True
+    )
     if (luna_agent_id is None) != (luna_task_path is None):
         raise _error("Luna identity and task path must be bound together")
     if (
@@ -196,6 +200,11 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
         raise _error("retired execution cannot retain active execution identity")
     if child_turn is not None and packet_id is None:
         raise _error("active child turn requires an active packet")
+    if authority_packet_wire is not None:
+        try:
+            parse_luna_packet(authority_packet_wire)
+        except ProtocolError as error:
+            raise _error(str(error)) from error
     if snapshot.packet_generation == 0 and (
         packet_id is not None
         or intended_write_scope
@@ -230,6 +239,8 @@ def _snapshot_from_mapping(value: Any) -> ControlSnapshot:
     if not isinstance(value, Mapping):
         raise _error("control snapshot schema is invalid")
     data = dict(value)
+    if "authority_packet_wire" not in data:
+        data["authority_packet_wire"] = None
     packet_metadata_fields = {
         "intended_write_scope",
         "explicit_side_effect_authorizations",

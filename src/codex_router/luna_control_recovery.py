@@ -15,6 +15,8 @@ import re
 import subprocess
 from typing import Any, Literal, Mapping
 
+from .protocol import ProtocolError, parse_luna_packet, verify_k1_stage_capability
+
 
 _GIT_COMMIT_RE = re.compile(r"[0-9a-fA-F]{40,64}\Z")
 _GIT_TIMEOUT_SECONDS = 5
@@ -100,6 +102,7 @@ def install(base) -> None:
     original_validate_snapshot = base.validate_snapshot
     original_replacement_reservation = base._replacement_reservation
     original_authorize_parent_target = base.authorize_parent_target
+    original_retire_luna = base.retire_luna
 
     @dataclass(frozen=True)
     class ControlSnapshot(OriginalControlSnapshot):
@@ -128,6 +131,12 @@ def install(base) -> None:
         root_turn_tag = snapshot.current_root_turn_tag
         if root_turn_tag is not None and base._TAG_RE.fullmatch(root_turn_tag) is None:
             raise base._error("current root turn tag is invalid")
+        authority_packet_wire = snapshot.authority_packet_wire
+        if authority_packet_wire is not None:
+            try:
+                parse_luna_packet(authority_packet_wire)
+            except ProtocolError as error:
+                raise base._error(str(error)) from error
         if snapshot.execution_status == "QUARANTINED" and snapshot.active_packet_id is None:
             raise base._error("quarantined execution requires an active packet")
 
@@ -146,6 +155,8 @@ def install(base) -> None:
             data["recovery_baseline"] = None
         if "current_root_turn_tag" not in data:
             data["current_root_turn_tag"] = None
+        if "authority_packet_wire" not in data:
+            data["authority_packet_wire"] = None
         expected_fields = set(ControlSnapshot.__dataclass_fields__)
         if set(data) != expected_fields:
             raise base._error("control snapshot schema is invalid")
@@ -212,9 +223,150 @@ def install(base) -> None:
             snapshot = base._record_for_session(state, tag)
             if turn_tag is not None and snapshot.logical_task_status != "ACTIVE":
                 raise base._error("only an active task may bind root turn authority")
-            updated = replace(snapshot, current_root_turn_tag=turn_tag)
+            unchanged = (
+                turn_tag is not None
+                and snapshot.current_root_turn_tag is not None
+                and hmac.compare_digest(snapshot.current_root_turn_tag, turn_tag)
+            )
+            updated = replace(
+                snapshot,
+                current_root_turn_tag=turn_tag,
+                authority_packet_wire=(
+                    snapshot.authority_packet_wire if unchanged else None
+                ),
+            )
             base._store_snapshot(state, updated)
             return updated
+
+    def stage_authority_packet(
+        directory: Path,
+        secret: bytes,
+        session_id: str,
+        *,
+        root_turn_id: str,
+        capability: str,
+        packet_wire: str,
+    ) -> ControlSnapshot:
+        tag = base.session_tag(secret, session_id)
+        expected_root_tag = _root_turn_tag(secret, root_turn_id)
+        with base._locked_state(Path(directory), mutate=True) as state:
+            snapshot = base._record_for_session(state, tag)
+            if snapshot.logical_task_status != "ACTIVE":
+                raise base._error("current task cannot stage authority")
+            if (
+                snapshot.current_root_turn_tag is None
+                or not hmac.compare_digest(
+                    snapshot.current_root_turn_tag, expected_root_tag
+                )
+            ):
+                raise base._error("staged authority root turn is not current")
+            generation = snapshot.packet_generation + 1
+            try:
+                verify_k1_stage_capability(
+                    capability,
+                    secret,
+                    session_tag=tag,
+                    root_turn_tag=snapshot.current_root_turn_tag,
+                    task_epoch=snapshot.task_epoch,
+                    generation=generation,
+                )
+                packet = parse_luna_packet(packet_wire)
+            except ProtocolError as error:
+                raise base._error(str(error)) from error
+            if packet["generation"] != generation:
+                raise base._error("staged authority generation is not current")
+            if snapshot.authority_packet_wire is None:
+                updated = replace(snapshot, authority_packet_wire=packet_wire)
+                base._store_snapshot(state, updated)
+                return updated
+            if hmac.compare_digest(snapshot.authority_packet_wire, packet_wire):
+                return snapshot
+            raise base._error("different staged authority already exists")
+
+    def clear_staged_authority(
+        directory: Path, secret: bytes, session_id: str
+    ) -> ControlSnapshot:
+        tag = base.session_tag(secret, session_id)
+        with base._locked_state(Path(directory), mutate=True) as state:
+            snapshot = base._record_for_session(state, tag)
+            if snapshot.authority_packet_wire is None:
+                return snapshot
+            updated = replace(snapshot, authority_packet_wire=None)
+            base._store_snapshot(state, updated)
+            return updated
+
+    def freeze_authority(
+        directory: Path,
+        secret: bytes,
+        session_id: str,
+        *,
+        reason: str,
+        logical_cancel: bool = False,
+    ) -> ControlSnapshot:
+        base._text(reason, "reason")
+        if not isinstance(logical_cancel, bool):
+            raise base._error("logical_cancel is invalid")
+        tag = base.session_tag(secret, session_id)
+        with base._locked_state(Path(directory), mutate=True) as state:
+            snapshot = base._record_for_session(state, tag)
+            if snapshot.logical_task_status != "ACTIVE":
+                raise base._error("only an active task may freeze authority")
+            if snapshot.active_packet_id is None:
+                raise base._error("authority freeze requires an active packet")
+            if snapshot.execution_status == "RETIRED":
+                raise base._error("retired execution cannot freeze authority")
+            if snapshot.execution_status == "PAUSED_SETTLED":
+                raise base._error("settled execution cannot freeze authority")
+            if snapshot.execution_status == "QUIESCING":
+                if not logical_cancel:
+                    return snapshot
+                updated = replace(
+                    snapshot,
+                    logical_task_status="CANCELLED",
+                    authority_packet_wire=None,
+                )
+            else:
+                updated = replace(
+                    snapshot,
+                    logical_task_status=(
+                        "CANCELLED"
+                        if logical_cancel
+                        else snapshot.logical_task_status
+                    ),
+                    execution_status="QUIESCING",
+                    authority_packet_wire=(
+                        None if logical_cancel else snapshot.authority_packet_wire
+                    ),
+                )
+            base._store_snapshot(state, updated)
+            return updated
+
+    def retire_luna(
+        directory: Path,
+        secret: bytes,
+        session_id: str,
+        reason: Literal[
+            "unrecoverable_runtime_identity",
+            "new_task_epoch",
+            "native_authority_profile_change",
+            "runtime_validated_context_reset",
+        ],
+        *,
+        settlement_source: Literal["verified_native_terminal"] | None = None,
+        terminal_status: Literal["completed", "failed", "interrupted", "cancelled"]
+        | None = None,
+        child_turn_id: str | None = None,
+    ) -> ControlSnapshot:
+        original_retire_luna(
+            directory,
+            secret,
+            session_id,
+            reason,
+            settlement_source=settlement_source,
+            terminal_status=terminal_status,
+            child_turn_id=child_turn_id,
+        )
+        return clear_staged_authority(directory, secret, session_id)
 
     def is_current_root_turn(
         directory: Path,
@@ -600,6 +752,7 @@ def install(base) -> None:
                 explicit_side_effect_authorizations=(),
                 recovery_baseline=None,
                 current_root_turn_tag=previous.current_root_turn_tag,
+                authority_packet_wire=None,
             )
             base._store_snapshot(state, replacement_snapshot)
             return replacement_snapshot
@@ -628,6 +781,8 @@ def install(base) -> None:
     base._snapshot_from_mapping = snapshot_from_mapping
     base.set_current_root_turn = set_current_root_turn
     base.is_current_root_turn = is_current_root_turn
+    base.stage_authority_packet = stage_authority_packet
+    base.clear_staged_authority = clear_staged_authority
     base.begin_packet = begin_packet
     base.current_luna = current_luna
     base.authorize_parent_target = authorize_parent_target
@@ -637,4 +792,6 @@ def install(base) -> None:
     base.quarantine_execution = quarantine_execution
     base.observe_settlement = observe_settlement
     base.replace_quarantined_luna_epoch = replace_quarantined_luna_epoch
+    base.freeze_authority = freeze_authority
+    base.retire_luna = retire_luna
     base._QUARANTINED_RECOVERY_INSTALLED = True
