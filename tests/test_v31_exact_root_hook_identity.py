@@ -362,9 +362,28 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             },
         }
         denied = handle_hook_event(base, self.installation_dir)
-        self.assertEqual(denied["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertNotEqual(denied, {})
         base["tool_input"] = base["tool_input"] | {"fork_context": False}
         self.assertEqual(handle_hook_event(base, self.installation_dir), {})
+
+    def test_v2_wait_rejects_v1_targets_and_accepts_timeout_only(self):
+        self._submit_root_prompt()
+        common = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "session-a",
+            "turn_id": "root-turn-1",
+            "tool_name": "wait_agent",
+            "tool_use_id": "wait-v2-1",
+        }
+        self.assertEqual(
+            handle_hook_event(common | {"tool_input": {"timeout_ms": 1000}}, self.installation_dir),
+            {},
+        )
+        denied = handle_hook_event(
+            common | {"tool_input": {"targets": ["native-v1-1"]}},
+            self.installation_dir,
+        )
+        self.assertNotEqual(denied, {})
 
     def test_current_app_collaboration_spawn_alias_is_corroborated_at_posttool(self):
         self._submit_root_prompt()

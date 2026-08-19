@@ -676,6 +676,28 @@ def _handle_parent_pretool(
             )
         return {}
     if tool_name in _PARENT_OBSERVE_TOOLS:
+        match = base.get("native_tool_match")
+        if tool_name == "wait_agent":
+            if isinstance(match, NativeToolMatch) and match.input_schema == "v1_wait":
+                snapshot = luna_control.read_snapshot(
+                    installation_dir, secret, base["session_id"]
+                )
+                targets = tool_input.get("targets")
+                if (
+                    snapshot is None
+                    or snapshot.luna_agent_id is None
+                    or not isinstance(targets, list)
+                    or not targets
+                    or any(
+                        not isinstance(target, str)
+                        or not target
+                        or target != snapshot.luna_agent_id
+                        for target in targets
+                    )
+                ):
+                    raise _invalid("V1 wait targets are invalid")
+            elif "targets" in tool_input:
+                raise _invalid("V2 wait does not accept targets")
         return {}
     if _looks_like_agent_lifecycle_tool(tool_name):
         return _pretool_output("deny", "unknown agent lifecycle operation fails closed")
