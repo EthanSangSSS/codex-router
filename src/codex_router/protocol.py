@@ -203,7 +203,7 @@ def verify_k1_stage_capability(
         task_epoch=claims.get("task_epoch"),
         generation=claims.get("generation"),
     )
-    if claims.get("v") != 1 or claims != validated_claims:
+    if type(claims.get("v")) is not int or claims.get("v") != 1 or claims != validated_claims:
         raise ProtocolError("stage capability claims are invalid")
     expected_mac = hmac.new(
         _stage_capability_secret(secret),

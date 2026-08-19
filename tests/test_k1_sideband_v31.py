@@ -81,6 +81,19 @@ class K1StageCapabilityTests(unittest.TestCase):
 
         self.assertNotEqual(mac, bare_mac)
 
+    def test_stage_capability_rejects_boolean_version_claim(self):
+        claims = self.authority | {"v": True}
+        payload = base64.urlsafe_b64encode(canonical_json_bytes(claims)).rstrip(b"=").decode("ascii")
+        mac = hmac.new(
+            self.secret,
+            b"codex-router/k1-stage-capability/v1\0" + canonical_json_bytes(claims),
+            hashlib.sha256,
+        ).digest()
+        token = payload + "." + base64.urlsafe_b64encode(mac).rstrip(b"=").decode("ascii")
+
+        with self.assertRaises(ProtocolError):
+            self.verify(token)
+
 
 class K1RenderedContractTests(unittest.TestCase):
     def test_renderer_declares_sideband_authority_and_first_tool_handshake(self):
