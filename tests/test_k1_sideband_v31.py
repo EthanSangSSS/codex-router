@@ -2,9 +2,11 @@ import base64
 import hashlib
 import hmac
 import json
+import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from codex_router import luna_control as control
 from codex_router.protocol import (
@@ -276,3 +278,91 @@ class K1SidebandStateTests(unittest.TestCase):
         state_path.write_text(
             json.dumps(state, sort_keys=True, separators=(",", ":")), encoding="utf-8"
         )
+
+
+class K1StageCliTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.installation = Path(self.temporary.name) / "installation"
+        self.installation.mkdir(mode=0o700)
+        self.secret = bytes(range(32))
+        (self.installation / "installation-secret").write_bytes(self.secret)
+        (self.installation / "installation-secret").chmod(0o600)
+        binary = Path(self.temporary.name) / "codex"
+        binary.write_text("synthetic", encoding="utf-8")
+        binary.chmod(0o700)
+        (self.installation / "config.json").write_text(
+            json.dumps(
+                {
+                    "protocol": "codex-router/global-policy-config/v1",
+                    "state_root": str(self.installation),
+                    "codex_binary": str(binary),
+                    "role_config": {
+                        "local_sol": {"requested_model": "inherit", "requested_reasoning": "max"},
+                        "web_sol": {"model_claimed": "sol", "reasoning_claimed": "xhigh", "verification": "operator_attested"},
+                        "luna": {"requested_model": "gpt-5.6-luna", "requested_reasoning": "max"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.installation / "config.json").chmod(0o600)
+        self.session_id = "session-a"
+        self.root_turn_id = "root-turn-a"
+        control.new_task(self.installation, self.secret, self.session_id, "root-parent", "profile-A")
+        control.set_current_root_turn(self.installation, self.secret, self.session_id, turn_id=self.root_turn_id)
+
+    def _packet_and_capability(self):
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        packet = build_luna_packet(
+            packet_id="packet-1", generation=1, objective="bounded work",
+            working_directory=str(self.installation), intended_write_scope=("README.md",),
+            explicit_side_effect_authorizations=(), success_criteria=("pass",), stop_conditions=("blocked",),
+        )
+        capability = build_k1_stage_capability(
+            self.secret, session_tag=control.session_tag(self.secret, self.session_id),
+            root_turn_tag=snapshot.current_root_turn_tag, task_epoch=snapshot.task_epoch,
+            generation=1,
+        )
+        return packet, capability
+
+    def test_stage_k1_cli_is_exposed(self):
+        from codex_router.cli import parser
+
+        parsed = parser().parse_args(
+            [
+                "stage-k1",
+                "--installation-dir",
+                "/tmp/installation",
+                "--session-id",
+                "session-a",
+                "--root-turn-id",
+                "turn-a",
+                "--capability",
+                "token",
+            ]
+        )
+
+        self.assertEqual(parsed.command, "stage-k1")
+
+    def test_stage_k1_cli_reads_one_packet_from_stdin_and_stages_it(self):
+        from codex_router import cli
+        packet, capability = self._packet_and_capability()
+        stream = type("Input", (), {"buffer": io.BytesIO(packet.encode("utf-8"))})()
+        with patch.object(cli.sys, "stdin", stream):
+            result = cli.main(["stage-k1", "--installation-dir", str(self.installation), "--session-id", self.session_id, "--root-turn-id", self.root_turn_id, "--capability", capability])
+
+        self.assertEqual(result, 0)
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        self.assertEqual(snapshot.authority_packet_wire, packet)
+
+    def test_stage_k1_cli_rejects_stale_capability(self):
+        from codex_router import cli
+        packet, capability = self._packet_and_capability()
+        stream = type("Input", (), {"buffer": io.BytesIO(packet.encode("utf-8"))})()
+
+        with patch.object(cli.sys, "stdin", stream):
+            result = cli.main(["stage-k1", "--installation-dir", str(self.installation), "--session-id", self.session_id, "--root-turn-id", "stale-turn", "--capability", capability])
+
+        self.assertNotEqual(result, 0)

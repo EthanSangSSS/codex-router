@@ -67,6 +67,36 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             )
         )
 
+    def test_sideband_stage_capability_available_from_explicit_runtime_evidence(self):
+        classify = self._feature("sideband_stage_capability")
+        self.assertEqual(
+            classify({"router_stage_k1_exec": True}), "AVAILABLE"
+        )
+
+    def test_sideband_stage_capability_unavailable_from_explicit_negative(self):
+        classify = self._feature("sideband_stage_capability")
+        self.assertEqual(
+            classify({"router_stage_k1_exec": False}), "UNAVAILABLE"
+        )
+
+    def test_sideband_stage_capability_unknown_when_unproven(self):
+        classify = self._feature("sideband_stage_capability")
+        self.assertEqual(
+            classify(self._PRIMARY_V2_EVIDENCE),
+            "UNKNOWN_REQUIRES_CAPABILITY_CHECK",
+        )
+
+    def test_primary_readiness_not_compatible_when_sideband_exec_unproven(self):
+        status = self._feature("primary_readiness")
+        self.assertEqual(status(self._PRIMARY_V2_EVIDENCE), "UNKNOWN_REQUIRES_CAPABILITY_CHECK")
+
+    def test_primary_readiness_incompatible_when_sideband_exec_explicitly_unavailable(self):
+        status = self._feature("primary_readiness")
+        self.assertEqual(
+            status(self._PRIMARY_V2_EVIDENCE | {"router_stage_k1_exec": False}),
+            "INCOMPATIBLE",
+        )
+
     def test_executor_requested_model_is_rendered_explicitly(self):
         render = self._feature("render_executor_config")
         rendered = tomllib.loads(

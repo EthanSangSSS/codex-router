@@ -15,7 +15,9 @@ from .global_install_adapter import (
     global_status,
     global_uninstall,
 )
-from .hook import handle_hook_event, read_hook_event
+from . import luna_control
+from .hook import MAX_HOOK_INPUT_BYTES, _load_installation, handle_hook_event, read_hook_event
+from .protocol import ProtocolError, parse_luna_packet
 from .pipeline import Router, RouterRunError
 from .state import RouterStateError, fail_stage, get_status, start_run, submit_stage
 from .types import GlobalStatus, TransitionResult
@@ -98,6 +100,12 @@ def parser() -> argparse.ArgumentParser:
     ):
         hook = subcommands.add_parser(command, help=f"handle one Codex {event} event")
         hook.add_argument("--installation-dir", type=Path, required=True)
+
+    stage_k1 = subcommands.add_parser("stage-k1", help="stage one canonical K1 authority packet")
+    stage_k1.add_argument("--installation-dir", type=Path, required=True)
+    stage_k1.add_argument("--session-id", required=True)
+    stage_k1.add_argument("--root-turn-id", required=True)
+    stage_k1.add_argument("--capability", required=True)
 
     install = subcommands.add_parser(
         "global-install", help="install the reversible global Router policy"
@@ -203,6 +211,16 @@ def _read_json_object(path: Path, description: str) -> dict[str, Any]:
     return value
 
 
+def _read_stage_packet() -> str:
+    raw = sys.stdin.buffer.read(MAX_HOOK_INPUT_BYTES + 1)
+    if len(raw) > MAX_HOOK_INPUT_BYTES:
+        raise RouterStateError("invalid-input", "K1 packet exceeds the hook input limit")
+    try:
+        return raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise RouterStateError("invalid-input", "K1 packet must be UTF-8") from error
+
+
 def _role_config(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "local_sol": {
@@ -255,6 +273,29 @@ def main(argv=None) -> int:
         if args.command.startswith("hook-"):
             output = handle_hook_event(read_hook_event(sys.stdin.buffer), args.installation_dir)
             _print_json(output)
+            return 0
+        if args.command == "stage-k1":
+            secret, _config = _load_installation(args.installation_dir)
+            packet_wire = _read_stage_packet()
+            snapshot = luna_control.stage_authority_packet(
+                args.installation_dir,
+                secret,
+                args.session_id,
+                root_turn_id=args.root_turn_id,
+                capability=args.capability,
+                packet_wire=packet_wire,
+            )
+            try:
+                packet = parse_luna_packet(packet_wire)
+            except ProtocolError as error:
+                raise RouterStateError("invalid-input", "K1 packet is invalid") from error
+            _print_json(
+                {
+                    "status": "staged",
+                    "generation": snapshot.packet_generation + 1,
+                    "packet_id": packet["packet_id"],
+                }
+            )
             return 0
         if args.command == "global-install":
             global_result = global_install(

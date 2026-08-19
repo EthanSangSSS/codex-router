@@ -25,6 +25,9 @@ BASELINE_HOOK_EVENTS = (
 COMPATIBLE = "COMPATIBLE"
 INCOMPATIBLE = "INCOMPATIBLE"
 UNKNOWN = "UNKNOWN_REQUIRES_CAPABILITY_CHECK"
+SIDEBAND_STAGE_AVAILABLE = "AVAILABLE"
+SIDEBAND_STAGE_UNAVAILABLE = "UNAVAILABLE"
+SIDEBAND_STAGE_UNKNOWN = UNKNOWN
 PRIMARY_MODEL_INHERIT = "inherit"
 PRIMARY_REQUIRED_CAPABILITIES = (
     "multi_agent_v2",
@@ -162,6 +165,45 @@ def primary_capability_gate(runtime_capabilities: Any) -> bool:
     # A complete V2 tool triad is itself sufficient evidence when older
     # telemetry did not emit a separate feature flag.
     return multi_agent_v2 is True or _PRIMARY_TOOL_CAPABILITIES.issubset(names)
+
+
+def sideband_stage_capability(runtime_capabilities: Any) -> str:
+    """Classify only explicit runtime evidence for the K1 staging command."""
+    evidence: set[bool] = set()
+
+    def visit(node: Any) -> None:
+        if isinstance(node, Mapping):
+            for key, child in node.items():
+                if _capability_name(key) == "router_stage_k1_exec":
+                    if isinstance(child, bool):
+                        evidence.add(child)
+                    elif isinstance(child, str) and child.strip().lower() in {
+                        "true", "false", "1", "0", "enabled", "disabled"
+                    }:
+                        evidence.add(child.strip().lower() in {"true", "1", "enabled"})
+                if isinstance(child, (Mapping, list, tuple, set, frozenset)):
+                    visit(child)
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            for child in node:
+                visit(child)
+
+    visit(runtime_capabilities)
+    if evidence == {True}:
+        return SIDEBAND_STAGE_AVAILABLE
+    if evidence == {False}:
+        return SIDEBAND_STAGE_UNAVAILABLE
+    return SIDEBAND_STAGE_UNKNOWN
+
+
+def primary_readiness(runtime_capabilities: Any) -> str:
+    if not primary_capability_gate(runtime_capabilities):
+        return INCOMPATIBLE
+    sideband = sideband_stage_capability(runtime_capabilities)
+    if sideband == SIDEBAND_STAGE_AVAILABLE:
+        return COMPATIBLE
+    if sideband == SIDEBAND_STAGE_UNAVAILABLE:
+        return INCOMPATIBLE
+    return UNKNOWN
 
 
 def primary_model_is_admitted(
@@ -409,14 +451,20 @@ def _primary_capability(
 ) -> tuple[str, str]:
     """Classify only statically observable primary capabilities; never mutate config."""
     def runtime_result() -> tuple[str, str]:
-        if primary_capability_gate(runtime_capabilities):
+        readiness = primary_readiness(runtime_capabilities)
+        if readiness == COMPATIBLE:
             return (
                 COMPATIBLE,
-                "runtime evidence satisfies the primary Multi-Agent V2 capability contract",
+                "runtime evidence satisfies the primary V2 and K1 sideband capability contracts",
+            )
+        if readiness == UNKNOWN:
+            return (
+                UNKNOWN,
+                "primary V2 evidence is present but router_stage_k1_exec is unproven",
             )
         return (
             INCOMPATIBLE,
-            "runtime evidence is missing a required primary Multi-Agent V2 capability",
+            "runtime evidence is missing a required primary V2 or K1 sideband capability",
         )
 
     config_path = codex_home / "config.toml"

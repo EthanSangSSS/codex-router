@@ -4,13 +4,20 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import shlex
 import stat
+import sys
 from typing import Any, Mapping
 
 from . import luna_control
 from .a1 import validate_packet_authorizations
 from .policy import classify_prompt
-from .protocol import ProtocolError, canonical_json_bytes, parse_luna_packet
+from .protocol import (
+    ProtocolError,
+    build_k1_stage_capability,
+    canonical_json_bytes,
+    parse_luna_packet,
+)
 from .state import RouterStateError
 
 
@@ -341,6 +348,11 @@ def handle_user_prompt(
                 validated["session_id"],
                 turn_id=validated["turn_id"],
             )
+            snapshot = luna_control.read_snapshot(
+                Path(installation_dir), secret, validated["session_id"]
+            )
+            if snapshot is None or snapshot.current_root_turn_tag is None:
+                raise _invalid("current root turn authority is unavailable")
     except Exception:
         return {"decision": "block", "reason": _BLOCK_REASON}
 
@@ -354,6 +366,31 @@ def handle_user_prompt(
         )
 
     luna = config["role_config"]["luna"]
+    stage_capability = build_k1_stage_capability(
+        secret,
+        session_tag=luna_control.session_tag(secret, validated["session_id"]),
+        root_turn_tag=snapshot.current_root_turn_tag,
+        task_epoch=snapshot.task_epoch,
+        generation=snapshot.packet_generation + 1,
+    )
+    stage_command = shlex.join(
+        (
+            sys.executable,
+            "-E",
+            "-P",
+            "-m",
+            "codex_router",
+            "stage-k1",
+            "--installation-dir",
+            str(Path(installation_dir)),
+            "--session-id",
+            validated["session_id"],
+            "--root-turn-id",
+            validated["turn_id"],
+            "--capability",
+            stage_capability,
+        )
+    )
     return _hook_output(
         {
             "protocol": HOOK_CONTEXT_PROTOCOL,
@@ -377,6 +414,8 @@ def handle_user_prompt(
             "pause_semantics": "hard_authority_pause",
             "sol_supervision": "event_driven",
             "luna_execution_mode": "full_executor",
+            "K1_STAGE_CAPABILITY": stage_capability,
+            "K1_STAGE_COMMAND": stage_command,
         }
     )
 
