@@ -366,6 +366,107 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         base["tool_input"] = base["tool_input"] | {"fork_context": False}
         self.assertEqual(handle_hook_event(base, self.installation_dir), {})
 
+    def test_v1_wait_accepts_only_exact_bound_agent_id_without_state_change(self):
+        self._submit_root_prompt()
+        packet = self._packet(packet_id="packet-1", generation=1)
+        self._stage(packet)
+        spawn_input = {
+            "message": "enc_01J9opaque_native_payload",
+            "agent_type": "luna_worker",
+        }
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PreToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn-1",
+                    "tool_name": "multi_agent_v1__spawn_agent",
+                    "tool_use_id": "v1-wait-spawn",
+                    "tool_input": spawn_input,
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn-1",
+                    "tool_name": "multi_agent_v1__spawn_agent",
+                    "tool_use_id": "v1-wait-spawn",
+                    "tool_input": spawn_input,
+                    "tool_response": {"agent_id": "native-v1-wait"},
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "PostToolUse"}},
+        )
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "SubagentStart",
+                    "session_id": "session-a",
+                    "turn_id": "luna-turn-v1-wait",
+                    "agent_id": "native-v1-wait",
+                    "agent_type": "luna_worker",
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
+        )
+
+        before = control.read_snapshot(self.installation_dir, self.secret, "session-a")
+        wait = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "session-a",
+            "turn_id": "root-turn-1",
+            "tool_name": "multi_agent_v1wait_agent",
+            "tool_use_id": "v1-wait-1",
+        }
+        self.assertEqual(
+            handle_hook_event(
+                wait
+                | {
+                    "tool_input": {
+                        "targets": ["native-v1-wait"],
+                        "timeout_ms": 1000,
+                    }
+                },
+                self.installation_dir,
+            ),
+            {},
+        )
+        self.assertEqual(
+            control.read_snapshot(self.installation_dir, self.secret, "session-a"),
+            before,
+        )
+
+        for targets in ([], ["/root/luna_worker"], ["other-agent"]):
+            denied = handle_hook_event(
+                wait | {"tool_input": {"targets": targets}},
+                self.installation_dir,
+            )
+            self.assertNotEqual(denied, {})
+            self.assertEqual(
+                control.read_snapshot(self.installation_dir, self.secret, "session-a"),
+                before,
+            )
+
+    def test_v2_wait_rejects_unknown_transport_fields(self):
+        self._submit_root_prompt()
+        wait = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "session-a",
+            "turn_id": "root-turn-1",
+            "tool_name": "wait_agent",
+            "tool_use_id": "wait-v2-extra",
+            "tool_input": {"timeout_ms": 1000, "unexpected": "value"},
+        }
+        denied = handle_hook_event(wait, self.installation_dir)
+        self.assertNotEqual(denied, {})
+
     def test_v2_wait_rejects_v1_targets_and_accepts_timeout_only(self):
         self._submit_root_prompt()
         common = {

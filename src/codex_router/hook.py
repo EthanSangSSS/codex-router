@@ -696,8 +696,8 @@ def _handle_parent_pretool(
                     )
                 ):
                     raise _invalid("V1 wait targets are invalid")
-            elif "targets" in tool_input:
-                raise _invalid("V2 wait does not accept targets")
+            elif any(key != "timeout_ms" for key in tool_input):
+                raise _invalid("V2 wait accepts timeout_ms only")
         return {}
     if _looks_like_agent_lifecycle_tool(tool_name):
         return _pretool_output("deny", "unknown agent lifecycle operation fails closed")
