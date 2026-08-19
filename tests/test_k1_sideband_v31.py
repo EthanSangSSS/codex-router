@@ -97,6 +97,22 @@ class K1StageCapabilityTests(unittest.TestCase):
 
 
 class K1RenderedContractTests(unittest.TestCase):
+    def test_rendered_primary_contract_requires_canonical_k1_builder(self):
+        from codex_router import global_install_adapter as adapter
+
+        primary_policy = adapter.AGENTS_BLOCK_V3
+
+        for required in (
+            "Generate every K1 wire using the installed `codex_router.protocol.build_luna_packet`.",
+            "Use the same absolute Python interpreter that appears at the beginning of the injected `K1_STAGE_COMMAND`.",
+            "Stream builder stdout directly into the exact injected `K1_STAGE_COMMAND`.",
+            "Use `sys.stdout.write(...)` or equivalent exact-byte stdout behavior; never manually rewrite or copy the packet.",
+            "Never manually compose the `[CODEX_ROUTER_PACKET_V3_1]` prefix, canonical JSON, or the final K1 wire.",
+            "Successful `stage-k1` is mandatory before native `spawn_agent`/`followup_task`.",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, primary_policy)
+
     def test_rendered_luna_contract_bootstraps_first_tool_handshake(self):
         from codex_router import global_install_adapter as adapter
 
