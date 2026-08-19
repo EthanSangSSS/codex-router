@@ -200,6 +200,14 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
         raise _error("retired execution cannot retain active execution identity")
     if child_turn is not None and packet_id is None:
         raise _error("active child turn requires an active packet")
+    if (
+        packet_id is not None
+        and child_turn is None
+        and authority_packet_wire is None
+    ):
+        raise _error(
+            "active packet without child turn requires staged authority wire"
+        )
     if authority_packet_wire is not None:
         try:
             parse_luna_packet(authority_packet_wire)
@@ -837,6 +845,7 @@ def begin_packet(
             active_packet_id=packet["packet_id"],
             active_child_turn_id=None,
             execution_status="IDLE",
+            authority_packet_wire=wire,
             intended_write_scope=tuple(packet["intended_write_scope"]),
             explicit_side_effect_authorizations=tuple(
                 packet["explicit_side_effect_authorizations"]

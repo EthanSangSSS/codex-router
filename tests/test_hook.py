@@ -219,6 +219,15 @@ class HookNativeDelegationTests(HookTestCase):
         )
 
         self.assertEqual(first, repeated)
+        self.assertNotEqual(first, different)
+        first_capability = first.pop("K1_STAGE_CAPABILITY")
+        first_command = first.pop("K1_STAGE_COMMAND")
+        different_capability = different.pop("K1_STAGE_CAPABILITY")
+        different_command = different.pop("K1_STAGE_COMMAND")
+        self.assertTrue(first_capability)
+        self.assertTrue(first_command)
+        self.assertTrue(different_capability)
+        self.assertTrue(different_command)
         self.assertEqual(first, different)
         self.assertIsNotNone(first_snapshot)
         self.assertIsNotNone(final_snapshot)
@@ -277,7 +286,18 @@ class HookNativeDelegationTests(HookTestCase):
             "exec_command",
             "mcp__filesystem__read",
         )
-        for tool_name in ordinary_tools:
+        first = handle_hook_event(
+            self.pretool_event(
+                tool_name=ordinary_tools[0],
+                agent_id="agent-1",
+                agent_type="luna_worker",
+            ),
+            self.installation_dir,
+        )
+        self.assertEqual(first["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("additionalContext", first["hookSpecificOutput"])
+
+        for tool_name in ordinary_tools[1:]:
             with self.subTest(tool_name=tool_name):
                 output = handle_hook_event(
                     self.pretool_event(
@@ -306,7 +326,7 @@ class HookNativeDelegationTests(HookTestCase):
     def test_parent_lifecycle_requires_explicit_actor_and_exact_control_fields(self):
         from codex_router import luna_control as control
         from codex_router.hook import handle_hook_event, handle_user_prompt
-        from codex_router.protocol import build_luna_packet
+        from codex_router.protocol import build_k1_stage_capability, build_luna_packet
 
         control.new_task(
             self.installation_dir,
@@ -314,6 +334,12 @@ class HookNativeDelegationTests(HookTestCase):
             "session-parent",
             native_parent_identity="root-parent",
             native_authority_profile="profile-A",
+        )
+        control.set_current_root_turn(
+            self.installation_dir,
+            self.secret,
+            "session-parent",
+            turn_id="turn-a",
         )
         packet_message = build_luna_packet(
             packet_id="packet-1",
@@ -326,11 +352,28 @@ class HookNativeDelegationTests(HookTestCase):
             stop_conditions=("scope expansion required",),
         )
         spawn_input = {
-            "message": packet_message,
+            "message": "enc_01J9opaque_native_payload",
             "task_name": "luna_worker",
             "agent_type": "luna_worker",
             "fork_turns": "none",
         }
+        initial = control.read_snapshot(
+            self.installation_dir, self.secret, "session-parent"
+        )
+        control.stage_authority_packet(
+            self.installation_dir,
+            self.secret,
+            "session-parent",
+            root_turn_id="turn-a",
+            capability=build_k1_stage_capability(
+                self.secret,
+                session_tag=control.session_tag(self.secret, "session-parent"),
+                root_turn_tag=initial.current_root_turn_tag,
+                task_epoch=initial.task_epoch,
+                generation=initial.packet_generation + 1,
+            ),
+            packet_wire=packet_message,
+        )
         spawn = self.pretool_event(
             tool_name="spawn_agent",
             session="session-parent",
@@ -423,10 +466,27 @@ class HookNativeDelegationTests(HookTestCase):
             tool_use_id="packet-message",
             tool_input={
                 "target": "/root/luna_worker",
-                "message": packet_message_2,
+                "message": "enc_01J9opaque_native_payload",
             },
             actor_id="root-parent",
             actor_type="primary_sol",
+        )
+        before_followup = control.read_snapshot(
+            self.installation_dir, self.secret, "session-parent"
+        )
+        control.stage_authority_packet(
+            self.installation_dir,
+            self.secret,
+            "session-parent",
+            root_turn_id="turn-a",
+            capability=build_k1_stage_capability(
+                self.secret,
+                session_tag=control.session_tag(self.secret, "session-parent"),
+                root_turn_tag=before_followup.current_root_turn_tag,
+                task_epoch=before_followup.task_epoch,
+                generation=before_followup.packet_generation + 1,
+            ),
+            packet_wire=packet_message_2,
         )
         self.assertEqual(handle_hook_event(packet_event, self.installation_dir), {})
         packet_snapshot = control.read_snapshot(

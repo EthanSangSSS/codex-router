@@ -391,24 +391,48 @@ def install(base) -> None:
             if snapshot.execution_status == "QUIESCING":
                 if not logical_cancel:
                     return snapshot
-                updated = replace(
-                    snapshot,
-                    logical_task_status="CANCELLED",
-                    authority_packet_wire=None,
-                )
+                if snapshot.active_child_turn_id is None:
+                    updated = replace(
+                        snapshot,
+                        logical_task_status="CANCELLED",
+                        active_packet_id=None,
+                        authority_packet_wire=None,
+                        execution_status="IDLE",
+                        intended_write_scope=(),
+                        explicit_side_effect_authorizations=(),
+                        recovery_baseline=None,
+                    )
+                else:
+                    updated = replace(
+                        snapshot,
+                        logical_task_status="CANCELLED",
+                        authority_packet_wire=None,
+                    )
             else:
-                updated = replace(
-                    snapshot,
-                    logical_task_status=(
-                        "CANCELLED"
-                        if logical_cancel
-                        else snapshot.logical_task_status
-                    ),
-                    execution_status="QUIESCING",
-                    authority_packet_wire=(
-                        None if logical_cancel else snapshot.authority_packet_wire
-                    ),
-                )
+                if logical_cancel and snapshot.active_child_turn_id is None:
+                    updated = replace(
+                        snapshot,
+                        logical_task_status="CANCELLED",
+                        active_packet_id=None,
+                        authority_packet_wire=None,
+                        execution_status="IDLE",
+                        intended_write_scope=(),
+                        explicit_side_effect_authorizations=(),
+                        recovery_baseline=None,
+                    )
+                else:
+                    updated = replace(
+                        snapshot,
+                        logical_task_status=(
+                            "CANCELLED"
+                            if logical_cancel
+                            else snapshot.logical_task_status
+                        ),
+                        execution_status="QUIESCING",
+                        authority_packet_wire=(
+                            None if logical_cancel else snapshot.authority_packet_wire
+                        ),
+                    )
             base._store_snapshot(state, updated)
             return updated
 
@@ -503,6 +527,7 @@ def install(base) -> None:
                 active_packet_id=packet["packet_id"],
                 active_child_turn_id=None,
                 execution_status="IDLE",
+                authority_packet_wire=wire,
                 intended_write_scope=tuple(packet["intended_write_scope"]),
                 explicit_side_effect_authorizations=tuple(
                     packet["explicit_side_effect_authorizations"]

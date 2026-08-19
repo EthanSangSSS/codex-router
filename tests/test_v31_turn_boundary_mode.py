@@ -264,18 +264,30 @@ class TurnBoundaryControlTests(TurnBoundaryFixture):
 
 
 class TurnBoundaryHookTests(TurnBoundaryFixture):
-    def test_bound_luna_pretool_starts_execution_and_is_idempotent(self):
+    def test_bound_luna_pretool_handshakes_before_same_turn_tool_admission(self):
         self.new_task_and_bind()
         self.begin_packet()
 
-        self.assertEqual(handle_hook_event(self.luna_pretool(), self.installation_dir), {})
+        first_output = handle_hook_event(self.luna_pretool(), self.installation_dir)
+        self.assertEqual(
+            first_output["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn("additionalContext", first_output["hookSpecificOutput"])
         first = control.read_snapshot(self.installation_dir, self.secret, "session-a")
         self.assertEqual(first.execution_status, "RUNNING")
         self.assertEqual(first.active_child_turn_id, "luna-turn-1")
+        self.assertIsNotNone(first.authority_packet_wire)
+
+        self.assertEqual(handle_hook_event(self.luna_pretool(), self.installation_dir), {})
+        established = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
+        )
+        self.assertIsNone(established.authority_packet_wire)
 
         self.assertEqual(handle_hook_event(self.luna_pretool(), self.installation_dir), {})
         self.assertEqual(
-            control.read_snapshot(self.installation_dir, self.secret, "session-a"), first
+            control.read_snapshot(self.installation_dir, self.secret, "session-a"),
+            established,
         )
 
     def test_bound_luna_ordinary_tool_without_packet_is_denied(self):

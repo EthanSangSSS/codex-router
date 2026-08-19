@@ -1,4 +1,5 @@
 import base64
+from dataclasses import replace
 import hashlib
 import hmac
 import json
@@ -9,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_router import luna_control as control
+from codex_router.hook import handle_hook_event, handle_user_prompt
 from codex_router.protocol import (
     ProtocolError,
     build_k1_stage_capability,
@@ -16,6 +18,7 @@ from codex_router.protocol import (
     canonical_json_bytes,
     verify_k1_stage_capability,
 )
+from codex_router.state import RouterStateError
 
 
 def _decode_base64url(value: str) -> bytes:
@@ -227,7 +230,6 @@ class K1SidebandStateTests(unittest.TestCase):
             success_criteria=("focused tests pass",),
             stop_conditions=("blocked",),
         )
-        self.stage()
 
         cancelled = control.freeze_authority(
             self.state,
@@ -238,6 +240,8 @@ class K1SidebandStateTests(unittest.TestCase):
         )
 
         self.assertIsNone(cancelled.authority_packet_wire)
+        self.assertIsNone(cancelled.active_packet_id)
+        self.assertEqual(cancelled.execution_status, "IDLE")
 
     def test_replacement_snapshot_starts_without_staged_authority(self):
         self.stage()
@@ -278,6 +282,249 @@ class K1SidebandStateTests(unittest.TestCase):
         state_path.write_text(
             json.dumps(state, sort_keys=True, separators=(",", ":")), encoding="utf-8"
         )
+
+
+class K1ExecutorHandshakeTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.installation = self.root / "installation"
+        self.installation.mkdir(mode=0o700)
+        self.secret = bytes(range(32))
+        (self.installation / "installation-secret").write_bytes(self.secret)
+        (self.installation / "installation-secret").chmod(0o600)
+        binary = self.root / "codex"
+        binary.write_text("synthetic", encoding="utf-8")
+        binary.chmod(0o700)
+        (self.installation / "config.json").write_text(
+            json.dumps(
+                {
+                    "protocol": "codex-router/global-policy-config/v1",
+                    "state_root": str(self.installation),
+                    "codex_binary": str(binary),
+                    "role_config": {
+                        "local_sol": {
+                            "requested_model": "inherit",
+                            "requested_reasoning": "max",
+                        },
+                        "web_sol": {
+                            "model_claimed": "sol",
+                            "reasoning_claimed": "xhigh",
+                            "verification": "operator_attested",
+                        },
+                        "luna": {
+                            "requested_model": "gpt-5.6-luna",
+                            "requested_reasoning": "max",
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.installation / "config.json").chmod(0o600)
+        self.session_id = "session-a"
+        self.root_turn_id = "root-turn-a"
+        control.new_task(
+            self.installation,
+            self.secret,
+            self.session_id,
+            native_parent_identity="root-parent",
+            native_authority_profile="profile-A",
+        )
+        control.set_current_root_turn(
+            self.installation,
+            self.secret,
+            self.session_id,
+            turn_id=self.root_turn_id,
+        )
+
+    def _packet(self):
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        return build_luna_packet(
+            packet_id="packet-1",
+            generation=snapshot.packet_generation + 1,
+            objective="bounded work",
+            working_directory=str(self.root),
+            intended_write_scope=("README.md",),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("pass",),
+            stop_conditions=("blocked",),
+        )
+
+    def _bind_luna_with_staged_packet(self):
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        packet = self._packet()
+        capability = build_k1_stage_capability(
+            self.secret,
+            session_tag=control.session_tag(self.secret, self.session_id),
+            root_turn_tag=snapshot.current_root_turn_tag,
+            task_epoch=snapshot.task_epoch,
+            generation=snapshot.packet_generation + 1,
+        )
+        control.stage_authority_packet(
+            self.installation,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            capability=capability,
+            packet_wire=packet,
+        )
+        control.admit_staged_spawn(
+            self.installation,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            agent_type="luna_worker",
+            fork_turns="none",
+        )
+        control.observe_spawn_result(
+            self.installation,
+            self.secret,
+            self.session_id,
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+        control.observe_subagent_start(
+            self.installation,
+            self.secret,
+            self.session_id,
+            agent_id="agent-1",
+            agent_type="luna_worker",
+        )
+        return packet
+
+    def _pretool(self, *, turn_id="luna-turn-1", tool_name="Read"):
+        return {
+            "hook_event_name": "PreToolUse",
+            "session_id": self.session_id,
+            "turn_id": turn_id,
+            "tool_name": tool_name,
+            "tool_use_id": f"tool-{turn_id}",
+            "tool_input": {"path": str(self.root / "README.md")},
+            "agent_id": "agent-1",
+            "agent_type": "luna_worker",
+        }
+
+    def test_first_executor_tool_is_blocked_and_receives_exact_k1_context(self):
+        packet = self._bind_luna_with_staged_packet()
+
+        output = handle_hook_event(self._pretool(), self.installation)
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(output["hookSpecificOutput"]["additionalContext"], packet)
+        self.assertIn("authority handshake", output["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_first_executor_tool_has_no_fake_side_effect(self):
+        self._bind_luna_with_staged_packet()
+
+        output = handle_hook_event(self._pretool(tool_name="Write"), self.installation)
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertFalse((self.root / "README.md").exists())
+
+    def test_first_tool_does_not_clear_staged_wire(self):
+        packet = self._bind_luna_with_staged_packet()
+
+        handle_hook_event(self._pretool(), self.installation)
+
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        self.assertEqual(snapshot.authority_packet_wire, packet)
+        self.assertEqual(snapshot.active_child_turn_id, "luna-turn-1")
+
+    def test_second_same_turn_tool_clears_staged_wire_then_runs_normal_policy(self):
+        self._bind_luna_with_staged_packet()
+        handle_hook_event(self._pretool(), self.installation)
+
+        output = handle_hook_event(self._pretool(), self.installation)
+
+        self.assertEqual(output, {})
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        self.assertIsNone(snapshot.authority_packet_wire)
+        self.assertEqual(snapshot.active_child_turn_id, "luna-turn-1")
+
+    def test_second_different_turn_fails_closed(self):
+        self._bind_luna_with_staged_packet()
+        handle_hook_event(self._pretool(), self.installation)
+
+        output = handle_hook_event(self._pretool(turn_id="luna-turn-2"), self.installation)
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIsNotNone(
+            control.read_snapshot(self.installation, self.secret, self.session_id).authority_packet_wire
+        )
+
+    def test_forbidden_lifecycle_tool_remains_forbidden_after_handshake(self):
+        packet = self._bind_luna_with_staged_packet()
+        first = handle_hook_event(self._pretool(tool_name="spawn_agent"), self.installation)
+        second = handle_hook_event(self._pretool(tool_name="spawn_agent"), self.installation)
+
+        self.assertEqual(first["hookSpecificOutput"]["additionalContext"], packet)
+        self.assertEqual(second["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIn("forbids agent lifecycle", second["hookSpecificOutput"]["permissionDecisionReason"])
+
+    def test_unbound_executor_cannot_trigger_handshake(self):
+        packet = self._packet()
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        capability = build_k1_stage_capability(
+            self.secret,
+            session_tag=control.session_tag(self.secret, self.session_id),
+            root_turn_tag=snapshot.current_root_turn_tag,
+            task_epoch=snapshot.task_epoch,
+            generation=snapshot.packet_generation + 1,
+        )
+        control.stage_authority_packet(
+            self.installation,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            capability=capability,
+            packet_wire=packet,
+        )
+
+        output = handle_hook_event(self._pretool(), self.installation)
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertNotIn("additionalContext", output["hookSpecificOutput"])
+
+    def test_active_packet_without_child_turn_or_authority_wire_is_invalid(self):
+        self._bind_luna_with_staged_packet()
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+
+        with self.assertRaises(RouterStateError):
+            control.validate_snapshot(replace(snapshot, authority_packet_wire=None))
+
+    def test_overlay_loader_rejects_impossible_active_packet_state(self):
+        self._bind_luna_with_staged_packet()
+        state_path = self.installation / control._STATE
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["sessions"][control.session_tag(self.secret, self.session_id)]["authority_packet_wire"] = None
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        with self.assertRaises(RouterStateError):
+            control.read_snapshot(self.installation, self.secret, self.session_id)
+
+    def test_child_user_prompt_plaintext_k1_is_not_required(self):
+        self._bind_luna_with_staged_packet()
+
+        output = handle_user_prompt(
+            {
+                "hook_event_name": "UserPromptSubmit",
+                "session_id": self.session_id,
+                "turn_id": "luna-turn-1",
+                "agent_id": "agent-1",
+                "agent_type": "luna_worker",
+                "prompt": "opaque native trigger",
+                "cwd": str(self.root),
+            },
+            self.installation,
+        )
+
+        self.assertEqual(output, {})
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        self.assertIsNone(snapshot.active_child_turn_id)
 
 
 class K1StageCliTests(unittest.TestCase):

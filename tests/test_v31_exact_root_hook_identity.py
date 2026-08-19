@@ -118,17 +118,18 @@ class ExactRootHookIdentityTests(unittest.TestCase):
                     "turn_id": "luna-turn-1",
                     "agent_id": "agent-1",
                     "agent_type": "luna_worker",
-                    "prompt": packet,
+                    "prompt": "enc_01J9opaque_native_payload",
                     "cwd": str(self.root),
                 },
                 self.installation_dir,
             ),
             {},
         )
+        self._handshake_luna_turn("luna-turn-1", packet)
         started = control.read_snapshot(self.installation_dir, self.secret, "session-a")
         self.assertEqual(started.execution_status, "RUNNING")
         self.assertEqual(started.active_child_turn_id, "luna-turn-1")
-        control.clear_staged_authority(self.installation_dir, self.secret, "session-a")
+        self.assertIsNone(started.authority_packet_wire)
 
         self.assertEqual(
             handle_hook_event(
@@ -145,6 +146,26 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             ),
             {"hookSpecificOutput": {"hookEventName": "PostToolUse"}},
         )
+
+    def _handshake_luna_turn(self, turn_id, packet):
+        child_tool = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "session-a",
+            "turn_id": turn_id,
+            "tool_name": "Read",
+            "tool_use_id": f"handshake-{turn_id}",
+            "tool_input": {"path": str(self.root / "README.md")},
+            "agent_id": "agent-1",
+            "agent_type": "luna_worker",
+        }
+        first_handshake = handle_hook_event(child_tool, self.installation_dir)
+        self.assertEqual(
+            first_handshake["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertEqual(
+            first_handshake["hookSpecificOutput"]["additionalContext"], packet
+        )
+        self.assertEqual(handle_hook_event(child_tool, self.installation_dir), {})
 
     def _stop_luna(self, turn_id):
         return handle_hook_event(
@@ -213,6 +234,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             ),
             {},
         )
+        self._handshake_luna_turn("luna-turn-2", packet2)
         running = control.read_snapshot(self.installation_dir, self.secret, "session-a")
         self.assertEqual(running.execution_status, "RUNNING")
         self.assertEqual(running.active_child_turn_id, "luna-turn-2")
@@ -522,6 +544,7 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             ),
             {},
         )
+        self._handshake_luna_turn("luna-turn-2", packet2)
         before = control.read_snapshot(self.installation_dir, self.secret, "session-a")
         self.assertEqual(before.active_child_turn_id, "luna-turn-2")
 
