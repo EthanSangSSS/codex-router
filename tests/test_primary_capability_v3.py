@@ -333,7 +333,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "task_name=luna_worker",
             "agent_type=luna_worker",
             "fork_turns=none",
-            "stage canonical K1 through `router stage-k1` first",
+            "use the exact injected `stage-k1-fields` protected command prefix verbatim",
             "Native `spawn_agent`/`followup_task` message is a transport trigger, not authority",
             "`send_message` is QueueOnly and cannot advance K1",
             "Native collaboration messages are transport triggers, not work authority.",

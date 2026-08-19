@@ -1976,7 +1976,7 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
                 "-P",
                 "-m",
                 "codex_router",
-                "stage-k1",
+                "stage-k1-fields",
                 "--installation-dir",
                 str(hook_installation_dir),
                 "--session-id",

@@ -339,7 +339,7 @@ def handle_user_prompt(
             "-P",
             "-m",
             "codex_router",
-            "stage-k1",
+            "stage-k1-fields",
             "--installation-dir",
             str(Path(installation_dir)),
             "--session-id",

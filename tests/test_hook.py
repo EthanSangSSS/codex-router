@@ -2,6 +2,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import shlex
 import stat
 import subprocess
 import sys
@@ -203,6 +204,11 @@ class HookSchemaTests(HookTestCase):
 
 
 class HookNativeDelegationTests(HookTestCase):
+    def test_route_uses_structured_stage_k1_fields_command(self):
+        context = self.parse_context(self.handle(self.event()))
+        arguments = shlex.split(context["K1_STAGE_COMMAND"], posix=True)
+        self.assertEqual(arguments[3:7], ["-m", "codex_router", "stage-k1-fields", "--installation-dir"])
+
     def test_routed_events_use_persistent_native_luna_context(self):
         from codex_router import luna_control as control
 

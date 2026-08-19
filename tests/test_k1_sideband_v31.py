@@ -97,21 +97,25 @@ class K1StageCapabilityTests(unittest.TestCase):
 
 
 class K1RenderedContractTests(unittest.TestCase):
-    def test_rendered_primary_contract_requires_canonical_k1_builder(self):
+    def test_rendered_primary_contract_uses_structured_staging(self):
         from codex_router import global_install_adapter as adapter
 
         primary_policy = adapter.AGENTS_BLOCK_V3
 
         for required in (
-            "Generate every K1 wire using the installed `codex_router.protocol.build_luna_packet`.",
-            "Use the same absolute Python interpreter that appears at the beginning of the injected `K1_STAGE_COMMAND`.",
-            "Stream builder stdout directly into the exact injected `K1_STAGE_COMMAND`.",
-            "Use `sys.stdout.write(...)` or equivalent exact-byte stdout behavior; never manually rewrite or copy the packet.",
-            "Never manually compose the `[CODEX_ROUTER_PACKET_V3_1]` prefix, canonical JSON, or the final K1 wire.",
-            "Successful `stage-k1` is mandatory before native `spawn_agent`/`followup_task`.",
+            "use the exact injected `stage-k1-fields` protected command prefix verbatim",
+            "Append only `--packet-id`, `--objective`, `--working-directory`",
+            "Do not build K1 wire bytes, JSON, a prefix, a shell pipeline, or an alternate control command.",
+            "Successful `stage-k1-fields` is mandatory before native `spawn_agent`/`followup_task`.",
+            "V1 uses `agent_type=luna_worker` with `fork_context=false` or omission",
+            "V2 uses `task_name=luna_worker`, `agent_type=luna_worker`, and `fork_turns=none`",
+            "V2 wait accepts optional `timeout_ms` only and has no `targets` field.",
+            "BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, primary_policy)
+        self.assertNotIn("build_luna_packet", primary_policy)
+        self.assertNotIn("[CODEX_ROUTER_PACKET_V3_1]", primary_policy)
 
     def test_rendered_luna_contract_bootstraps_first_tool_handshake(self):
         from codex_router import global_install_adapter as adapter
@@ -150,7 +154,7 @@ class K1RenderedContractTests(unittest.TestCase):
         )
 
         for required in (
-            "stage canonical K1 through `router stage-k1` first",
+            "use the exact injected `stage-k1-fields` protected command prefix verbatim",
             "Native `spawn_agent`/`followup_task` message is a transport trigger, not authority",
             "`send_message` is QueueOnly and cannot advance K1",
             "Native collaboration messages are transport triggers, not work authority.",

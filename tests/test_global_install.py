@@ -100,6 +100,19 @@ class GlobalInstallTests(unittest.TestCase):
             {"multi_agent": False, "multi_agent_v2": False},
         )
 
+    def test_v31_primary_contract_uses_structured_staging_and_exact_native_schemas(self):
+        from codex_router import global_install_adapter as adapter
+
+        rendered = adapter.AGENTS_BLOCK_V3
+        self.assertIn("stage-k1-fields", rendered)
+        self.assertIn("V1 uses `agent_type=luna_worker` with `fork_context=false` or omission", rendered)
+        self.assertIn(
+            "V2 uses `task_name=luna_worker`, `agent_type=luna_worker`, and `fork_turns=none`",
+            rendered,
+        )
+        self.assertNotIn("build_luna_packet", rendered)
+        self.assertNotIn("[CODEX_ROUTER_PACKET_V3_1]", rendered)
+
     def test_v31_status_keeps_live_activation_blocked_after_install(self):
         from codex_router import global_install_adapter as adapter
 
