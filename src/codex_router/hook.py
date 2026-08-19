@@ -511,6 +511,10 @@ def _handle_parent_pretool(
     secret: bytes,
 ) -> dict[str, Any]:
     tool_name = base["tool_name"]
+    if tool_name in {"send_input", "resume_agent"}:
+        return _pretool_output(
+            "deny", "legacy parent work surface is forbidden"
+        )
     if tool_name in _PARENT_CREATE_TOOLS:
         if _mapping_text(tool_input, "task_name") != "luna_worker":
             raise _invalid("Router spawn task_name must be luna_worker")

@@ -499,6 +499,7 @@ _PARENT_WORK_TOOLS = {
     "followup_task",
     "resume_agent",
 }
+_LEGACY_PARENT_WORK_TOOLS = {"send_input", "resume_agent"}
 _PARENT_CLEANUP_TOOLS = {"interrupt_agent", "close_agent"}
 _PARENT_TARGET_TOOLS = _PARENT_WORK_TOOLS | _PARENT_CLEANUP_TOOLS
 
@@ -783,6 +784,8 @@ def authorize_parent_target(
     assert tool is not None and requested is not None
     if tool not in _PARENT_TARGET_TOOLS:
         raise _error("unsupported Router parent lifecycle operation")
+    if tool in _LEGACY_PARENT_WORK_TOOLS:
+        raise _error("legacy parent work surface is forbidden")
     snapshot = current_luna(directory, secret, session_id)
     if requested not in {snapshot.luna_agent_id, snapshot.luna_task_path}:
         raise _error("parent lifecycle target is not the current Luna")

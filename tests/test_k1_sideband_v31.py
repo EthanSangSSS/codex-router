@@ -527,6 +527,55 @@ class K1ExecutorHandshakeTests(unittest.TestCase):
         self.assertEqual(second["hookSpecificOutput"]["permissionDecision"], "deny")
         self.assertIn("forbids agent lifecycle", second["hookSpecificOutput"]["permissionDecisionReason"])
 
+    def test_send_input_denied_with_state_unchanged(self):
+        self._bind_luna_with_staged_packet()
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+        event = {
+            "hook_event_name": "PreToolUse",
+            "session_id": self.session_id,
+            "turn_id": self.root_turn_id,
+            "tool_name": "send_input",
+            "tool_use_id": "send-input-1",
+            "tool_input": {
+                "target": "/root/luna_worker",
+                "message": "legacy work surface",
+            },
+            "actor_id": "root-parent",
+            "actor_type": "primary_sol",
+        }
+
+        output = handle_hook_event(event, self.installation)
+
+        self.assertNotEqual(output, {})
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(
+            control.read_snapshot(self.installation, self.secret, self.session_id),
+            before,
+        )
+
+    def test_resume_agent_denied_with_state_unchanged(self):
+        self._bind_luna_with_staged_packet()
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+        event = {
+            "hook_event_name": "PreToolUse",
+            "session_id": self.session_id,
+            "turn_id": self.root_turn_id,
+            "tool_name": "resume_agent",
+            "tool_use_id": "resume-1",
+            "tool_input": {"id": "agent-1"},
+            "actor_id": "root-parent",
+            "actor_type": "primary_sol",
+        }
+
+        output = handle_hook_event(event, self.installation)
+
+        self.assertNotEqual(output, {})
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(
+            control.read_snapshot(self.installation, self.secret, self.session_id),
+            before,
+        )
+
     def test_unbound_executor_cannot_trigger_handshake(self):
         packet = self._packet()
         snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
