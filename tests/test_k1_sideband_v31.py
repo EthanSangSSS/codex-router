@@ -814,3 +814,361 @@ class K1StageCliTests(unittest.TestCase):
             result = cli.main(["stage-k1", "--installation-dir", str(self.installation), "--session-id", self.session_id, "--root-turn-id", "stale-turn", "--capability", capability])
 
         self.assertNotEqual(result, 0)
+
+
+class K1ParentDispatchTests(unittest.TestCase):
+    OPAQUE = "enc_01J9opaque_native_payload"
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.installation = self.root / "installation"
+        self.installation.mkdir(mode=0o700)
+        self.secret = bytes(range(32))
+        (self.installation / "installation-secret").write_bytes(self.secret)
+        (self.installation / "installation-secret").chmod(0o600)
+        binary = self.root / "codex"
+        binary.write_text("synthetic", encoding="utf-8")
+        binary.chmod(0o700)
+        (self.installation / "config.json").write_text(
+            json.dumps(
+                {
+                    "protocol": "codex-router/global-policy-config/v1",
+                    "state_root": str(self.installation),
+                    "codex_binary": str(binary),
+                    "role_config": {
+                        "local_sol": {"requested_model": "inherit", "requested_reasoning": "max"},
+                        "web_sol": {"model_claimed": "sol", "reasoning_claimed": "xhigh", "verification": "operator_attested"},
+                        "luna": {"requested_model": "executor", "requested_reasoning": "max"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.installation / "config.json").chmod(0o600)
+        self.session_id = "session-a"
+        self.root_turn_id = "root-turn-a"
+        control.new_task(
+            self.installation,
+            self.secret,
+            self.session_id,
+            native_parent_identity="root-parent",
+            native_authority_profile="profile-A",
+        )
+        control.set_current_root_turn(
+            self.installation,
+            self.secret,
+            self.session_id,
+            turn_id=self.root_turn_id,
+        )
+
+    def packet(self, *, packet_id="packet-1"):
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        return build_luna_packet(
+            packet_id=packet_id,
+            generation=snapshot.packet_generation + 1,
+            objective="bounded work",
+            working_directory=str(self.root),
+            intended_write_scope=("README.md",),
+            explicit_side_effect_authorizations=(),
+            success_criteria=("pass",),
+            stop_conditions=("blocked",),
+        )
+
+    def capability(self):
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        return build_k1_stage_capability(
+            self.secret,
+            session_tag=control.session_tag(self.secret, self.session_id),
+            root_turn_tag=snapshot.current_root_turn_tag,
+            task_epoch=snapshot.task_epoch,
+            generation=snapshot.packet_generation + 1,
+        )
+
+    def stage(self, packet=None):
+        return control.stage_authority_packet(
+            self.installation,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            capability=self.capability(),
+            packet_wire=self.packet() if packet is None else packet,
+        )
+
+    def bind_luna(self):
+        self.stage()
+        control.admit_staged_spawn(
+            self.installation,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            tool_use_id="spawn-1",
+            task_name="luna_worker",
+            agent_type="luna_worker",
+            fork_turns="none",
+        )
+        control.observe_spawn_result(
+            self.installation,
+            self.secret,
+            self.session_id,
+            tool_use_id="spawn-1",
+            task_path="/root/luna_worker",
+        )
+        control.observe_subagent_start(
+            self.installation,
+            self.secret,
+            self.session_id,
+            agent_id="agent-1",
+            agent_type="luna_worker",
+        )
+        control.start_execution(
+            self.installation,
+            self.secret,
+            self.session_id,
+            child_turn_id="luna-turn-1",
+        )
+        control.observe_turn_boundary(
+            self.installation,
+            self.secret,
+            self.session_id,
+            child_turn_id="luna-turn-1",
+        )
+
+    def spawn_event(self, *, turn_id=None, **overrides):
+        event = {
+            "hook_event_name": "PreToolUse",
+            "session_id": self.session_id,
+            "turn_id": self.root_turn_id if turn_id is None else turn_id,
+            "tool_name": "spawn_agent",
+            "tool_use_id": "spawn-event-1",
+            "tool_input": {
+                "task_name": "luna_worker",
+                "agent_type": "luna_worker",
+                "fork_turns": "none",
+                "message": self.OPAQUE,
+            },
+            "actor_id": "root-parent",
+            "actor_type": "primary_sol",
+        }
+        event["tool_input"].update(overrides)
+        return event
+
+    def followup_event(self, *, turn_id=None, target="/root/luna_worker"):
+        return {
+            "hook_event_name": "PreToolUse",
+            "session_id": self.session_id,
+            "turn_id": self.root_turn_id if turn_id is None else turn_id,
+            "tool_name": "followup_task",
+            "tool_use_id": "followup-event-1",
+            "tool_input": {"target": target, "message": self.OPAQUE},
+            "actor_id": "root-parent",
+            "actor_type": "primary_sol",
+        }
+
+    def test_shared_packet_transition_helper_is_available_for_all_commit_paths(self):
+        self.assertTrue(callable(getattr(control, "_packet_commit_fields", None)))
+
+    def test_spawn_accepts_opaque_message_with_valid_staged_gen1(self):
+        self.stage()
+
+        output = handle_hook_event(self.spawn_event(), self.installation)
+
+        self.assertEqual(output, {})
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        self.assertEqual(snapshot.packet_generation, 1)
+        self.assertIsNotNone(snapshot.pending_spawn)
+
+    def test_spawn_without_stage_fails_closed(self):
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+
+        output = handle_hook_event(self.spawn_event(), self.installation)
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(control.read_snapshot(self.installation, self.secret, self.session_id), before)
+
+    def test_spawn_identity_fields_still_fail_closed(self):
+        self.stage()
+
+        output = handle_hook_event(
+            self.spawn_event(task_name="not-luna"), self.installation
+        )
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        self.assertEqual(snapshot.packet_generation, 0)
+        self.assertIsNone(snapshot.pending_spawn)
+        self.assertIsNotNone(snapshot.authority_packet_wire)
+
+    def test_spawn_validation_failure_changes_neither_reservation_nor_generation(self):
+        self.stage()
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+
+        with self.assertRaises(control.RouterStateError):
+            control.admit_staged_spawn(
+                self.installation,
+                self.secret,
+                self.session_id,
+                root_turn_id=self.root_turn_id,
+                tool_use_id="spawn-1",
+                task_name="not-luna",
+                agent_type="luna_worker",
+                fork_turns="none",
+            )
+
+        self.assertEqual(control.read_snapshot(self.installation, self.secret, self.session_id), before)
+
+    def test_spawn_packet_commit_failure_leaves_no_pending_spawn(self):
+        self.stage()
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+        with patch.object(
+            control,
+            "_store_snapshot",
+            side_effect=control.RouterStateError("conflict", "commit failed"),
+        ):
+            with self.assertRaises(control.RouterStateError):
+                control.admit_staged_spawn(
+                    self.installation,
+                    self.secret,
+                    self.session_id,
+                    root_turn_id=self.root_turn_id,
+                    tool_use_id="spawn-1",
+                    task_name="luna_worker",
+                    agent_type="luna_worker",
+                    fork_turns="none",
+                )
+        self.assertEqual(control.read_snapshot(self.installation, self.secret, self.session_id), before)
+
+    def test_spawn_retry_after_denied_admission_is_not_poisoned(self):
+        self.stage()
+        with self.assertRaises(control.RouterStateError):
+            control.admit_staged_spawn(
+                self.installation,
+                self.secret,
+                self.session_id,
+                root_turn_id="stale-root",
+                tool_use_id="spawn-1",
+                task_name="luna_worker",
+                agent_type="luna_worker",
+                fork_turns="none",
+            )
+
+        admitted = control.admit_staged_spawn(
+            self.installation,
+            self.secret,
+            self.session_id,
+            root_turn_id=self.root_turn_id,
+            tool_use_id="spawn-2",
+            task_name="luna_worker",
+            agent_type="luna_worker",
+            fork_turns="none",
+        )
+
+        self.assertEqual(admitted.packet_generation, 1)
+        self.assertEqual(admitted.pending_spawn.tool_use_id, "spawn-2")
+
+    def test_followup_accepts_opaque_message_for_exact_bound_executor(self):
+        self.bind_luna()
+        self.stage(packet=self.packet(packet_id="packet-2"))
+        output = handle_hook_event(self.followup_event(), self.installation)
+
+        self.assertEqual(output, {})
+        snapshot = control.read_snapshot(self.installation, self.secret, self.session_id)
+        self.assertEqual(snapshot.packet_generation, 2)
+        self.assertEqual(snapshot.active_packet_id, "packet-2")
+
+    def test_followup_wrong_target_changes_neither_stage_nor_generation(self):
+        self.bind_luna()
+        self.stage(packet=self.packet(packet_id="packet-2"))
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+
+        with self.assertRaises(control.RouterStateError):
+            control.admit_staged_followup(
+                self.installation,
+                self.secret,
+                self.session_id,
+                root_turn_id=self.root_turn_id,
+                target="agent-other",
+            )
+
+        self.assertEqual(control.read_snapshot(self.installation, self.secret, self.session_id), before)
+
+    def test_followup_commit_and_target_check_use_one_snapshot(self):
+        self.bind_luna()
+        self.stage(packet=self.packet(packet_id="packet-2"))
+        with patch.object(control, "_record_for_session", wraps=control._record_for_session) as record:
+            admitted = control.admit_staged_followup(
+                self.installation,
+                self.secret,
+                self.session_id,
+                root_turn_id=self.root_turn_id,
+                target="/root/luna_worker",
+            )
+
+        self.assertEqual(record.call_count, 1)
+        self.assertEqual(admitted.packet_generation, 2)
+
+    def test_send_message_cannot_consume_stage_or_advance_generation(self):
+        self.bind_luna()
+        self.stage(packet=self.packet(packet_id="packet-2"))
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+        event = {
+            **self.followup_event(),
+            "tool_name": "send_message",
+            "tool_input": {"target": "/root/luna_worker", "message": self.OPAQUE},
+        }
+
+        output = handle_hook_event(event, self.installation)
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(control.read_snapshot(self.installation, self.secret, self.session_id), before)
+
+    def test_stale_explicit_root_cannot_consume_current_staged_k1(self):
+        self.bind_luna()
+        stale_root = self.root_turn_id
+        control.set_current_root_turn(
+            self.installation, self.secret, self.session_id, turn_id="root-turn-b"
+        )
+        self.root_turn_id = "root-turn-b"
+        self.stage(packet=self.packet(packet_id="packet-2"))
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+        event = self.followup_event(turn_id=stale_root)
+
+        output = handle_hook_event(event, self.installation)
+
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertEqual(control.read_snapshot(self.installation, self.secret, self.session_id), before)
+
+    def test_atomic_spawn_revalidates_root_turn_inside_transaction(self):
+        self.stage()
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+
+        with self.assertRaises(control.RouterStateError):
+            control.admit_staged_spawn(
+                self.installation,
+                self.secret,
+                self.session_id,
+                root_turn_id="stale-root",
+                tool_use_id="spawn-1",
+                task_name="luna_worker",
+                agent_type="luna_worker",
+                fork_turns="none",
+            )
+
+        self.assertEqual(control.read_snapshot(self.installation, self.secret, self.session_id), before)
+
+    def test_atomic_followup_revalidates_root_turn_inside_transaction(self):
+        self.bind_luna()
+        self.stage(packet=self.packet(packet_id="packet-2"))
+        before = control.read_snapshot(self.installation, self.secret, self.session_id)
+
+        with self.assertRaises(control.RouterStateError):
+            control.admit_staged_followup(
+                self.installation,
+                self.secret,
+                self.session_id,
+                root_turn_id="stale-root",
+                target="/root/luna_worker",
+            )
+
+        self.assertEqual(control.read_snapshot(self.installation, self.secret, self.session_id), before)

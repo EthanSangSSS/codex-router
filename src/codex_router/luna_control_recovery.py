@@ -330,10 +330,12 @@ def install(base) -> None:
         tag = base.session_tag(secret, session_id)
         with base._locked_state(Path(directory), mutate=True) as state:
             snapshot = base._record_for_session(state, tag)
+            pending = snapshot.pending_spawn
+            bound_identity = snapshot.luna_agent_id == agent and snapshot.luna_task_path is not None
+            pending_identity = pending is not None and pending.agent_id == agent
             if (
                 snapshot.logical_task_status != "ACTIVE"
-                or snapshot.luna_agent_id != agent
-                or snapshot.luna_task_path is None
+                or not (bound_identity or pending_identity)
             ):
                 raise base._error("executor identity is not currently bound")
             if snapshot.active_packet_id is None:
@@ -367,31 +369,39 @@ def install(base) -> None:
             base._store_snapshot(state, updated)
             return updated, None
 
-    def _commit_staged_packet(snapshot: ControlSnapshot) -> ControlSnapshot:
+    def _packet_commit_fields(
+        snapshot: ControlSnapshot, packet_wire: str
+    ) -> dict[str, Any]:
         if snapshot.logical_task_status != "ACTIVE":
             raise base._error("current task cannot admit staged authority")
         if snapshot.execution_status not in {"IDLE", "PAUSED_SETTLED"}:
             raise base._error("current execution cannot admit staged authority")
-        if snapshot.authority_packet_wire is None:
+        wire = base._authority_packet_wire(packet_wire)
+        if wire is None:
             raise base._error("current dispatch has no staged authority")
         try:
-            packet = parse_luna_packet(snapshot.authority_packet_wire)
+            packet = parse_luna_packet(wire)
         except ProtocolError as error:
             raise base._error(str(error)) from error
         if packet["generation"] != snapshot.packet_generation + 1:
             raise base._error("staged authority generation is not current")
-        return replace(
-            snapshot,
-            packet_generation=packet["generation"],
-            active_packet_id=packet["packet_id"],
-            active_child_turn_id=None,
-            execution_status="IDLE",
-            intended_write_scope=tuple(packet["intended_write_scope"]),
-            explicit_side_effect_authorizations=tuple(
+        return {
+            "packet_generation": packet["generation"],
+            "active_packet_id": packet["packet_id"],
+            "active_child_turn_id": None,
+            "execution_status": "IDLE",
+            "intended_write_scope": tuple(packet["intended_write_scope"]),
+            "explicit_side_effect_authorizations": tuple(
                 packet["explicit_side_effect_authorizations"]
             ),
-            recovery_baseline=_clean_git_baseline(packet["working_directory"]),
-        )
+            "recovery_baseline": _clean_git_baseline(packet["working_directory"]),
+        }
+
+    def _commit_staged_packet(snapshot: ControlSnapshot) -> ControlSnapshot:
+        wire = snapshot.authority_packet_wire
+        if wire is None:
+            raise base._error("current dispatch has no staged authority")
+        return replace(snapshot, **_packet_commit_fields(snapshot, wire))
 
     def _require_current_root(snapshot: ControlSnapshot, secret: bytes, root_turn_id: str) -> None:
         expected = _root_turn_tag(secret, root_turn_id)
@@ -560,7 +570,6 @@ def install(base) -> None:
         success_criteria: list[str] | tuple[str, ...],
         stop_conditions: list[str] | tuple[str, ...],
     ) -> ControlSnapshot:
-        baseline = _clean_git_baseline(working_directory)
         tag = base.session_tag(secret, session_id)
         with base._locked_state(Path(directory), mutate=True) as state:
             snapshot = base._record_for_session(state, tag)
@@ -589,21 +598,12 @@ def install(base) -> None:
                         stop_conditions, "stop_conditions"
                     ),
                 )
-                packet = base.parse_luna_packet(wire)
             except base.ProtocolError as error:
                 raise base._error(str(error)) from error
             updated = replace(
                 snapshot,
-                packet_generation=packet["generation"],
-                active_packet_id=packet["packet_id"],
-                active_child_turn_id=None,
-                execution_status="IDLE",
+                **_packet_commit_fields(snapshot, wire),
                 authority_packet_wire=wire,
-                intended_write_scope=tuple(packet["intended_write_scope"]),
-                explicit_side_effect_authorizations=tuple(
-                    packet["explicit_side_effect_authorizations"]
-                ),
-                recovery_baseline=baseline,
             )
             base._store_snapshot(state, updated)
             return updated
@@ -953,6 +953,7 @@ def install(base) -> None:
     base.stage_authority_packet = stage_authority_packet
     base.clear_staged_authority = clear_staged_authority
     base.authorize_executor_tool = authorize_executor_tool
+    base._packet_commit_fields = _packet_commit_fields
     base.admit_staged_spawn = admit_staged_spawn
     base.admit_staged_followup = admit_staged_followup
     base.begin_packet = begin_packet
