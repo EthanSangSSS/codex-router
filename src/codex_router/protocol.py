@@ -1,9 +1,14 @@
+import base64
+import binascii
 import hashlib
 import hmac
 import json
+import os
 import re
 from typing import Any, Iterable, Mapping
 import unicodedata
+
+from .a1 import validate_packet_authorizations
 
 
 PROTOCOL = "codex-router/v1"
@@ -12,6 +17,15 @@ STAGES = ("local_sol", "web_sol", "luna")
 RUN_PROTOCOL = "codex-router/run-state/v1"
 PACKET_PROTOCOL = "codex-router/stage-packet/v1"
 WEB_RESPONSE_PREFIX = "[CODEX_ROUTER_RESPONSE_V1]"
+LUNA_PACKET_PREFIX = "[CODEX_ROUTER_PACKET_V3_1] "
+_K1_STAGE_CAPABILITY_DOMAIN = b"codex-router/k1-stage-capability/v1\0"
+_K1_STAGE_CAPABILITY_KEYS = {
+    "v",
+    "session_tag",
+    "root_turn_tag",
+    "task_epoch",
+    "generation",
+}
 _PACKET_KEYS = {
     "protocol",
     "driver_context_id",
@@ -23,6 +37,16 @@ _PACKET_KEYS = {
     "packet_digest",
 }
 _SHA256_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+_LUNA_PACKET_KEYS = {
+    "packet_id",
+    "generation",
+    "objective",
+    "working_directory",
+    "intended_write_scope",
+    "explicit_side_effect_authorizations",
+    "success_criteria",
+    "stop_conditions",
+}
 
 
 class ProtocolError(ValueError):
@@ -50,6 +74,230 @@ def canonical_json_bytes(value: Any) -> bytes:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8", errors="strict")
+
+
+def _luna_text(value: Any, field: str, *, nonblank: bool = False) -> str:
+    if not isinstance(value, str) or not value:
+        raise ProtocolError(f"{field} must be non-empty text")
+    if nonblank and not value.strip():
+        raise ProtocolError(f"{field} must not be blank")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ProtocolError(f"{field} must be valid UTF-8 text") from error
+    return value
+
+
+def _luna_text_list(value: Any, field: str, *, unique: bool = False) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        raise ProtocolError(f"{field} must be a list")
+    result = [_luna_text(item, f"{field} entry") for item in value]
+    if unique and len(result) != len(set(result)):
+        raise ProtocolError(f"{field} entries must be unique")
+    return result
+
+
+def _stage_capability_claims(
+    *,
+    session_tag: str,
+    root_turn_tag: str,
+    task_epoch: str,
+    generation: int,
+) -> dict[str, Any]:
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        raise ProtocolError("stage capability generation is invalid")
+    return {
+        "v": 1,
+        "session_tag": _luna_text(session_tag, "stage capability session_tag"),
+        "root_turn_tag": _luna_text(
+            root_turn_tag, "stage capability root_turn_tag"
+        ),
+        "task_epoch": _luna_text(task_epoch, "stage capability task_epoch"),
+        "generation": generation,
+    }
+
+
+def _stage_capability_secret(secret: bytes) -> bytes:
+    if not isinstance(secret, bytes) or not secret:
+        raise ProtocolError("stage capability secret is invalid")
+    return secret
+
+
+def _base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _base64url_decode(value: str) -> bytes:
+    if not isinstance(value, str) or not value or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        raise ProtocolError("stage capability encoding is invalid")
+    try:
+        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except (ValueError, binascii.Error) as error:
+        raise ProtocolError("stage capability encoding is invalid") from error
+
+
+def build_k1_stage_capability(
+    secret: bytes,
+    *,
+    session_tag: str,
+    root_turn_tag: str,
+    task_epoch: str,
+    generation: int,
+) -> str:
+    claims = _stage_capability_claims(
+        session_tag=session_tag,
+        root_turn_tag=root_turn_tag,
+        task_epoch=task_epoch,
+        generation=generation,
+    )
+    encoded_claims = _base64url_encode(canonical_json_bytes(claims))
+    mac = hmac.new(
+        _stage_capability_secret(secret),
+        _K1_STAGE_CAPABILITY_DOMAIN + canonical_json_bytes(claims),
+        hashlib.sha256,
+    ).digest()
+    return encoded_claims + "." + _base64url_encode(mac)
+
+
+def verify_k1_stage_capability(
+    token: str,
+    secret: bytes,
+    *,
+    session_tag: str,
+    root_turn_tag: str,
+    task_epoch: str,
+    generation: int,
+) -> None:
+    if not isinstance(token, str) or token.count(".") != 1:
+        raise ProtocolError("stage capability token is invalid")
+    encoded_claims, encoded_mac = token.split(".")
+    raw_claims = _base64url_decode(encoded_claims)
+    received_mac = _base64url_decode(encoded_mac)
+    if len(received_mac) != hashlib.sha256().digest_size:
+        raise ProtocolError("stage capability MAC is invalid")
+    try:
+        claims = json.loads(raw_claims.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ProtocolError("stage capability claims are invalid") from error
+    if not isinstance(claims, dict) or set(claims) != _K1_STAGE_CAPABILITY_KEYS:
+        raise ProtocolError("stage capability claims are invalid")
+    try:
+        canonical_claims = canonical_json_bytes(claims)
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise ProtocolError("stage capability claims are invalid") from error
+    if raw_claims != canonical_claims:
+        raise ProtocolError("stage capability claims are not canonical")
+    expected_claims = _stage_capability_claims(
+        session_tag=session_tag,
+        root_turn_tag=root_turn_tag,
+        task_epoch=task_epoch,
+        generation=generation,
+    )
+    validated_claims = _stage_capability_claims(
+        session_tag=claims.get("session_tag"),
+        root_turn_tag=claims.get("root_turn_tag"),
+        task_epoch=claims.get("task_epoch"),
+        generation=claims.get("generation"),
+    )
+    if type(claims.get("v")) is not int or claims.get("v") != 1 or claims != validated_claims:
+        raise ProtocolError("stage capability claims are invalid")
+    expected_mac = hmac.new(
+        _stage_capability_secret(secret),
+        _K1_STAGE_CAPABILITY_DOMAIN + canonical_claims,
+        hashlib.sha256,
+    ).digest()
+    if not hmac.compare_digest(received_mac, expected_mac):
+        raise ProtocolError("stage capability MAC does not match")
+    if validated_claims != expected_claims:
+        raise ProtocolError("stage capability does not match current authority")
+
+
+def _validate_luna_packet(packet: Any) -> dict[str, Any]:
+    if not isinstance(packet, dict) or set(packet) != _LUNA_PACKET_KEYS:
+        raise ProtocolError("Luna packet schema is invalid")
+    packet_id = _luna_text(packet.get("packet_id"), "packet_id")
+    generation = packet.get("generation")
+    if (
+        not isinstance(generation, int)
+        or isinstance(generation, bool)
+        or generation < 1
+    ):
+        raise ProtocolError("generation must be a positive integer")
+    objective = _luna_text(packet.get("objective"), "objective", nonblank=True)
+    working_directory = _luna_text(packet.get("working_directory"), "working_directory")
+    if not os.path.isabs(working_directory):
+        raise ProtocolError("working_directory must be absolute")
+    intended_write_scope = _luna_text_list(
+        packet.get("intended_write_scope"),
+        "intended_write_scope",
+        unique=True,
+    )
+    try:
+        explicit_side_effect_authorizations = list(
+            validate_packet_authorizations(
+                packet.get("explicit_side_effect_authorizations")
+            )
+        )
+    except ValueError as error:
+        raise ProtocolError(str(error)) from error
+    success_criteria = _luna_text_list(packet.get("success_criteria"), "success_criteria")
+    stop_conditions = _luna_text_list(packet.get("stop_conditions"), "stop_conditions")
+    return {
+        "packet_id": packet_id,
+        "generation": generation,
+        "objective": objective,
+        "working_directory": working_directory,
+        "intended_write_scope": intended_write_scope,
+        "explicit_side_effect_authorizations": explicit_side_effect_authorizations,
+        "success_criteria": success_criteria,
+        "stop_conditions": stop_conditions,
+    }
+
+
+def build_luna_packet(
+    *,
+    packet_id: str,
+    generation: int,
+    objective: str,
+    working_directory: str,
+    intended_write_scope: list[str] | tuple[str, ...],
+    explicit_side_effect_authorizations: list[str] | tuple[str, ...],
+    success_criteria: list[str] | tuple[str, ...],
+    stop_conditions: list[str] | tuple[str, ...],
+) -> str:
+    packet = _validate_luna_packet(
+        {
+            "packet_id": packet_id,
+            "generation": generation,
+            "objective": objective,
+            "working_directory": working_directory,
+            "intended_write_scope": intended_write_scope,
+            "explicit_side_effect_authorizations": explicit_side_effect_authorizations,
+            "success_criteria": success_criteria,
+            "stop_conditions": stop_conditions,
+        }
+    )
+    return LUNA_PACKET_PREFIX + canonical_json_bytes(packet).decode("utf-8")
+
+
+def parse_luna_packet(message: str) -> dict[str, Any]:
+    if not isinstance(message, str) or not message.startswith(LUNA_PACKET_PREFIX):
+        raise ProtocolError("Luna packet prefix is invalid")
+    raw = message[len(LUNA_PACKET_PREFIX) :]
+    if not raw:
+        raise ProtocolError("Luna packet payload is missing")
+    try:
+        packet = json.loads(raw)
+        canonical = canonical_json_bytes(packet).decode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise ProtocolError("Luna packet is not canonical JSON") from error
+    if raw != canonical:
+        raise ProtocolError("Luna packet JSON is not canonical")
+    return _validate_luna_packet(packet)
 
 
 def digest_json(value: Any) -> str:

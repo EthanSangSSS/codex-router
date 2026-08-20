@@ -23,6 +23,10 @@ class PolicyDecision:
 _BYPASS = re.compile(
     r"(?:本次不用\s+router|仅本地执行)\s*[。.!！;；:]?\s*\Z", re.IGNORECASE
 )
+_FORCE_DIRECT = re.compile(
+    r"(?:\[CODEX_ROUTER_DIRECT\]|本轮不用\s*luna)\s*[。.!！;；:]?\s*\Z",
+    re.IGNORECASE,
+)
 _SUBSTANTIVE = re.compile(
     r"修改|编辑|创建|删除|写入|提交|推送|合并|实现|修复|审查|评审|"
     r"\breview\b|\bPR\b|安全|架构|研究|调研|搜索|核实|事实验证|比较|"
@@ -71,6 +75,8 @@ def _is_trivial_arithmetic(prompt: str) -> bool:
 def classify_prompt(prompt: str) -> PolicyDecision:
     normalized = _normalize_prompt(prompt)
     first_line = _first_nonempty_line(normalized)
+    if _FORCE_DIRECT.fullmatch(first_line):
+        return PolicyDecision("direct", "explicit_one_turn_direct")
     if _BYPASS.fullmatch(first_line):
         return PolicyDecision("bypass", "explicit_one_turn_bypass")
 

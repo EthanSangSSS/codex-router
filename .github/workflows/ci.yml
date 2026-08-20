@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -24,6 +26,9 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Compile
         run: python -m compileall -q src tests
+      - name: PR diff whitespace check
+        shell: bash
+        run: git diff --check HEAD^1 HEAD
       - name: Fake adapter smoke test
         shell: bash
         run: |
@@ -33,3 +38,34 @@ jobs:
             --adapter-mode fake \
             --state-dir "$state_dir")"
           test "$output" = "ROUTER_MVP_OK"
+      - name: Build wheel
+        run: python -m pip wheel . --no-deps --wheel-dir dist
+      - name: Fresh wheel install and offline self-test
+        shell: bash
+        run: |
+          wheel_env="$RUNNER_TEMP/router-wheel-env"
+          python -m venv "$wheel_env"
+          "$wheel_env/bin/python" -m pip install --no-deps dist/codex_router-*.whl
+
+          state_dir="$(mktemp -d)"
+          output="$("$wheel_env/bin/router" run \
+            --task "Return exactly ROUTER_MVP_OK" \
+            --adapter-mode fake \
+            --state-dir "$state_dir")"
+          test "$output" = "ROUTER_MVP_OK"
+
+          codex_home="$(mktemp -d)"
+          policy_state="$(mktemp -d)"
+          synthetic_codex="$RUNNER_TEMP/synthetic-codex"
+          printf '%s\n' 'synthetic codex binary' > "$synthetic_codex"
+          chmod 700 "$synthetic_codex"
+
+          "$wheel_env/bin/router" global-install \
+            --codex-home "$codex_home" \
+            --state-dir "$policy_state" \
+            --codex-bin "$synthetic_codex" > "$RUNNER_TEMP/router-install.json"
+          "$wheel_env/bin/router" global-self-test \
+            --codex-home "$codex_home" > "$RUNNER_TEMP/router-self-test.json"
+          "$wheel_env/bin/python" -c 'import json,sys; data=json.load(open(sys.argv[1])); assert data["status"] == "pass"' "$RUNNER_TEMP/router-self-test.json"
+          "$wheel_env/bin/router" global-uninstall \
+            --codex-home "$codex_home" > "$RUNNER_TEMP/router-uninstall.json"

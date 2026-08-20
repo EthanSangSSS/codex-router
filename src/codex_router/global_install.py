@@ -66,21 +66,20 @@ _UPGRADE_BACKUP_PATTERN = re.compile(
 )
 
 AGENTS_BLOCK = f"""{AGENTS_BEGIN}
-This Codex task remains the primary coordinator and final reviewer. Luna is the default writable execution owner for delegated work packets.
+This Codex task is the primary Sol coordinator, highest ordinary execution authority, and final reviewer. Luna is the default bounded writable execution worker for routed work.
 Honor `[CODEX_ROUTER_POLICY_V1]` hook context exactly:
-- `direct` and `bypass` run only the current turn locally.
-- For `route`, show `Router: active`. Sol plans, decomposes, and reviews; delegate every executable work packet with explicit scope and acceptance criteria to `luna_worker` by default.
-- Sol may send multiple sequential work packets or bounded correction packets to Luna. Keep one writable executor per file set and never run conflicting writes concurrently.
-- Only the primary Codex task may create agents. Luna and all other child agents must not create descendants.
-- Each parent Codex task may create at most one persistent `luna_worker`; query the task tree before every packet. When the interface supports it, create the initial Luna with a self-contained packet and no conversation history; reuse the same Luna for all later packets, including when it is completed or idle.
-- Before creating any helper non-Luna child Agent, the primary Codex task must ensure the persistent Luna exists and preserve capacity for it.
-- Capacity exhaustion does not authorize Sol takeover. On Luna capacity exhaustion, reuse the existing Luna; if the interface supports it, close an unused completed non-Luna Agent; otherwise return `BLOCKED_LUNA_CAPACITY`. Never use a relay for Luna capacity recovery.
-- Every new Luna delegation must restate its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output; the previous packet's path authorization expires automatically, and Luna obeys only the latest explicit boundary. Keep one writable executor for that file set.
-- Sol takes over writable execution only for `direct`/`bypass`, an architecture decision that cannot yet be safely decomposed, or a non-capacity Luna execution blocker; capacity exhaustion is never a takeover reason and every permitted takeover must disclose its reason.
-- Luna must not browse, operate Web Sol, access authentication or secrets, or commit, push, open a PR, install, deploy, or broaden scope.
+- `direct` and `bypass` apply only to the current turn. Sol executes that turn directly and does not create or use Luna; the next normal substantive turn returns to Router routing automatically.
+- For `route`, show `Router: active`. Sol plans and decomposes; create or reuse exactly one current-root-turn `luna_worker` for bounded executable work by default; Sol reviews results, sends bounded corrections when useful, and gives the final response.
+- The primary Sol must retain the native multi-agent capability needed to create, communicate with, observe, and perform one bounded cleanup operation on the current authorized Luna. Do not apply Luna's descendant restriction globally to Sol.
+- Luna and all child agents must not create descendants. Luna must not start or resume another Codex runtime, use a hidden executor to bypass the Router gate, or bypass user-required trust, approval, authentication, or security confirmation.
+- Each routed root turn may bind at most one Router-managed `luna_worker`. While that root turn remains ACTIVE, reuse the same Luna across sequential work packets and correction packets, including after a Luna packet becomes completed or idle. A revoked or turn-mismatched historical Luna is permanently ineligible for new work or reuse.
+- Every new Luna delegation must restate its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output. The previous packet's path authorization expires automatically; keep a single writable executor for each file set.
+- Luna capacity exhaustion or another ordinary execution blocker returns control to Sol. Sol may retry with new evidence, narrow the packet, reuse the authorized Luna, take over ordinary execution, ask the user, or stop. Only stale-Luna resurrection, Luna process recursion, and interactive-security bypass are non-overridable Router guards.
+- A parent terminal boundary revokes Luna authorization before any best-effort cleanup. If Stop requests cleanup, perform at most one native cleanup attempt and then finalize without further Luna work; never create an autonomous cleanup/wait/retry loop.
+- Luna must not browse, operate Web Sol, access authentication or secrets, or commit, push, open a PR, install, deploy, or broaden scope unless the latest bounded packet explicitly authorizes an otherwise permitted action.
 - Web Sol is manual operator work outside automatic Router execution. Never open, close, or control browser pages on Router's behalf.
-- The Hook route is stateless. Do not create or resume a canonical run unless the user explicitly invokes the legacy Router CLI workflow.
-- Verify any delegated result before using it and report only observed outcomes.
+- The Hook route is stateless with respect to legacy Router runs. Do not create or resume a canonical run unless the user explicitly invokes the legacy Router CLI workflow. Native Luna lifecycle authorization is maintained only by the dedicated bounded safety journal.
+- Verify delegated results before using them and report only observed outcomes. Never treat `interrupt_agent` or a model message as proof that a child process was fully terminated.
 {AGENTS_END}
 """
 
@@ -88,27 +87,22 @@ _LUNA_DESCRIPTION = (
     "The default execution worker for planned, bounded implementation, testing, "
     "and verification with explicit acceptance criteria."
 )
-_LUNA_DEVELOPER_INSTRUCTIONS = """You are the default execution worker for planned, bounded implementation, testing, and verification.
+_LUNA_DEVELOPER_INSTRUCTIONS = """You are the default bounded execution worker for one authorized Router root turn. Sol is the planner, coordinator, reviewer, and final authority.
 
 Operating rules:
-- Remain the persistent execution worker for each parent task and accept multiple sequential follow-up or correction packets through the same Luna identity.
-- Before each packet, the parent must query the task tree and reuse this Luna when it is already present, including completed or idle states; never create a replacement Luna.
-- New packets do not inherit the previous packet's write permissions. Obey only the latest explicit boundary, including its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output.
-- Never create, spawn, fork, relay, resume, or delegate any child or descendant agent. Do not ask or instruct another agent to do so on your behalf.
-- If a packet requires recursive delegation or cannot be completed independently without it, stop and return `BLOCKED_LUNA_RECURSIVE_DELEGATION`.
-- Inherit the parent task's effective sandbox and approval controls; never request or add overrides.
-- Work only on the exact task delegated by the parent agent.
-- Treat the parent's allowed paths as a hard write boundary and preserve every unrelated file and behavior.
-- Do not broaden scope, redesign unrelated components, or become a second workflow coordinator.
-- Inspect relevant files and existing conventions before acting.
-- Complete planned, multi-step work across the explicitly allowed paths, including implementation, focused tests, corrections, and verification.
-- Accept bounded follow-up correction packets from the parent and resolve review findings within the same delegated boundary.
-- Prefer the smallest defensible change and remain the single writable executor for each delegated file set until returning control.
-- Never browse or operate Web Sol.
-- Never access authentication, credentials, cookies, tokens, private keys, payment data, or unrelated user data.
-- Never commit, push, create or modify a pull request, install, deploy, publish, or start persistent services unless the parent task explicitly authorizes that exact action.
+- Accept sequential implementation, test, verification, and bounded correction packets only while the current parent/root-turn binding remains authorized. Packet completion or idle state does not itself end that active parent turn.
+- Never act on a packet from another turn or after the parent binding has been revoked. Do not attempt to resume or recreate a historical Luna identity.
+- New packets do not inherit previous write permissions. Obey only the latest packet's id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output.
+- Never create, spawn, fork, relay, resume, or delegate any child or descendant agent. Do not ask or instruct another agent to do so on your behalf. If work requires recursive delegation, return `BLOCKED_LUNA_RECURSIVE_DELEGATION` to Sol.
+- Never launch, resume, probe, or wrap another Codex runtime through shell, PTY, subprocess, environment, script, or another executor. If work requires nested Codex, return `BLOCKED_LUNA_CODEX_RUNTIME` to Sol.
+- Inherit the parent task's sandbox and approval controls. Never request, synthesize, or bypass user-required trust, approval, authentication, permission escalation, or security confirmation; return `BLOCKED_USER_INTERACTION_REQUIRED` instead.
+- Work only on the exact packet delegated by Sol. Treat allowed paths as a hard write boundary and preserve every unrelated file and behavior.
+- Do not broaden scope, redesign unrelated components, or become a second workflow coordinator. Inspect relevant files and conventions before acting.
+- Complete planned multi-step work across the explicitly allowed paths, including focused tests and verification. Prefer the smallest defensible change and remain the single writable executor for the delegated file set until returning control.
+- If capacity, dependencies, permissions, ambiguity, or another ordinary blocker prevents completion, stop and report evidence to Sol. Do not create autonomous wait/interrupt/retry loops; Sol decides whether to narrow, take over, ask the user, retry with new evidence, or stop.
+- Never browse or operate Web Sol. Never access authentication, credentials, cookies, tokens, private keys, payment data, or unrelated user data.
+- Never commit, push, create or modify a pull request, install, deploy, publish, or start persistent services unless the latest explicit packet authorizes that exact action and normal platform controls permit it.
 - Validate with the narrowest relevant checks. Never claim a command or test passed unless you ran it and observed the result.
-- If requirements are ambiguous, dependencies are missing, permissions are insufficient, or the task is larger than delegated, stop and report the blocker instead of guessing.
 - Return a concise summary of work completed, files or artifacts affected, validation performed with observed results, and remaining risks or blockers.
 """
 
@@ -482,13 +476,28 @@ def _luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
         f"{key} = {json.dumps(value, ensure_ascii=False)}\n"
         for key, value in values.items()
     )
-    rendered += "\n[agents]\nenabled = false\n"
+    rendered += (
+        "\n[agents]\nenabled = false\n\n[features]\nmulti_agent = false\n"
+        "multi_agent_v2 = false\nunified_exec = false\ncode_mode = false\n"
+        "code_mode_only = false\nrequest_permissions_tool = false\n"
+    )
     encoded = rendered.encode("utf-8")
     try:
         parsed = tomllib.loads(encoded.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         raise _error("conflict", "generated Luna agent configuration is invalid") from error
-    expected = {**values, "agents": {"enabled": False}}
+    expected = {
+        **values,
+        "agents": {"enabled": False},
+        "features": {
+            "multi_agent": False,
+            "multi_agent_v2": False,
+            "unified_exec": False,
+            "code_mode": False,
+            "code_mode_only": False,
+            "request_permissions_tool": False,
+        },
+    }
     if parsed != expected:
         raise _error("conflict", "generated Luna agent configuration is unstable")
     return encoded
@@ -550,7 +559,9 @@ def _walk_strings(value: Any) -> Iterator[str]:
             yield from _walk_strings(child)
 
 
-def _hook_argv(installation_dir: Path) -> list[str]:
+def _hook_argv(
+    installation_dir: Path, subcommand: str = "hook-user-prompt"
+) -> list[str]:
     python_path = Path(sys.executable)
     if not python_path.is_absolute():
         raise _error("conflict", "Router hook Python must be absolute")
@@ -561,14 +572,16 @@ def _hook_argv(installation_dir: Path) -> list[str]:
         "-P",
         "-m",
         "codex_router",
-        "hook-user-prompt",
+        subcommand,
         "--installation-dir",
         str(installation_dir),
     ]
 
 
-def _hook_handler(installation_dir: Path) -> dict[str, Any]:
-    command = shlex.join(_hook_argv(installation_dir))
+def _hook_handler(
+    installation_dir: Path, subcommand: str = "hook-user-prompt"
+) -> dict[str, Any]:
+    command = shlex.join(_hook_argv(installation_dir, subcommand))
     return {
         "type": "command",
         "command": command,
@@ -686,7 +699,7 @@ def _preflight_hook_handler(
         raise _error("conflict", "Router hook command failed preflight")
 
 
-def _install_hook(original: bytes | None, handler: Mapping[str, Any]) -> bytes:
+def _install_hook(original: bytes | None, handler: Mapping[str, Any] | None = None) -> bytes:
     if original is None:
         document: dict[str, Any] = {}
     else:
@@ -708,18 +721,46 @@ def _install_hook(original: bytes | None, handler: Mapping[str, Any]) -> bytes:
         document["hooks"] = hooks
     if not isinstance(hooks, dict):
         raise _error("conflict", "hooks.json hooks field is invalid")
-    prompt_groups = hooks.get("UserPromptSubmit")
-    if prompt_groups is None:
-        prompt_groups = []
-        hooks["UserPromptSubmit"] = prompt_groups
-    if not isinstance(prompt_groups, list):
-        raise _error("conflict", "UserPromptSubmit hook groups are invalid")
-    for group in prompt_groups:
-        if not isinstance(group, Mapping) or not isinstance(group.get("hooks"), list):
-            raise _error("conflict", "UserPromptSubmit hook group is invalid")
-        if any(not isinstance(item, Mapping) for item in group["hooks"]):
-            raise _error("conflict", "UserPromptSubmit hook handler is invalid")
-    prompt_groups.append({"hooks": [deepcopy(dict(handler))]})
+    subcommands = {
+        "UserPromptSubmit": "hook-user-prompt",
+        "PreToolUse": "hook-pre-tool",
+        "PostToolUse": "hook-post-tool",
+        "PermissionRequest": "hook-permission-request",
+        "Stop": "hook-stop",
+        "SubagentStart": "hook-subagent-start",
+        "SubagentStop": "hook-subagent-stop",
+    }
+    if handler is None:
+        raise _error("invalid-input", "Router hook handler is required")
+    try:
+        base_arguments = shlex.split(str(handler["command"]), posix=True)
+    except (KeyError, TypeError, ValueError) as error:
+        raise _error("conflict", "Router hook handler is invalid") from error
+    if len(base_arguments) != 8 or base_arguments[3:6] != [
+        "-m",
+        "codex_router",
+        "hook-user-prompt",
+    ]:
+        raise _error("conflict", "Router hook handler is invalid")
+    for event, subcommand in subcommands.items():
+        groups = hooks.get(event)
+        if groups is None:
+            groups = []
+            hooks[event] = groups
+        if not isinstance(groups, list):
+            raise _error("conflict", f"{event} hook groups are invalid")
+        for group in groups:
+            if (
+                not isinstance(group, Mapping)
+                or not isinstance(group.get("hooks"), list)
+                or any(not isinstance(item, Mapping) for item in group["hooks"])
+            ):
+                raise _error("conflict", f"{event} hook group is invalid")
+        current = dict(handler)
+        arguments = list(base_arguments)
+        arguments[5] = subcommand
+        current["command"] = shlex.join(arguments)
+        groups.append({"hooks": [current]})
     return (
         json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
         + b"\n"
@@ -1535,7 +1576,7 @@ def _status_from_state(home: Path, installation_dir: Path, state: Mapping[str, A
                 parsed = json.loads(content)
                 hook_configured = sum(
                     HOOK_MARKER in value for value in _walk_strings(parsed)
-                ) == 1
+                ) == 7
             except (UnicodeDecodeError, json.JSONDecodeError):
                 hook_configured = False
         elif name == "AGENTS.md" and installed_match:
@@ -1782,9 +1823,6 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
     installation_dir = home / INSTALL_DIRECTORY_NAME
     config = _private_json(installation_dir / "config.json")
     configured_handler = _configured_hook_handler(home)
-    configured_arguments = _handler_argv(
-        configured_handler, expected_installation_dir=installation_dir
-    )
     before_fingerprints = _managed_fingerprints(home)
     configured_state_root = Path(config["state_root"])
     configured_state_existed = configured_state_root.exists()
@@ -1801,6 +1839,34 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="codex-router-self-test-") as temporary:
         ephemeral_path = Path(temporary)
         ephemeral_path.chmod(0o700)
+        # V3.1 route handling initializes the durable control journal. Exercise
+        # the configured command against a private disposable copy so the
+        # offline self-test cannot mutate the installed policy or its journal.
+        hook_installation_dir = ephemeral_path / INSTALL_DIRECTORY_NAME
+        hook_installation_dir.mkdir(mode=0o700)
+        _atomic_write(
+            hook_installation_dir / "config.json",
+            _read_private_file(installation_dir / "config.json"),
+        )
+        _atomic_write(
+            hook_installation_dir / _IDENTITY_FILE_NAME,
+            _read_private_file(installation_dir / _IDENTITY_FILE_NAME),
+        )
+        try:
+            hook_arguments = shlex.split(
+                str(configured_handler["command"]), posix=True
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise _error("conflict", "configured Router hook is invalid") from error
+        if not hook_arguments:
+            raise _error("conflict", "configured Router hook is invalid")
+        hook_arguments[-1] = str(hook_installation_dir)
+        disposable_handler = dict(configured_handler)
+        disposable_handler["command"] = shlex.join(hook_arguments)
+        configured_arguments = _handler_argv(
+            disposable_handler,
+            expected_installation_dir=hook_installation_dir,
+        )
 
         def event(*, prompt: str, session: str, turn: str) -> dict[str, str]:
             return {
@@ -1862,22 +1928,12 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             )
         )
 
-        route_contexts = (route, duplicate, changed_session, changed_turn)
-        output_text = json.dumps(
-            {
-                "direct": direct,
-                "bypass": bypass,
-                "routes": route_contexts,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
         expected_route = {
             "protocol": HOOK_CONTEXT_PROTOCOL,
             "decision": "route",
             "reason": "substantive_request",
-            "workflow": "native_luna_worker",
-            "sol_role": "plan_review",
+            "workflow": "persistent_native_luna",
+            "sol_role": "plan_review_final_authority",
             "luna_role": "default_execution",
             "delegation_mode": "sequential_work_packets",
             "luna_agent": "luna_worker",
@@ -1885,12 +1941,70 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "luna_reasoning": config["role_config"]["luna"][
                 "requested_reasoning"
             ],
-            "luna_lifecycle": "persistent_per_parent_task",
-            "capacity_failure_policy": "reuse_close_or_block",
+            "luna_lifecycle": "persistent_task_epoch",
+            "parent_terminal_policy": "hard_authority_pause",
+            "capacity_failure_policy": "return_to_sol",
             "luna_descendant_policy": "forbidden",
+            "luna_codex_runtime_policy": "forbidden",
+            "interactive_blocker_policy": "return_to_sol_or_user",
             "initial_context_mode": "packet_only",
             "web_mode": "manual_operator",
+            "pause_semantics": "hard_authority_pause",
+            "sol_supervision": "event_driven",
+            "luna_execution_mode": "full_executor",
         }
+
+        def valid_sideband_route_context(
+            context: Mapping[str, Any], *, session: str, turn: str
+        ) -> bool:
+            static_context = dict(context)
+            capability = static_context.pop("K1_STAGE_CAPABILITY", None)
+            command = static_context.pop("K1_STAGE_COMMAND", None)
+            if static_context != expected_route:
+                return False
+            if not isinstance(capability, str) or not capability:
+                return False
+            if not isinstance(command, str) or not command:
+                return False
+            try:
+                arguments = shlex.split(command, posix=True)
+            except ValueError:
+                return False
+            return arguments == [
+                sys.executable,
+                "-E",
+                "-P",
+                "-m",
+                "codex_router",
+                "stage-k1-fields",
+                "--installation-dir",
+                str(hook_installation_dir),
+                "--session-id",
+                session,
+                "--root-turn-id",
+                turn,
+                "--capability",
+                capability,
+            ]
+
+        route_contexts = (route, duplicate, changed_session, changed_turn)
+        route_contexts_without_sideband = tuple(
+            {
+                key: value
+                for key, value in context.items()
+                if key not in {"K1_STAGE_CAPABILITY", "K1_STAGE_COMMAND"}
+            }
+            for context in route_contexts
+        )
+        output_text = json.dumps(
+            {
+                "direct": direct,
+                "bypass": bypass,
+                "routes": route_contexts_without_sideband,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
         checks = {
             "hook_protocol": all(
@@ -1902,8 +2016,20 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "route_policy": all(
                 context.get("decision") == "route" for context in route_contexts
             ),
-            "stateless_native_luna_route": all(
-                context == expected_route for context in route_contexts
+            "persistent_native_luna_route": (
+                valid_sideband_route_context(route, session=session_a, turn=turn_a)
+                and valid_sideband_route_context(
+                    duplicate, session=session_a, turn=turn_a
+                )
+                and valid_sideband_route_context(
+                    changed_session, session=session_b, turn=turn_a
+                )
+                and valid_sideband_route_context(
+                    changed_turn, session=session_a, turn=turn_b
+                )
+                and route == duplicate
+                and route != changed_session
+                and route != changed_turn
             ),
             "no_router_run_created": (
                 configured_state_root.exists() == configured_state_existed

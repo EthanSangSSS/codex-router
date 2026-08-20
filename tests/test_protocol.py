@@ -1,3 +1,4 @@
+import json
 import unittest
 
 
@@ -40,6 +41,32 @@ def load_stage_protocol_api(testcase):
         validate_web_response,
         web_response_marker,
     )
+
+
+def load_luna_packet_api(testcase):
+    from codex_router import protocol
+
+    try:
+        return (
+            protocol.LUNA_PACKET_PREFIX,
+            protocol.build_luna_packet,
+            protocol.parse_luna_packet,
+        )
+    except AttributeError:
+        testcase.fail("V3.1 K1 packet API is not implemented")
+
+
+def encode_luna_packet(prefix, packet, *, canonical=True):
+    if canonical:
+        payload = json.dumps(
+            packet,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    else:
+        payload = json.dumps(packet, ensure_ascii=False)
+    return prefix + payload
 
 
 class RouterProtocolTests(unittest.TestCase):
@@ -210,6 +237,67 @@ class StagePacketTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(self.ProtocolError):
                     self.validate_web_response(invalid, self.packet)
+
+
+class LunaPacketTests(unittest.TestCase):
+    def setUp(self):
+        self.prefix, self.build_luna_packet, self.parse_luna_packet = (
+            load_luna_packet_api(self)
+        )
+        self.packet = {
+            "packet_id": "packet-1",
+            "generation": 1,
+            "objective": "Add multiply() and tests",
+            "working_directory": "/workspace/repo",
+            "intended_write_scope": ["src/math.py", "tests/test_math.py"],
+            "explicit_side_effect_authorizations": [],
+            "success_criteria": ["focused tests pass"],
+            "stop_conditions": ["scope expansion required", "A1 authorization required"],
+        }
+
+    def test_build_and_parse_use_the_exact_canonical_k1_wire_object(self):
+        message = self.build_luna_packet(**self.packet)
+
+        self.assertEqual(
+            message,
+            self.prefix
+            + '{"explicit_side_effect_authorizations":[],"generation":1,'
+            '"intended_write_scope":["src/math.py","tests/test_math.py"],'
+            '"objective":"Add multiply() and tests","packet_id":"packet-1",'
+            '"stop_conditions":["scope expansion required","A1 authorization required"],'
+            '"success_criteria":["focused tests pass"],'
+            '"working_directory":"/workspace/repo"}',
+        )
+        self.assertEqual(self.parse_luna_packet(message), self.packet)
+
+    def test_parse_rejects_invalid_k1_schema_and_noncanonical_json(self):
+        invalid_packets = {
+            "missing_key": {key: value for key, value in self.packet.items() if key != "objective"},
+            "extra_key": {**self.packet, "unexpected": True},
+            "relative_working_directory": {
+                **self.packet,
+                "working_directory": "workspace/repo",
+            },
+            "empty_objective": {**self.packet, "objective": ""},
+            "duplicate_scope": {
+                **self.packet,
+                "intended_write_scope": ["src/math.py", "src/math.py"],
+            },
+            "non_text_scope": {
+                **self.packet,
+                "intended_write_scope": ["src/math.py", 7],
+            },
+            "malformed_generation": {**self.packet, "generation": True},
+        }
+        for name, packet in invalid_packets.items():
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    self.parse_luna_packet(encode_luna_packet(self.prefix, packet))
+
+        with self.assertRaises(ValueError):
+            self.parse_luna_packet(
+                encode_luna_packet(self.prefix, self.packet, canonical=False)
+            )
 
 
 if __name__ == "__main__":
