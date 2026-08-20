@@ -16,6 +16,13 @@ from .usability_v32_integration import install as _install_router_usability_v32_
 
 _install_router_usability_v32_integration()
 
+# cli.py imports adapter callables eagerly; refresh the one V3.2 wrapper whose
+# callable identity changes after the compatibility integration is installed.
+from . import cli as _cli
+from . import global_install_adapter as _global_install_adapter
+
+_cli.global_self_test = _global_install_adapter.global_self_test
+
 __all__ = [
     "Router",
     "RouterRunError",
