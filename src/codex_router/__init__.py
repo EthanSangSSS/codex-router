@@ -8,6 +8,10 @@ from .luna_control_recovery import install as _install_luna_control_recovery
 
 _install_luna_control_recovery(luna_control)
 
+from .usability_v32 import install as _install_router_usability_v32
+
+_install_router_usability_v32()
+
 __all__ = [
     "Router",
     "RouterRunError",
