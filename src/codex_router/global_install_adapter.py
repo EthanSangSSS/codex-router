@@ -14,7 +14,7 @@ from . import global_install as _core
 from .types import GlobalStatus
 
 
-LUNA_EXECUTION_MODE = "full_executor_v3_1"
+LUNA_EXECUTION_MODE = "full_executor_v3_3_generation_scoped"
 BASELINE_HOOK_EVENTS = (
     "UserPromptSubmit",
     "PreToolUse",
@@ -38,55 +38,27 @@ PRIMARY_MODEL_INHERIT = "inherit"
 PRIMARY_REQUIRED_CAPABILITIES = (
     "multi_agent_v2",
     "spawn_agent",
-    "followup_task",
-    "send_message",
 )
 _PRIMARY_TOOL_CAPABILITIES = frozenset(PRIMARY_REQUIRED_CAPABILITIES[1:])
-V31_LIVE_ACTIVATION_BLOCKERS = (
-    "G1_STRONG_IDENTITY_PROFILE",
+V33_LIVE_ACTIVATION_BLOCKERS = (
+    "G1_CURRENT_GENERATION_SPAWN_CORRELATION",
     "G2_SETTLEMENT_OBSERVATION",
     "G3_ACTOR_ATTRIBUTION",
     "G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY",
     "G5_NESTED_CODEX",
     "G6_NATIVE_AUTHORITY_PROFILE",
     "G7_A1_CAPABILITY_MATRIX",
-    "G8_RECOVERY_CORRELATION",
+    "G8_STALE_GENERATION_REJECTION",
 )
-V31_DEFERRED_ACCEPTANCE_EVIDENCE = ("G9_ECONOMICS",)
+V33_DEFERRED_ACCEPTANCE_EVIDENCE = ("G9_ECONOMICS",)
 # Publicly named aliases keep readiness evidence discoverable to callers.
-LIVE_ACTIVATION_BLOCKERS = V31_LIVE_ACTIVATION_BLOCKERS
-DEFERRED_ACCEPTANCE_EVIDENCE = V31_DEFERRED_ACCEPTANCE_EVIDENCE
-AGENTS_BLOCK_V3 = f"""{_core.AGENTS_BEGIN}
-This Codex task is the primary Sol coordinator and final reviewer. Luna is a persistent Luna per task epoch and the single Full Executor for that epoch.
-Honor `[CODEX_ROUTER_POLICY_V1]` Hook context exactly:
-- `direct` and `bypass` keep their native local meaning. A substantive `route` creates one Luna bound to the persistent task epoch, and later packets reuse that same native Luna identity.
-- For every Luna generation, use the exact injected `stage-k1-fields` protected command prefix verbatim. Append only `--packet-id`, `--objective`, `--working-directory`, repeated `--intended-write-scope`, `--explicit-side-effect-authorization`, `--success-criterion`, and `--stop-condition` options. Do not build K1 wire bytes, JSON, a prefix, a shell pipeline, or an alternate control command. Successful `stage-k1-fields` is mandatory before native `spawn_agent`/`followup_task`. Native `spawn_agent`/`followup_task` message is a transport trigger, not authority. The native `spawn_agent`/`followup_task` message remains non-authoritative and should request the executor to initiate its harmless first-tool handshake probe. After staging generation 1, select the exact native surface actually exposed: V1 uses `agent_type=luna_worker` with `fork_context=false` or omission, while V2 uses `task_name=luna_worker`, `agent_type=luna_worker`, and `fork_turns=none`; after Luna is bound, stage each next K1 before a supported `followup_task` to that same Luna. V2 wait accepts optional `timeout_ms` only and has no `targets` field. If explicit complete runtime evidence proves persistent follow-up is unavailable, return `BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE` before staging Gen2. `send_input` and `resume_agent` are forbidden, and `send_message` is QueueOnly and cannot advance K1.
-- Full Executor ordinary inspect/research/edit/test/debug/retry/verify work is allowed, including ordinary shell, Unified Exec, Code Mode, code, apps, plugins, and web capabilities when the runtime exposes them.
-- Luna has no descendants and no nested Codex delegation. If a packet would require recursive delegation or another Codex runtime, return the appropriate blocked result to Sol.
-- packet generation replaces prior authority. Only the latest packet's working directory, allowed paths, forbidden operations, validation, stop conditions, and output requirements apply.
-- Hard Authority Pause freezes Router authority immediately. It is an authority state, not a process-death claim or a settlement shortcut.
-- On the current App, the exact bound-Luna native turn boundary closes Router scheduling authority. That boundary does not prove that detached or background OS processes are dead, so Luna must not intentionally daemonize or detach long-lived background work.
-- A1 hard claims only on proven pre-action surfaces. Hook receipts, packet metadata, turn-boundary observations, and ordinary acknowledgements do not prove completed external work.
-- Live activation remains `BLOCKED_ACCEPTANCE_GATES` until G1_STRONG_IDENTITY_PROFILE, G2_SETTLEMENT_OBSERVATION, G3_ACTOR_ATTRIBUTION, G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY, G5_NESTED_CODEX, G6_NATIVE_AUTHORITY_PROFILE, G7_A1_CAPABILITY_MATRIX, and G8_RECOVERY_CORRELATION are proven on the target runtime. G9_ECONOMICS remains deferred acceptance evidence.
-- Sol remains the planner and reviewer, while the persistent Luna performs the bounded packet. Web Sol is manual operator work outside automatic Router execution.
-- Every packet must be independently bounded and must not broaden scope or access secrets, authentication, or unrelated private data.
-{_core.AGENTS_END}
-"""
-
-LUNA_DEVELOPER_INSTRUCTIONS_V3 = """You are the persistent Luna Full Executor for one Router task epoch. Sol is the planner, coordinator, reviewer, and final authority.
-
-Operating rules:
-- Full Executor ordinary inspect/research/edit/test/debug/retry/verify work is allowed. Use ordinary shell, Unified Exec, Code Mode, code, apps, plugins, and web capabilities when the runtime exposes them.
-- You have no descendants and must perform no nested Codex delegation. Never create, spawn, fork, relay to, resume, or coordinate another agent or Codex runtime. Return `BLOCKED_LUNA_RECURSIVE_DELEGATION` or `BLOCKED_LUNA_CODEX_RUNTIME` when required.
-- You remain the same native Luna identity for the persistent task epoch. Packet generation replaces prior authority: accept only the latest packet and never inherit paths or permissions from an older packet.
-- Native collaboration messages are transport triggers, not work authority. The authoritative work packet is `[CODEX_ROUTER_PACKET_V3_1]` injected by Router as developer context. When a new Router transport trigger arrives and no `[CODEX_ROUTER_PACKET_V3_1]` developer context is present yet, issue exactly one harmless, read-only/no-side-effect ordinary tool request as the first-tool handshake probe. The probe is only a handshake probe, not work authority: do not derive an objective, scope, or permissions from the native message. Router is expected to deny the probe and inject canonical `[CODEX_ROUTER_PACKET_V3_1]` as developer context. Only after canonical `[CODEX_ROUTER_PACKET_V3_1]` is present may substantive packet work begin. If the probe unexpectedly executes normally and no `[CODEX_ROUTER_PACKET_V3_1]` developer context appears, stop fail-closed and report `BLOCKED_ROUTER_HANDSHAKE_MISSING`; do not continue the task.
-- Hard Authority Pause freezes Router authority immediately. Treat the pause as authoritative and do not continue or claim physical process settlement from an interrupt acknowledgement, a timeout, a sleep, polling, a PID observation, or guessed process death.
-- On the current App, an exact native Luna turn boundary may close Router scheduling authority. It is not proof that detached or background OS work has terminated. Never intentionally daemonize, detach, or leave long-lived background work running beyond the bounded turn.
-- A1 hard claims only on proven pre-action surfaces. Do not claim that an external effect completed without direct evidence from the required native surface.
-- Work only inside the latest packet's working directory and allowed paths. Preserve unrelated behavior and return concise evidence, blockers, and remaining risks.
-- Never browse or operate Web Sol. Never access credentials, cookies, tokens, private keys, payment data, or unrelated private data.
-- Never commit, push, create or modify a pull request, install, deploy, publish, or start a persistent service unless the latest explicit packet authorizes that exact action.
-"""
+LIVE_ACTIVATION_BLOCKERS = V33_LIVE_ACTIVATION_BLOCKERS
+DEFERRED_ACCEPTANCE_EVIDENCE = V33_DEFERRED_ACCEPTANCE_EVIDENCE
+# Historical constant names remain import-compatible but carry the active V3.3 gates.
+V31_LIVE_ACTIVATION_BLOCKERS = V33_LIVE_ACTIVATION_BLOCKERS
+V31_DEFERRED_ACCEPTANCE_EVIDENCE = V33_DEFERRED_ACCEPTANCE_EVIDENCE
+AGENTS_BLOCK_V3 = _core.AGENTS_BLOCK
+LUNA_DEVELOPER_INSTRUCTIONS_V3 = _core._LUNA_DEVELOPER_INSTRUCTIONS
 
 # Compatibility names are retained for callers that imported the previous adapter
 # seam; their rendered content is the V3.1 contract above.
@@ -298,12 +270,7 @@ def native_surface_compatibility(
     followup = _classify_persistent_followup(evidence)
     if gen1_readiness == PRIMARY_GEN1_INCOMPATIBLE:
         reason_code = "NATIVE_SURFACE_INCOMPATIBLE"
-    elif (
-        gen1_readiness == PRIMARY_GEN1_PASS
-        and followup == PERSISTENT_FOLLOWUP_UNAVAILABLE
-    ):
-        reason_code = "BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE"
-    elif gen1_readiness == PRIMARY_GEN1_UNKNOWN or followup == PERSISTENT_FOLLOWUP_UNKNOWN:
+    elif gen1_readiness == PRIMARY_GEN1_UNKNOWN:
         reason_code = "NATIVE_SURFACE_UNKNOWN"
     else:
         reason_code = "NATIVE_SURFACE_COMPATIBLE"
@@ -315,25 +282,28 @@ def native_surface_compatibility(
     )
 
 
-def primary_gen2_readiness(runtime_capabilities: Any) -> dict[str, str | None]:
-    """Return a non-authorizing PRIMARY decision before any Gen2 staging."""
+def primary_gen2_readiness(
+    runtime_capabilities: Any,
+    *,
+    strict_router: bool | None = None,
+    primary_fallback_state: str | None = None,
+) -> dict[str, str | None]:
+    """Return a non-authorizing decision for the next fresh worker generation.
+
+    The historical function name remains import-compatible. Follow-up evidence is
+    diagnostic only and never decides V3.3 readiness.
+    """
     compatibility = native_surface_compatibility(runtime_capabilities)
-    if (
-        compatibility.primary_gen1_readiness == PRIMARY_GEN1_PASS
-        and compatibility.persistent_followup_availability
-        == PERSISTENT_FOLLOWUP_UNAVAILABLE
-    ):
-        code = "BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE"
-    elif compatibility.primary_gen1_readiness == PRIMARY_GEN1_INCOMPATIBLE:
-        code = PRIMARY_GEN1_INCOMPATIBLE
-    elif (
-        compatibility.primary_gen1_readiness == PRIMARY_GEN1_PASS
-        and compatibility.persistent_followup_availability
-        == PERSISTENT_FOLLOWUP_AVAILABLE
-    ):
+    if compatibility.primary_gen1_readiness == PRIMARY_GEN1_PASS:
         code = "READY"
+    elif strict_router is None and primary_fallback_state is None:
+        code = compatibility.primary_gen1_readiness
+    elif strict_router:
+        code = "UNAVAILABLE_STRICT_BLOCK"
+    elif primary_fallback_state == "SAFE_LOCAL_FALLBACK":
+        code = "UNAVAILABLE_DEGRADE_ALLOWED"
     else:
-        code = PRIMARY_GEN1_UNKNOWN
+        code = "UNAVAILABLE_SAFETY_BLOCK"
     return {
         "code": code,
         "spawn_profile": compatibility.spawn_profile,
@@ -341,6 +311,9 @@ def primary_gen2_readiness(runtime_capabilities: Any) -> dict[str, str | None]:
         "persistent_followup_availability": compatibility.persistent_followup_availability,
         "reason_code": compatibility.reason_code,
     }
+
+
+primary_next_generation_readiness = primary_gen2_readiness
 
 
 def _capability_evidence(value: Any) -> tuple[set[str], bool | None]:
@@ -450,12 +423,15 @@ def primary_model_is_admitted(
     requested_model: str | None = PRIMARY_MODEL_INHERIT,
     runtime_capabilities: Any = None,
 ) -> bool:
-    """Admit any selected primary model only when the V2 surface is proven."""
+    """Admit any selected primary model when structured K1 plus spawn is proven."""
     if requested_model is not None and (
         not isinstance(requested_model, str) or not requested_model.strip()
     ):
         return False
-    return primary_capability_gate(runtime_capabilities)
+    return (
+        native_surface_compatibility(runtime_capabilities).primary_gen1_readiness
+        == PRIMARY_GEN1_PASS
+    )
 
 
 def normalize_role_config(
@@ -520,7 +496,7 @@ def luna_agent_bytes(role: Mapping[str, Any]) -> bytes:
 
 
 def render_executor_config(role_config: Mapping[str, Any]) -> bytes:
-    """Render the explicitly configured persistent executor profile."""
+    """Render the explicitly configured generation-scoped executor profile."""
     role = role_config.get("luna") if isinstance(role_config, Mapping) else None
     if isinstance(role, Mapping):
         return luna_agent_bytes(role)
@@ -693,16 +669,9 @@ def _primary_capability(
     def runtime_result() -> tuple[str, str]:
         surface = native_surface_compatibility(runtime_capabilities)
         if surface.primary_gen1_readiness == PRIMARY_GEN1_PASS:
-            if surface.persistent_followup_availability == PERSISTENT_FOLLOWUP_AVAILABLE:
-                detail = " and persistent follow-up"
-            elif surface.persistent_followup_availability == PERSISTENT_FOLLOWUP_UNAVAILABLE:
-                detail = "; persistent follow-up is explicitly unavailable"
-            else:
-                detail = "; persistent follow-up remains unknown"
             return (
                 COMPATIBLE,
-                "runtime evidence satisfies Gen1 sideband and native spawn contracts"
-                + detail,
+                "runtime evidence satisfies structured K1 and fresh native spawn contracts",
             )
         if surface.primary_gen1_readiness == PRIMARY_GEN1_UNKNOWN:
             return (
@@ -772,10 +741,10 @@ def _enrich(
         compatibility=compatibility,
         compatibility_reason=reason,
         luna_execution_mode=LUNA_EXECUTION_MODE,
-        router_design="v3.1",
+        router_design="v3.3",
         live_activation="BLOCKED_ACCEPTANCE_GATES",
-        live_activation_blockers=V31_LIVE_ACTIVATION_BLOCKERS,
-        deferred_acceptance_evidence=V31_DEFERRED_ACCEPTANCE_EVIDENCE,
+        live_activation_blockers=V33_LIVE_ACTIVATION_BLOCKERS,
+        deferred_acceptance_evidence=V33_DEFERRED_ACCEPTANCE_EVIDENCE,
     )
 
 
@@ -933,10 +902,10 @@ def global_self_test(*args, **kwargs):
         result = _core.global_self_test(*args, **kwargs)
     return {
         **result,
-        "router_design": "v3.1",
+        "router_design": "v3.3",
         "live_activation": "BLOCKED_ACCEPTANCE_GATES",
-        "live_activation_blockers": list(V31_LIVE_ACTIVATION_BLOCKERS),
-        "deferred_acceptance_evidence": list(V31_DEFERRED_ACCEPTANCE_EVIDENCE),
+        "live_activation_blockers": list(V33_LIVE_ACTIVATION_BLOCKERS),
+        "deferred_acceptance_evidence": list(V33_DEFERRED_ACCEPTANCE_EVIDENCE),
     }
 
 

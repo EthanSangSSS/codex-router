@@ -8,16 +8,12 @@ from .luna_control_recovery import install as _install_luna_control_recovery
 
 _install_luna_control_recovery(luna_control)
 
-from .usability_v32 import install as _install_router_usability_v32
+from .usability import install as _install_router_usability
 
-_install_router_usability_v32()
+_install_router_usability()
 
-from .usability_v32_integration import install as _install_router_usability_v32_integration
-
-_install_router_usability_v32_integration()
-
-# cli.py imports adapter callables eagerly; refresh the one V3.2 wrapper whose
-# callable identity changes after the compatibility integration is installed.
+# cli.py imports adapter callables eagerly; refresh the self-test wrapper whose
+# callable identity changes when the active usability layer is installed.
 from . import cli as _cli
 from . import global_install_adapter as _global_install_adapter
 

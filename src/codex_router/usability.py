@@ -1,8 +1,9 @@
-"""Router V3.2 usability policy layered over the V3.1 safety core.
+"""Active Router usability policy for V3.3 persistent-task, disposable-Luna routing.
 
-V3.2 deliberately leaves the mature journal, K1 capability, lifecycle,
-and identity machinery in V3.1.  This module narrows four operator-facing
-failure modes:
+The durable journal schema remains backward-compatible while worker identity is
+generation-scoped. This module owns the active request-file, strict-mode,
+fallback, bootstrap, CLI compatibility, and offline self-test behavior in one
+install layer.
 
 * semantic K1 fields travel through one strict request file instead of a
   model-extended argv prefix;
@@ -27,9 +28,14 @@ import sys
 from typing import Any, Mapping
 
 
-_V32_INSTALLED = False
+_USABILITY_INSTALLED = False
 _STRICT_MARKER = "[CODEX_ROUTER_STRICT]"
 _REQUEST_DIRECTORY = "stage-requests"
+_LEGACY_STAGE_REQUIRED_FLAGS = (
+    "--packet-id",
+    "--objective",
+    "--working-directory",
+)
 _REQUEST_FIELDS = frozenset(
     {
         "packet_id",
@@ -203,6 +209,8 @@ def _install_control_fallback(control: Any) -> None:
             return BLOCKED_PENDING_SPAWN
         if (
             getattr(snapshot, "execution_status", None) != "IDLE"
+            or getattr(snapshot, "luna_agent_id", None) is not None
+            or getattr(snapshot, "luna_task_path", None) is not None
             or getattr(snapshot, "active_packet_id", None) is not None
             or getattr(snapshot, "active_child_turn_id", None) is not None
             or getattr(snapshot, "authority_packet_wire", None) is not None
@@ -218,12 +226,12 @@ def _install_policy(policy_module: Any) -> None:
     original_classify = policy_module.classify_prompt
 
     @dataclass(frozen=True)
-    class PolicyDecisionV32(original_decision):
+    class PolicyDecisionV33(original_decision):
         strict_router: bool = False
 
-    policy_module.PolicyDecision = PolicyDecisionV32
+    policy_module.PolicyDecision = PolicyDecisionV33
 
-    def classify_prompt(prompt: str) -> PolicyDecisionV32:
+    def classify_prompt(prompt: str) -> PolicyDecisionV33:
         normalized = policy_module._normalize_prompt(prompt)
         lines = normalized.split("\n")
         marker_index = _first_nonempty_line_index(lines)
@@ -234,16 +242,16 @@ def _install_policy(policy_module: Any) -> None:
         if strict:
             remainder = "\n".join(lines[marker_index + 1 :]).strip()
             base = original_classify(remainder if remainder else "router strict work")
-            return PolicyDecisionV32(
+            return PolicyDecisionV33(
                 "route",
                 "explicit_strict_router",
                 base.sensitive_categories,
                 True,
             )
         result = original_classify(prompt)
-        if isinstance(result, PolicyDecisionV32):
+        if isinstance(result, PolicyDecisionV33):
             return result
-        return PolicyDecisionV32(
+        return PolicyDecisionV33(
             result.decision,
             result.reason_code,
             result.sensitive_categories,
@@ -254,116 +262,46 @@ def _install_policy(policy_module: Any) -> None:
     policy_module.ROUTER_STRICT_MARKER = _STRICT_MARKER
 
 
-def _install_adapter(adapter: Any) -> None:
-    original_primary_gen2 = adapter.primary_gen2_readiness
+def _install_adapter_self_test(adapter: Any) -> None:
+    original_global_self_test = adapter.global_self_test
+    core = adapter._core
+    original_self_test_context = core._self_test_context
 
-    def primary_model_is_admitted(
-        requested_model: str | None = adapter.PRIMARY_MODEL_INHERIT,
-        runtime_capabilities: Any = None,
-    ) -> bool:
-        if requested_model is not None and (
-            not isinstance(requested_model, str) or not requested_model.strip()
+    def normalize_self_test_context(output: Mapping[str, Any]) -> dict[str, Any]:
+        context = original_self_test_context(output)
+        if context.get("decision") != "route":
+            return context
+        normalized = dict(context)
+        for key in (
+            "K1_STAGE_REQUEST_PATH",
+            "K1_STAGE_INTERFACE",
+            "capability_failure_policy",
+            "primary_fallback_state",
+            "strict_router",
+            "luna_handshake_mode",
         ):
-            return False
-        compatibility = adapter.native_surface_compatibility(runtime_capabilities)
-        return compatibility.primary_gen1_readiness == adapter.PRIMARY_GEN1_PASS
+            normalized.pop(key, None)
+        command = normalized.get("K1_STAGE_COMMAND")
+        if isinstance(command, str):
+            try:
+                arguments = shlex.split(command, posix=True)
+            except ValueError:
+                return normalized
+            if "--request-file" in arguments:
+                index = arguments.index("--request-file")
+                del arguments[index : index + 2]
+            normalized["K1_STAGE_COMMAND"] = shlex.join(arguments)
+        return normalized
 
-    def primary_gen2_readiness(
-        runtime_capabilities: Any,
-        *,
-        strict_router: bool | None = None,
-        primary_fallback_state: str | None = None,
-    ) -> dict[str, str | None]:
-        # Preserve the one-argument V3.1 API as a compatibility seam.  New
-        # callers provide the Router state/strict decision explicitly.
-        if strict_router is None and primary_fallback_state is None:
-            return original_primary_gen2(runtime_capabilities)
-        result = dict(original_primary_gen2(runtime_capabilities))
-        if result.get("persistent_followup_availability") == adapter.PERSISTENT_FOLLOWUP_UNAVAILABLE:
-            if strict_router:
-                result["code"] = "UNAVAILABLE_STRICT_BLOCK"
-            elif primary_fallback_state == SAFE_LOCAL_FALLBACK:
-                result["code"] = "UNAVAILABLE_DEGRADE_ALLOWED"
-            else:
-                result["code"] = "UNAVAILABLE_SAFETY_BLOCK"
-        return result
+    def global_self_test(*args, **kwargs):
+        old = core._self_test_context
+        core._self_test_context = normalize_self_test_context
+        try:
+            return original_global_self_test(*args, **kwargs)
+        finally:
+            core._self_test_context = old
 
-    adapter.primary_model_is_admitted = primary_model_is_admitted
-    adapter.primary_gen2_readiness = primary_gen2_readiness
-
-    old_primary_text = adapter.AGENTS_BLOCK_V3
-    legacy_stage_sentence = (
-        "Legacy V3.1 compatibility reference only: use the exact injected "
-        "`stage-k1-fields` protected command prefix verbatim. Append only "
-        "`--packet-id`, `--objective`, `--working-directory` and the legacy "
-        "repeated packet-field options when, and only when, an older installed "
-        "session explicitly exposes that legacy prefix. Do not build K1 wire "
-        "bytes, JSON, a prefix, a shell pipeline, or an alternate control command. "
-        "Successful `stage-k1-fields` is mandatory before native `spawn_agent`/"
-        "`followup_task`. The legacy result token "
-        "`BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE` is diagnostic only under V3.2 and "
-        "is not the ordinary non-strict fallback instruction."
-    )
-    # Preserve native-schema and safety paragraphs from V3.1 while replacing
-    # the brittle operator mechanics with a single active V3.2 contract.
-    marker = "Honor `[CODEX_ROUTER_POLICY_V1]` Hook context exactly:\n"
-    suffix = old_primary_text.split(marker, 1)[1] if marker in old_primary_text else old_primary_text
-    # Drop only the first legacy staging bullet; keep the mature safety text.
-    suffix_lines = suffix.splitlines()
-    suffix_lines = [
-        line
-        for line in suffix_lines
-        if not line.startswith("- For every Luna generation, use the exact injected `stage-k1-fields`")
-    ]
-    preserved = "\n".join(suffix_lines)
-    primary_text = f"""{adapter._core.AGENTS_BEGIN}
-This Codex task is the primary Sol coordinator and final reviewer. Luna is a persistent Luna per task epoch and the single Full Executor for that epoch.
-Honor `[CODEX_ROUTER_POLICY_V1]` Hook context exactly:
-- V3.2 active staging uses the complete injected `K1_STAGE_COMMAND` verbatim. Before running it, write exactly one seven-field UTF-8 JSON request to `K1_STAGE_REQUEST_PATH`: `packet_id`, `objective`, `working_directory`, `intended_write_scope`, `explicit_side_effect_authorizations`, `success_criteria`, and `stop_conditions`. Do not append command arguments and do not write generation, session identity, task/luna epoch, capability, agent identity, or K1 wire into the request. Router alone constructs canonical K1.
-- Capability failure and safety failure are different. Automatic degraded PRIMARY execution is allowed only when the injected `strict_router` is false and `primary_fallback_state=SAFE_LOCAL_FALLBACK`. In that state PRIMARY may perform bounded workspace-local read/edit/test/build/local-Git/debug work. It may not use degraded mode for deploy, publish, release, credentials/tokens/cookies/private keys, cloud/service mutation, package publication, external A1 effects, privilege/authentication changes, or agent creation/delegation.
-- `[CODEX_ROUTER_STRICT]` on the exact first non-empty line forces `strict_router=true`; any Router capability failure then remains fail-closed. Do not infer strict mode from natural-language wording.
-- If persistent `followup_task` is available, stage the next K1 and reuse the same Luna. If it is explicitly unavailable, do not stage Gen2: degrade locally only when non-strict and `SAFE_LOCAL_FALLBACK`; otherwise stop fail-closed. `send_input` and `resume_agent` remain forbidden, `send_message` remains QueueOnly, and wait/replacement/polling are not continuation fallbacks.
-- The Luna bootstrap mode is `allowlisted_bash_pwd`: the first exact Codex `Bash` tool with `{{"command":"pwd"}}` may be allowed while canonical K1 is injected. Any other first Bash command is denied before executor state is started.
-- {legacy_stage_sentence}
-{preserved}
-"""
-    # Avoid duplicate nested managed markers from the preserved V3.1 block.
-    primary_text = primary_text.replace(
-        f"\n{adapter._core.AGENTS_END}\n{adapter._core.AGENTS_END}",
-        f"\n{adapter._core.AGENTS_END}",
-    )
-    if not primary_text.rstrip().endswith(adapter._core.AGENTS_END):
-        primary_text = primary_text.rstrip() + "\n" + adapter._core.AGENTS_END + "\n"
-
-    old_luna_text = adapter.LUNA_DEVELOPER_INSTRUCTIONS_V3
-    luna_text = f"""You are the persistent Luna Full Executor for one Router task epoch. Sol is the planner, coordinator, reviewer, and final authority.
-
-V3.2 bootstrap rules:
-- Native collaboration messages are transport triggers, not work authority. The authoritative work packet is `[CODEX_ROUTER_PACKET_V3_1]` injected by Router as developer context.
-- On a new Router transport trigger with no canonical packet yet, issue exactly the Codex `Bash` tool with `{{"command":"pwd"}}`. This is the only V3.2 allowlisted bootstrap probe. Router may allow that read-only probe while injecting canonical K1 through `additionalContext`. The probe itself supplies no work authority.
-- Only after canonical `[CODEX_ROUTER_PACKET_V3_1]` is present may substantive packet work begin. If the probe executes and no canonical K1 appears, stop fail-closed with `BLOCKED_ROUTER_HANDSHAKE_MISSING`.
-- Never replace the bootstrap probe with another shell command, file mutation, network action, lifecycle operation, or side effect.
-
-Operating rules retained from V3.1:
-- Full Executor ordinary inspect/research/edit/test/debug/retry/verify work is allowed after K1. Use ordinary shell, Unified Exec, Code Mode, code, apps, plugins, and web capabilities when the runtime exposes them.
-- You have no descendants and must perform no nested Codex delegation. Never create, spawn, fork, relay to, resume, or coordinate another agent or Codex runtime.
-- You remain the same native Luna identity for the persistent task epoch. Packet generation replaces prior authority: accept only the latest packet and never inherit paths or permissions from an older packet.
-- Hard Authority Pause freezes Router authority immediately. Never intentionally daemonize, detach, or leave long-lived background work running beyond the bounded turn.
-- A1 hard claims require proven pre-action surfaces. Never claim an external effect completed without direct evidence from the required native surface.
-- Work only inside the latest packet's working directory and allowed paths. Never access credentials, cookies, tokens, private keys, payment data, or unrelated private data.
-- Never commit, push, create or modify a pull request, install, deploy, publish, or start a persistent service unless the latest explicit packet authorizes that exact action.
-
-Legacy deny-retry compatibility text applies only to an older installed session that explicitly reports a deny-retry handshake mode, never to V3.2 `allowlisted_bash_pwd`: {old_luna_text}
-"""
-
-    adapter.AGENTS_BLOCK_V32 = primary_text
-    adapter.AGENTS_BLOCK_V3 = primary_text
-    adapter.AGENTS_BLOCK = primary_text
-    adapter.AGENTS_BLOCK_V2 = primary_text
-    adapter.LUNA_DEVELOPER_INSTRUCTIONS_V32 = luna_text
-    adapter.LUNA_DEVELOPER_INSTRUCTIONS_V3 = luna_text
-    adapter.LUNA_DEVELOPER_INSTRUCTIONS = luna_text
-    adapter.LUNA_DEVELOPER_INSTRUCTIONS_V2 = luna_text
+    adapter.global_self_test = global_self_test
 
 
 def _install_hook(hook_module: Any, control: Any, policy_module: Any) -> None:
@@ -416,7 +354,7 @@ def _install_hook(hook_module: Any, control: Any, policy_module: Any) -> None:
                     "-P",
                     "-m",
                     "codex_router",
-                    "stage-k1-request",
+                    "stage-k1-fields",
                     "--installation-dir",
                     str(Path(installation_dir)),
                     "--session-id",
@@ -430,17 +368,33 @@ def _install_hook(hook_module: Any, control: Any, policy_module: Any) -> None:
                 )
             )
             decision = policy_module.classify_prompt(prompt)
-            context.update(
-                {
-                    "K1_STAGE_REQUEST_PATH": str(request_path),
-                    "K1_STAGE_COMMAND": command,
-                    "K1_STAGE_INTERFACE": "request_file_v1",
-                    "capability_failure_policy": "degrade_primary_safe_local",
-                    "primary_fallback_state": control.classify_primary_fallback(snapshot),
-                    "strict_router": bool(getattr(decision, "strict_router", False)),
-                    "luna_handshake_mode": "allowlisted_bash_pwd",
-                }
+            strict = bool(getattr(decision, "strict_router", False))
+            has_prior_generation = bool(
+                snapshot.packet_generation > 0
+                or snapshot.luna_agent_id is not None
+                or snapshot.pending_spawn is not None
             )
+            context["K1_STAGE_COMMAND"] = command
+            for obsolete in (
+                "K1_STAGE_REQUEST_PATH",
+                "K1_STAGE_INTERFACE",
+                "luna_handshake_mode",
+            ):
+                context.pop(obsolete, None)
+            if has_prior_generation or strict:
+                context.update(
+                    {
+                        "capability_failure_policy": "degrade_primary_safe_local",
+                        "primary_fallback_state": control.classify_primary_fallback(
+                            snapshot
+                        ),
+                        "strict_router": strict,
+                    }
+                )
+            else:
+                context.pop("capability_failure_policy", None)
+                context.pop("primary_fallback_state", None)
+                context.pop("strict_router", None)
             return hook_module._hook_output(context)
         except Exception:
             return {"decision": "block", "reason": hook_module._BLOCK_REASON}
@@ -449,7 +403,7 @@ def _install_hook(hook_module: Any, control: Any, policy_module: Any) -> None:
         event: Mapping[str, Any], installation_dir: Path
     ) -> dict[str, Any]:
         if isinstance(event, Mapping) and event.get("hook_event_name") == "PreToolUse":
-            # V3.2 applies to the real Codex Bash wire.  Non-Bash synthetic or
+            # V3.3 applies to the real Codex Bash wire. Non-Bash synthetic or
             # older tool names retain the V3.1 deny-retry compatibility path.
             if event.get("tool_name") == "Bash":
                 try:
@@ -502,7 +456,7 @@ def _install_hook(hook_module: Any, control: Any, policy_module: Any) -> None:
                         )
                 except Exception:
                     # Delegate to the mature fail-closed handler; never turn a
-                    # V3.2 diagnostic problem into a permission grant.
+                    # diagnostic problem into a permission grant.
                     return original_handle_hook_event(event, installation_dir)
         return original_handle_hook_event(event, installation_dir)
 
@@ -524,22 +478,72 @@ def _install_cli(cli_module: Any, hook_module: Any, control: Any) -> None:
             ),
             None,
         )
-        if subparsers_action is not None and "stage-k1-request" not in subparsers_action.choices:
-            command = subparsers_action.add_parser(
-                "stage-k1-request",
-                help="stage canonical K1 from one strict request file",
+        if subparsers_action is None:
+            return root
+        stage_fields = subparsers_action.choices.get("stage-k1-fields")
+        if stage_fields is not None:
+            if not any(
+                action.dest == "request_file" for action in stage_fields._actions
+            ):
+                stage_fields.add_argument(
+                    "--request-file",
+                    type=Path,
+                    help=(
+                        "V3.3 strict seven-field JSON request; mutually exclusive "
+                        "with legacy semantic packet flags"
+                    ),
+                )
+            for action in stage_fields._actions:
+                if action.dest in {"packet_id", "objective", "working_directory"}:
+                    action.required = False
+            stage_fields.epilog = (
+                "V3.3: use --request-file with the complete Router-injected command "
+                "and append no packet flags. Legacy mode requires --packet-id, "
+                "--objective, and --working-directory."
             )
-            command.add_argument("--installation-dir", type=Path, required=True)
-            command.add_argument("--session-id", required=True)
-            command.add_argument("--root-turn-id", required=True)
-            command.add_argument("--capability", required=True)
-            command.add_argument("--request-file", type=Path, required=True)
         return root
+
+    def _fallback_state(
+        installation_dir: str | None, session_id: str | None
+    ) -> str:
+        if not installation_dir or not session_id:
+            return "UNKNOWN"
+        try:
+            secret, _config = hook_module._load_installation(Path(installation_dir))
+            snapshot = control.read_snapshot(
+                Path(installation_dir), secret, session_id
+            )
+            return control.classify_primary_fallback(snapshot)
+        except Exception:
+            return "UNKNOWN"
+
+    def _print_request_error(
+        error: Any,
+        *,
+        installation_dir: str | None,
+        session_id: str | None,
+    ) -> int:
+        cli_module._print_json(
+            {
+                "status": "error",
+                "code": error.code,
+                "message": str(error)[:200],
+                "run_id": error.run_id,
+                "stage": error.stage,
+                "revision": error.revision,
+                "capability_failure_policy": "degrade_primary_safe_local",
+                "primary_fallback_state": _fallback_state(
+                    installation_dir, session_id
+                ),
+            },
+            stream=sys.stderr,
+        )
+        return error.exit_code
 
     def stage_request(arguments: list[str]) -> int:
         try:
             local = argparse.ArgumentParser(
-                prog="router stage-k1-request",
+                prog="router stage-k1-fields --request-file",
                 add_help=True,
             )
             local.add_argument("--installation-dir", type=Path, required=True)
@@ -644,8 +648,46 @@ def _install_cli(cli_module: Any, hook_module: Any, control: Any) -> None:
 
     def main(argv=None) -> int:
         arguments = list(sys.argv[1:] if argv is None else argv)
-        if arguments and arguments[0] == "stage-k1-request":
-            return stage_request(arguments[1:])
+        if arguments and arguments[0] == "stage-k1-fields":
+            if "--request-file" in arguments:
+                installation_dir = None
+                session_id = None
+                for name in ("--installation-dir", "--session-id"):
+                    try:
+                        value = arguments[arguments.index(name) + 1]
+                    except (ValueError, IndexError):
+                        value = None
+                    if name == "--installation-dir":
+                        installation_dir = value
+                    else:
+                        session_id = value
+
+                def print_state_error(error):
+                    return _print_request_error(
+                        error,
+                        installation_dir=installation_dir,
+                        session_id=session_id,
+                    )
+
+                old = cli_module._print_state_error
+                cli_module._print_state_error = print_state_error
+                try:
+                    return stage_request(arguments[1:])
+                finally:
+                    cli_module._print_state_error = old
+            if "--help" not in arguments and "-h" not in arguments:
+                missing = [
+                    flag
+                    for flag in _LEGACY_STAGE_REQUIRED_FLAGS
+                    if flag not in arguments
+                ]
+                if missing:
+                    return cli_module._print_state_error(
+                        cli_module.RouterStateError(
+                            "invalid-input",
+                            "missing required arguments: " + ", ".join(missing),
+                        )
+                    )
         return original_main(argv)
 
     cli_module.parser = parser
@@ -653,9 +695,9 @@ def _install_cli(cli_module: Any, hook_module: Any, control: Any) -> None:
 
 
 def install() -> None:
-    """Install V3.2 once after the V3.1 recovery overlay is active."""
-    global _V32_INSTALLED
-    if _V32_INSTALLED:
+    """Install the one active usability layer after journal compatibility."""
+    global _USABILITY_INSTALLED
+    if _USABILITY_INSTALLED:
         return
 
     from . import luna_control as control
@@ -664,15 +706,13 @@ def install() -> None:
     _install_control_fallback(control)
     _install_policy(policy_module)
 
-    from . import global_install_adapter as adapter
-
-    _install_adapter(adapter)
-
     from . import hook as hook_module
 
     _install_hook(hook_module, control, policy_module)
 
     from . import cli as cli_module
+    from . import global_install_adapter as adapter
 
     _install_cli(cli_module, hook_module, control)
-    _V32_INSTALLED = True
+    _install_adapter_self_test(adapter)
+    _USABILITY_INSTALLED = True

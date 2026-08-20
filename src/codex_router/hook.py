@@ -355,14 +355,14 @@ def handle_user_prompt(
             "protocol": HOOK_CONTEXT_PROTOCOL,
             "decision": "route",
             "reason": policy.reason_code,
-            "workflow": "persistent_native_luna",
+            "workflow": "persistent_task_disposable_luna",
             "sol_role": "plan_review_final_authority",
-            "luna_role": "default_execution",
-            "delegation_mode": "sequential_work_packets",
+            "luna_role": "generation_scoped_execution",
+            "delegation_mode": "fresh_worker_per_generation",
             "luna_agent": "luna_worker",
             "luna_model": luna["requested_model"],
             "luna_reasoning": luna["requested_reasoning"],
-            "luna_lifecycle": "persistent_task_epoch",
+            "luna_lifecycle": "generation_scoped_disposable",
             "parent_terminal_policy": "hard_authority_pause",
             "capacity_failure_policy": "return_to_sol",
             "luna_descendant_policy": "forbidden",
@@ -372,7 +372,7 @@ def handle_user_prompt(
             "web_mode": "manual_operator",
             "pause_semantics": "hard_authority_pause",
             "sol_supervision": "event_driven",
-            "luna_execution_mode": "full_executor",
+            "luna_execution_mode": "full_executor_v3_3_generation_scoped",
             "K1_STAGE_CAPABILITY": stage_capability,
             "K1_STAGE_COMMAND": stage_command,
         }
@@ -646,6 +646,10 @@ def _handle_parent_pretool(
         )
         return {}
     if tool_name in _PARENT_COMMUNICATE_TOOLS | _PARENT_CLEANUP_TOOLS:
+        if tool_name == "send_message":
+            raise _invalid(
+                "send_message is QueueOnly and cannot carry or advance Router K1"
+            )
         target = _mapping_text(tool_input, _PARENT_TARGET_FIELDS[tool_name])
         luna_control.authorize_parent_target(
             installation_dir,
@@ -654,10 +658,6 @@ def _handle_parent_pretool(
             tool_name=tool_name,
             target=target,
         )
-        if tool_name == "send_message":
-            raise _invalid(
-                "Router K1 dispatch requires followup_task; send_message is queue-only"
-            )
         if tool_name == "interrupt_agent":
             snapshot = luna_control.read_snapshot(
                 installation_dir, secret, base["session_id"]
@@ -758,6 +758,14 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             _discriminate_spawn_profile(base, tool_input)
             lifecycle = _looks_like_agent_lifecycle_tool(base["tool_name"])
             identity = _identity_kind(event, lifecycle=lifecycle)
+            claims_luna = any(
+                event.get(field) == "luna_worker"
+                for field in ("agent_type", "actor_type")
+            )
+            if identity == "ambiguous" and claims_luna:
+                return _pretool_output(
+                    "deny", "Router Luna actor identity is ambiguous"
+                )
             if lifecycle:
                 identity = _root_lifecycle_identity(
                     event,

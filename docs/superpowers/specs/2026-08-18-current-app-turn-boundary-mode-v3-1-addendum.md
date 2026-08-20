@@ -1,5 +1,7 @@
 # Router V3.1 Current-App Turn-Boundary Mode Addendum
 
+> **Historical / superseded:** The active lifecycle is V3.3 “Persistent Task, Disposable Luna.” Persistent-worker identity and required-follow-up statements below are non-authoritative history; see [the V3.3 design](2026-08-20-router-v3-3-persistent-task-disposable-luna-design.md).
+
 Date: 2026-08-18
 Status: APPROVED DESIGN ADDENDUM; IMPLEMENTATION PENDING
 Repository: `EthanSangSSS/codex-router`

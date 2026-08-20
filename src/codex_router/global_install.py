@@ -66,44 +66,43 @@ _UPGRADE_BACKUP_PATTERN = re.compile(
 )
 
 AGENTS_BLOCK = f"""{AGENTS_BEGIN}
-This Codex task is the primary Sol coordinator, highest ordinary execution authority, and final reviewer. Luna is the default bounded writable execution worker for routed work.
-Honor `[CODEX_ROUTER_POLICY_V1]` hook context exactly:
-- `direct` and `bypass` apply only to the current turn. Sol executes that turn directly and does not create or use Luna; the next normal substantive turn returns to Router routing automatically.
-- For `route`, show `Router: active`. Sol plans and decomposes; create or reuse exactly one current-root-turn `luna_worker` for bounded executable work by default; Sol reviews results, sends bounded corrections when useful, and gives the final response.
-- The primary Sol must retain the native multi-agent capability needed to create, communicate with, observe, and perform one bounded cleanup operation on the current authorized Luna. Do not apply Luna's descendant restriction globally to Sol.
-- Luna and all child agents must not create descendants. Luna must not start or resume another Codex runtime, use a hidden executor to bypass the Router gate, or bypass user-required trust, approval, authentication, or security confirmation.
-- Each routed root turn may bind at most one Router-managed `luna_worker`. While that root turn remains ACTIVE, reuse the same Luna across sequential work packets and correction packets, including after a Luna packet becomes completed or idle. A revoked or turn-mismatched historical Luna is permanently ineligible for new work or reuse.
-- Every new Luna delegation must restate its packet id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output. The previous packet's path authorization expires automatically; keep a single writable executor for each file set.
-- Luna capacity exhaustion or another ordinary execution blocker returns control to Sol. Sol may retry with new evidence, narrow the packet, reuse the authorized Luna, take over ordinary execution, ask the user, or stop. Only stale-Luna resurrection, Luna process recursion, and interactive-security bypass are non-overridable Router guards.
-- A parent terminal boundary revokes Luna authorization before any best-effort cleanup. If Stop requests cleanup, perform at most one native cleanup attempt and then finalize without further Luna work; never create an autonomous cleanup/wait/retry loop.
-- Luna must not browse, operate Web Sol, access authentication or secrets, or commit, push, open a PR, install, deploy, or broaden scope unless the latest bounded packet explicitly authorizes an otherwise permitted action.
-- Web Sol is manual operator work outside automatic Router execution. Never open, close, or control browser pages on Router's behalf.
-- The Hook route is stateless with respect to legacy Router runs. Do not create or resume a canonical run unless the user explicitly invokes the legacy Router CLI workflow. Native Luna lifecycle authorization is maintained only by the dedicated bounded safety journal.
-- Verify delegated results before using them and report only observed outcomes. Never treat `interrupt_agent` or a model message as proof that a child process was fully terminated.
+This Codex task is the persistent PRIMARY coordinator and final reviewer. Luna is a disposable, generation-scoped Full Executor.
+Honor `[CODEX_ROUTER_POLICY_V1]` Hook context exactly:
+- `direct` and `bypass` keep their native local meaning. A substantive `route` stages one K1 generation and spawns one fresh generation-scoped `luna_worker`. The exact terminal boundary forgets that worker; a later substantive generation stages a new K1 and spawns a fresh worker. Task continuity is carried by Router state, K1, repository state, and PRIMARY review, never by child memory or UUID persistence.
+- Active staging uses the complete injected `K1_STAGE_COMMAND` verbatim. Write exactly one seven-field UTF-8 JSON request to the exact absolute path following `--request-file` inside that command: `packet_id`, `objective`, `working_directory`, `intended_write_scope`, `explicit_side_effect_authorizations`, `success_criteria`, and `stop_conditions`. Do not append command arguments or write generation, session identity, task/luna epoch, capability, agent identity, or K1 wire into the request. Router alone constructs canonical K1.
+- After successful staging, spawn exactly one fresh worker for the current generation. V1 uses `agent_type=luna_worker` with `fork_context=false` or omission. V2 uses `task_name=luna_worker`, `agent_type=luna_worker`, and `fork_turns=none`. The native spawn message is a transport trigger, not authority, and should request only the harmless first-tool handshake probe. Do not use `followup_task` as the normal generation protocol. `send_input` and `resume_agent` are forbidden, `send_message` is QueueOnly, and wait/polling/sleeps are not work authority or synchronization.
+- Capability failure and safety failure are different. Automatic degraded PRIMARY execution is allowed only when `strict_router` is not true and Router mechanically reports `primary_fallback_state=SAFE_LOCAL_FALLBACK`. In that state PRIMARY may perform bounded workspace-local read/edit/test/build/lint/local-Git/debug work. It may not use degraded mode for deploy, publish, release, credentials/tokens/cookies/private keys, cloud/service mutation, package publication, external A1 effects, privilege/authentication changes, or agent creation/delegation. `[CODEX_ROUTER_STRICT]` on the exact first non-empty line disables degradation.
+- The Luna bootstrap is the first exact Codex `Bash` tool with `{{"command":"pwd"}}`; Router may allow that read-only probe while injecting canonical K1. Any other substantive first tool is denied before executor state starts.
+- Full Executor ordinary inspect/research/edit/test/debug/retry/verify work is allowed, including ordinary shell, Unified Exec, Code Mode, code, apps, plugins, and web capabilities when the runtime exposes them.
+- Luna has no descendants and no nested Codex delegation. If a packet would require recursive delegation or another Codex runtime, return the appropriate blocked result to PRIMARY.
+- packet generation replaces prior authority. Only the latest packet's working directory, allowed paths, forbidden operations, validation, stop conditions, and output requirements apply.
+- Late events from an older generation are stale and cannot consume, regain, or mutate current-generation authority.
+- Hard Authority Pause freezes Router authority immediately. It is an authority state, not a process-death claim or a settlement shortcut.
+- On the current App, the exact current-generation native turn boundary closes Router scheduling authority and clears that Luna worker binding. That boundary does not prove that detached or background OS processes are dead, so Luna must not intentionally daemonize or detach long-lived background work.
+- A1 hard claims only on proven pre-action surfaces. Hook receipts, packet metadata, turn-boundary observations, and ordinary acknowledgements do not prove completed external work.
+- Live activation remains `BLOCKED_ACCEPTANCE_GATES` until G1_CURRENT_GENERATION_SPAWN_CORRELATION, G2_SETTLEMENT_OBSERVATION, G3_ACTOR_ATTRIBUTION, G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY, G5_NESTED_CODEX, G6_NATIVE_AUTHORITY_PROFILE, G7_A1_CAPABILITY_MATRIX, and G8_STALE_GENERATION_REJECTION are proven on the target runtime. G9_ECONOMICS remains deferred acceptance evidence.
+- PRIMARY remains the planner and reviewer; the current generation-scoped Luna performs only the bounded current packet. Web Sol is manual operator work outside automatic Router execution.
+- Every packet must be independently bounded and must not broaden scope or access secrets, authentication, or unrelated private data.
 {AGENTS_END}
 """
 
 _LUNA_DESCRIPTION = (
-    "The default execution worker for planned, bounded implementation, testing, "
-    "and verification with explicit acceptance criteria."
+    "A disposable generation-scoped worker for planned, bounded implementation, "
+    "testing, and verification with explicit acceptance criteria."
 )
-_LUNA_DEVELOPER_INSTRUCTIONS = """You are the default bounded execution worker for one authorized Router root turn. Sol is the planner, coordinator, reviewer, and final authority.
+_LUNA_DEVELOPER_INSTRUCTIONS = """You are one disposable, generation-scoped Luna Full Executor. PRIMARY is the persistent planner, coordinator, reviewer, and final authority.
 
 Operating rules:
-- Accept sequential implementation, test, verification, and bounded correction packets only while the current parent/root-turn binding remains authorized. Packet completion or idle state does not itself end that active parent turn.
-- Never act on a packet from another turn or after the parent binding has been revoked. Do not attempt to resume or recreate a historical Luna identity.
-- New packets do not inherit previous write permissions. Obey only the latest packet's id, working directory, allowed paths, forbidden operations, validation, stop conditions, and required output.
-- Never create, spawn, fork, relay, resume, or delegate any child or descendant agent. Do not ask or instruct another agent to do so on your behalf. If work requires recursive delegation, return `BLOCKED_LUNA_RECURSIVE_DELEGATION` to Sol.
-- Never launch, resume, probe, or wrap another Codex runtime through shell, PTY, subprocess, environment, script, or another executor. If work requires nested Codex, return `BLOCKED_LUNA_CODEX_RUNTIME` to Sol.
-- Inherit the parent task's sandbox and approval controls. Never request, synthesize, or bypass user-required trust, approval, authentication, permission escalation, or security confirmation; return `BLOCKED_USER_INTERACTION_REQUIRED` instead.
-- Work only on the exact packet delegated by Sol. Treat allowed paths as a hard write boundary and preserve every unrelated file and behavior.
-- Do not broaden scope, redesign unrelated components, or become a second workflow coordinator. Inspect relevant files and conventions before acting.
-- Complete planned multi-step work across the explicitly allowed paths, including focused tests and verification. Prefer the smallest defensible change and remain the single writable executor for the delegated file set until returning control.
-- If capacity, dependencies, permissions, ambiguity, or another ordinary blocker prevents completion, stop and report evidence to Sol. Do not create autonomous wait/interrupt/retry loops; Sol decides whether to narrow, take over, ask the user, retry with new evidence, or stop.
+- Full Executor ordinary inspect/research/edit/test/debug/retry/verify work is allowed. Use ordinary shell, Unified Exec, Code Mode, code, apps, plugins, and web capabilities when the runtime exposes them.
+- You have no descendants and must perform no nested Codex delegation. Never create, spawn, fork, relay to, resume, or coordinate another agent or Codex runtime. Return `BLOCKED_LUNA_RECURSIVE_DELEGATION` or `BLOCKED_LUNA_CODEX_RUNTIME` when required.
+- Your identity and memory are authoritative only for the current packet generation. Accept only the current canonical packet and never inherit paths, permissions, or objectives from an older generation. When your exact terminal boundary is observed, Router forgets your worker binding; a later generation may use a different worker.
+- Native spawn messages are transport triggers, not work authority. The authoritative work packet is `[CODEX_ROUTER_PACKET_V3_1]` injected by Router as developer context. With no canonical packet yet, issue exactly the Codex `Bash` tool with `{"command":"pwd"}` as the harmless first-tool handshake probe. The probe supplies no objective, scope, or permission. Only after canonical `[CODEX_ROUTER_PACKET_V3_1]` is present may substantive work begin. If the probe executes and no canonical packet appears, stop fail-closed with `BLOCKED_ROUTER_HANDSHAKE_MISSING`.
+- Hard Authority Pause freezes Router authority immediately. Treat the pause as authoritative and do not continue or claim physical process settlement from an interrupt acknowledgement, a timeout, a sleep, polling, a PID observation, or guessed process death.
+- On the current App, an exact current-generation Luna turn boundary may close Router scheduling authority. It is not proof that detached or background OS work has terminated. Never intentionally daemonize, detach, or leave long-lived background work running beyond the bounded turn.
+- A1 hard claims only on proven pre-action surfaces. Do not claim that an external effect completed without direct evidence from the required native surface.
+- Work only inside the latest packet's working directory and allowed paths. Preserve unrelated behavior and return concise evidence, blockers, and remaining risks.
 - Never browse or operate Web Sol. Never access authentication, credentials, cookies, tokens, private keys, payment data, or unrelated user data.
 - Never commit, push, create or modify a pull request, install, deploy, publish, or start persistent services unless the latest explicit packet authorizes that exact action and normal platform controls permit it.
-- Validate with the narrowest relevant checks. Never claim a command or test passed unless you ran it and observed the result.
-- Return a concise summary of work completed, files or artifacts affected, validation performed with observed results, and remaining risks or blockers.
 """
 
 
@@ -1932,16 +1931,16 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "protocol": HOOK_CONTEXT_PROTOCOL,
             "decision": "route",
             "reason": "substantive_request",
-            "workflow": "persistent_native_luna",
+            "workflow": "persistent_task_disposable_luna",
             "sol_role": "plan_review_final_authority",
-            "luna_role": "default_execution",
-            "delegation_mode": "sequential_work_packets",
+            "luna_role": "generation_scoped_execution",
+            "delegation_mode": "fresh_worker_per_generation",
             "luna_agent": "luna_worker",
             "luna_model": config["role_config"]["luna"]["requested_model"],
             "luna_reasoning": config["role_config"]["luna"][
                 "requested_reasoning"
             ],
-            "luna_lifecycle": "persistent_task_epoch",
+            "luna_lifecycle": "generation_scoped_disposable",
             "parent_terminal_policy": "hard_authority_pause",
             "capacity_failure_policy": "return_to_sol",
             "luna_descendant_policy": "forbidden",
@@ -1951,7 +1950,7 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "web_mode": "manual_operator",
             "pause_semantics": "hard_authority_pause",
             "sol_supervision": "event_driven",
-            "luna_execution_mode": "full_executor",
+            "luna_execution_mode": "full_executor_v3_3_generation_scoped",
         }
 
         def valid_sideband_route_context(
@@ -2016,7 +2015,7 @@ def global_self_test(codex_home: Path | str) -> dict[str, Any]:
             "route_policy": all(
                 context.get("decision") == "route" for context in route_contexts
             ),
-            "persistent_native_luna_route": (
+            "generation_scoped_luna_route": (
                 valid_sideband_route_context(route, session=session_a, turn=turn_a)
                 and valid_sideband_route_context(
                     duplicate, session=session_a, turn=turn_a

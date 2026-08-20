@@ -13,7 +13,7 @@ from codex_router.hook import HOOK_CONTEXT_PREFIX, handle_hook_event, handle_use
 from codex_router.protocol import build_k1_stage_capability, build_luna_packet
 
 
-class RouterUsabilityV32SecurityTests(unittest.TestCase):
+class RouterUsabilityV33SecurityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

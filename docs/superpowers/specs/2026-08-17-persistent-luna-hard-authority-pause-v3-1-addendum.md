@@ -1,5 +1,7 @@
 # Codex Router V3.1 — Hard Authority Pause and Runtime-Gate Addendum
 
+> **Historical / superseded:** The active lifecycle is V3.3 “Persistent Task, Disposable Luna.” Persistent-worker identity and required-follow-up statements below are non-authoritative history; see [the V3.3 design](2026-08-20-router-v3-3-persistent-task-disposable-luna-design.md).
+
 Date: 2026-08-17
 Status: DESIGN ADDENDUM; USER-APPROVED PRODUCT SEMANTICS; NOT IMPLEMENTED
 Repository: `EthanSangSSS/codex-router`

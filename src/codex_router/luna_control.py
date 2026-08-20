@@ -1,4 +1,4 @@
-"""Durable V3.1 persistent-Luna control state."""
+"""Durable Router task state with generation-scoped Luna bindings."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -24,6 +24,7 @@ _STATE = "luna-control-v3-1.json"
 _LOCK = "luna-control-v3-1.lock"
 _MAX_SESSIONS = 64
 _MAX_STATE_BYTES = 256 * 1024
+_MAX_RETIRED_LUNA_AGENT_TAGS = 2048
 _EPOCH_RE = re.compile(r"(?:task|luna)-[0-9a-f]{32}\Z")
 _TAG_RE = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -73,6 +74,7 @@ class ControlSnapshot:
     pending_spawn: SpawnReservation | None = None
     intended_write_scope: tuple[str, ...] = ()
     explicit_side_effect_authorizations: tuple[str, ...] = ()
+    retired_luna_agent_tags: tuple[str, ...] = ()
 
     @property
     def active_intended_write_scope(self) -> tuple[str, ...]:
@@ -138,6 +140,42 @@ def session_tag(secret: bytes, session_id: str) -> str:
     ).hexdigest()
 
 
+def _retired_luna_agent_tag(secret: bytes, agent_id: str) -> str:
+    key = _secret(secret)
+    agent = _text(agent_id, "agent_id")
+    assert agent is not None
+    return hmac.new(
+        key,
+        b"v3.3-retired-luna-agent\0"
+        + agent.encode("utf-8", errors="strict"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _remember_retired_luna_agent(
+    snapshot: ControlSnapshot, secret: bytes
+) -> tuple[str, ...]:
+    if snapshot.luna_agent_id is None:
+        return snapshot.retired_luna_agent_tags
+    tag = _retired_luna_agent_tag(secret, snapshot.luna_agent_id)
+    if tag in snapshot.retired_luna_agent_tags:
+        return snapshot.retired_luna_agent_tags
+    if len(snapshot.retired_luna_agent_tags) >= _MAX_RETIRED_LUNA_AGENT_TAGS:
+        raise _error("retired Luna identity capacity is exhausted")
+    return (*snapshot.retired_luna_agent_tags, tag)
+
+
+def _reject_retired_luna_agent(
+    snapshot: ControlSnapshot, secret: bytes, agent_id: str
+) -> None:
+    candidate = _retired_luna_agent_tag(secret, agent_id)
+    if any(
+        hmac.compare_digest(candidate, retired)
+        for retired in snapshot.retired_luna_agent_tags
+    ):
+        raise _error("SubagentStart identity belongs to a prior generation")
+
+
 def _new_epoch(kind: Literal["task", "luna"]) -> str:
     return f"{kind}-{uuid.uuid4().hex}"
 
@@ -189,6 +227,16 @@ def validate_snapshot(snapshot: ControlSnapshot) -> None:
         snapshot.explicit_side_effect_authorizations,
         "explicit_side_effect_authorizations",
     )
+    retired_luna_agent_tags = _text_sequence(
+        snapshot.retired_luna_agent_tags,
+        "retired_luna_agent_tags",
+        unique=True,
+    )
+    if (
+        len(retired_luna_agent_tags) > _MAX_RETIRED_LUNA_AGENT_TAGS
+        or any(_TAG_RE.fullmatch(tag) is None for tag in retired_luna_agent_tags)
+    ):
+        raise _error("retired Luna identity history is invalid")
     if packet_id is None and (
         intended_write_scope or explicit_side_effect_authorizations
     ):
@@ -263,6 +311,8 @@ def _snapshot_from_mapping(value: Any) -> ControlSnapshot:
     data = dict(value)
     if "authority_packet_wire" not in data:
         data["authority_packet_wire"] = None
+    if "retired_luna_agent_tags" not in data:
+        data["retired_luna_agent_tags"] = ()
     packet_metadata_fields = {
         "intended_write_scope",
         "explicit_side_effect_authorizations",
@@ -274,6 +324,8 @@ def _snapshot_from_mapping(value: Any) -> ControlSnapshot:
     for field in packet_metadata_fields:
         if isinstance(data[field], list):
             data[field] = tuple(data[field])
+    if isinstance(data["retired_luna_agent_tags"], list):
+        data["retired_luna_agent_tags"] = tuple(data["retired_luna_agent_tags"])
     pending = data.get("pending_spawn")
     if pending is not None:
         if not isinstance(pending, Mapping):
@@ -602,7 +654,7 @@ def _candidate_field(candidate: Mapping[str, Any], *names: str) -> Any:
 
 
 def _bind_recovery_candidate(
-    snapshot: ControlSnapshot, candidate: Mapping[str, Any]
+    snapshot: ControlSnapshot, secret: bytes, candidate: Mapping[str, Any]
 ) -> ControlSnapshot:
     if snapshot.logical_task_status != "ACTIVE":
         raise _error("recovery requires an active task epoch")
@@ -651,6 +703,7 @@ def _bind_recovery_candidate(
         raise _error("recovery candidate role is not Luna")
     if candidate_path != "/root/luna_worker":
         raise _error("recovery candidate task path is invalid")
+    _reject_retired_luna_agent(snapshot, secret, candidate_id)
     if pending.agent_id is not None and pending.agent_id != candidate_id:
         raise _error("recovery candidate conflicts with prior agent observation")
     if (
@@ -712,6 +765,7 @@ def observe_v1_spawn_result(
         pending = snapshot.pending_spawn
         if pending is None or pending.tool_use_id != tool_id or pending.task_path is not None:
             raise _error("V1 spawn result does not match the pending reservation")
+        _reject_retired_luna_agent(snapshot, secret, child_id)
         if pending.agent_id is not None and pending.agent_id != child_id:
             raise _error("V1 spawn result conflicts with prior agent observation")
         if pending.expected_agent_id is not None and pending.expected_agent_id != child_id:
@@ -758,6 +812,7 @@ def observe_subagent_start(
         pending = snapshot.pending_spawn
         if pending is None:
             raise _error("SubagentStart has no matching pending Luna reservation")
+        _reject_retired_luna_agent(snapshot, secret, child_id)
         if pending.agent_id is not None and pending.agent_id != child_id:
             raise _error("SubagentStart conflicts with prior observation")
         if pending.task_path is None:
@@ -824,7 +879,7 @@ def observe_subagent_start(
             "agent_type": role,
             "task_path": pending.task_path or "/root/luna_worker",
         }
-        updated = _bind_recovery_candidate(snapshot, candidate)
+        updated = _bind_recovery_candidate(snapshot, secret, candidate)
         _store_snapshot(state, updated)
         return updated
 
@@ -1194,6 +1249,9 @@ def retire_luna(
             intended_write_scope=(),
             explicit_side_effect_authorizations=(),
             recovery_baseline=None,
+            retired_luna_agent_tags=_remember_retired_luna_agent(
+                snapshot, secret
+            ),
         )
         _store_snapshot(state, retired)
         return retired
@@ -1284,6 +1342,7 @@ def replace_luna_epoch(
             logical_task_status="ACTIVE",
             execution_status="IDLE",
             pending_spawn=pending,
+            retired_luna_agent_tags=previous.retired_luna_agent_tags,
         )
         _store_snapshot(state, replacement)
         return replacement
@@ -1392,6 +1451,6 @@ def reconcile_recovery(
     tag = session_tag(secret, session_id)
     with _locked_state(Path(directory), mutate=True) as state:
         snapshot = _record_for_session(state, tag)
-        updated = _bind_recovery_candidate(snapshot, candidate)
+        updated = _bind_recovery_candidate(snapshot, secret, candidate)
         _store_snapshot(state, updated)
         return updated

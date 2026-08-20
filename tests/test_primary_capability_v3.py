@@ -25,7 +25,7 @@ ROLE_CONFIG = {
 }
 
 
-class PrimaryCapabilityV3Tests(unittest.TestCase):
+class PrimaryCapabilityV33Tests(unittest.TestCase):
     _PRIMARY_V2_EVIDENCE = {
         "multi_agent_v2": True,
         "capabilities": {
@@ -50,7 +50,10 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
         self.assertTrue(
             admitted(
                 requested_model="future-primary-model",
-                runtime_capabilities=self._PRIMARY_V2_EVIDENCE,
+                runtime_capabilities=(
+                    self._PRIMARY_V2_EVIDENCE
+                    | {"sideband_structured_k1_staging": True}
+                ),
             )
         )
 
@@ -119,7 +122,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
         self.assertEqual(value.primary_gen1_readiness, "PASS")
         self.assertEqual(value.persistent_followup_availability, "UNAVAILABLE")
 
-    def test_primary_status_does_not_claim_v2_or_followup_for_v1_surface(self):
+    def test_primary_status_uses_fresh_spawn_contract_for_v1_surface(self):
         with tempfile.TemporaryDirectory() as temporary:
             codex_home = Path(temporary)
             (codex_home / "config.toml").write_text(
@@ -138,7 +141,8 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
 
         self.assertEqual(compatibility, adapter.COMPATIBLE)
         self.assertNotIn("primary V2", reason)
-        self.assertIn("follow-up is explicitly unavailable", reason)
+        self.assertIn("fresh native spawn", reason)
+        self.assertNotIn("follow-up", reason)
 
     def test_incomplete_runtime_inventory_is_unknown(self):
         classify = self._feature("native_surface_compatibility")
@@ -187,7 +191,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
         self.assertIsNone(value.spawn_profile)
         self.assertEqual(value.primary_gen1_readiness, "INCOMPATIBLE")
 
-    def test_primary_gen2_readiness_blocks_known_unavailable_followup(self):
+    def test_primary_gen2_compatibility_name_uses_fresh_spawn_readiness(self):
         decide = self._feature("primary_gen2_readiness")
         decision = decide(
             {
@@ -196,7 +200,8 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
                 "followup_task": False,
             }
         )
-        self.assertEqual(decision["code"], "BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE")
+        self.assertEqual(decision["code"], "READY")
+        self.assertEqual(decision["reason_code"], "NATIVE_SURFACE_COMPATIBLE")
 
     def test_primary_gen2_readiness_does_not_infer_unavailable_from_incomplete_inventory(self):
         decide = self._feature("primary_gen2_readiness")
@@ -272,8 +277,11 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
         self.assertEqual(normalized["local_sol"], ROLE_CONFIG["local_sol"])
         self.assertEqual(normalized["luna"], ROLE_CONFIG["luna"])
 
-    def test_v3_renderer_exports_full_executor_mode_and_five_hook_events(self):
-        self.assertEqual(adapter.LUNA_EXECUTION_MODE, "full_executor_v3_1")
+    def test_v33_renderer_exports_generation_scoped_mode_and_five_hook_events(self):
+        self.assertEqual(
+            adapter.LUNA_EXECUTION_MODE,
+            "full_executor_v3_3_generation_scoped",
+        )
         self.assertEqual(
             adapter.BASELINE_HOOK_EVENTS,
             (
@@ -354,7 +362,7 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             },
         )
 
-    def test_generated_policy_text_describes_v3_authority(self):
+    def test_generated_policy_text_describes_v33_authority(self):
         agents_block = getattr(adapter, "AGENTS_BLOCK_V3", adapter.AGENTS_BLOCK_V2)
         instructions = getattr(
             adapter,
@@ -364,7 +372,9 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
         combined = f"{agents_block}\n{instructions}"
 
         for required in (
-            "persistent Luna per task epoch",
+            "disposable, generation-scoped Full Executor",
+            "spawns one fresh generation-scoped `luna_worker`",
+            "Task continuity is carried by Router state, K1, repository state, and PRIMARY review",
             "Full Executor ordinary inspect/research/edit/test/debug/retry/verify",
             "no descendants",
             "no nested Codex delegation",
@@ -376,12 +386,12 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "task_name=luna_worker",
             "agent_type=luna_worker",
             "fork_turns=none",
-            "use the exact injected `stage-k1-fields` protected command prefix verbatim",
-            "Native `spawn_agent`/`followup_task` message is a transport trigger, not authority",
-            "`send_message` is QueueOnly and cannot advance K1",
-            "Native collaboration messages are transport triggers, not work authority.",
+            "Active staging uses the complete injected `K1_STAGE_COMMAND` verbatim",
+            "native spawn message is a transport trigger, not authority",
+            "`send_message` is QueueOnly",
+            "Native spawn messages are transport triggers, not work authority.",
             "The authoritative work packet is `[CODEX_ROUTER_PACKET_V3_1]` injected by Router as developer context.",
-            "Only after canonical `[CODEX_ROUTER_PACKET_V3_1]` is present may substantive packet work begin.",
+            "Only after canonical `[CODEX_ROUTER_PACKET_V3_1]` is present may substantive work begin.",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, combined)
@@ -392,6 +402,9 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             "revoke_only_security_boundary",
             "later generations use `send_message` or `followup_task`",
             "generation-1 K1 packet as `message`",
+            "persistent Luna per task epoch",
+            "reuse that same native Luna identity",
+            "BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE",
         ):
             with self.subTest(stale=stale):
                 self.assertNotIn(stale, combined)

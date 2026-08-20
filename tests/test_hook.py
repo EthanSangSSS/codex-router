@@ -209,7 +209,7 @@ class HookNativeDelegationTests(HookTestCase):
         arguments = shlex.split(context["K1_STAGE_COMMAND"], posix=True)
         self.assertEqual(arguments[3:7], ["-m", "codex_router", "stage-k1-fields", "--installation-dir"])
 
-    def test_routed_events_use_persistent_native_luna_context(self):
+    def test_routed_events_use_persistent_task_disposable_luna_context(self):
         from codex_router import luna_control as control
 
         event = self.event()
@@ -245,14 +245,14 @@ class HookNativeDelegationTests(HookTestCase):
                 "protocol": "codex-router/hook-context/v2",
                 "decision": "route",
                 "reason": "substantive_request",
-                "workflow": "persistent_native_luna",
+                "workflow": "persistent_task_disposable_luna",
                 "sol_role": "plan_review_final_authority",
-                "luna_role": "default_execution",
-                "delegation_mode": "sequential_work_packets",
+                "luna_role": "generation_scoped_execution",
+                "delegation_mode": "fresh_worker_per_generation",
                 "luna_agent": "luna_worker",
                 "luna_model": "gpt-5.6-luna",
                 "luna_reasoning": "max",
-                "luna_lifecycle": "persistent_task_epoch",
+                "luna_lifecycle": "generation_scoped_disposable",
                 "parent_terminal_policy": "hard_authority_pause",
                 "capacity_failure_policy": "return_to_sol",
                 "luna_descendant_policy": "forbidden",
@@ -262,7 +262,7 @@ class HookNativeDelegationTests(HookTestCase):
                 "web_mode": "manual_operator",
                 "pause_semantics": "hard_authority_pause",
                 "sol_supervision": "event_driven",
-                "luna_execution_mode": "full_executor",
+                "luna_execution_mode": "full_executor_v3_3_generation_scoped",
             },
         )
         self.assertFalse(self.state_root.exists())
@@ -494,12 +494,24 @@ class HookNativeDelegationTests(HookTestCase):
             ),
             packet_wire=packet_message_2,
         )
-        self.assertEqual(handle_hook_event(packet_event, self.installation_dir), {})
+        staged_for_fresh_spawn = control.read_snapshot(
+            self.installation_dir, self.secret, "session-parent"
+        )
+        followup_output = handle_hook_event(packet_event, self.installation_dir)
+        self.assertEqual(
+            followup_output["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertIn(
+            "no Luna is currently bound",
+            followup_output["hookSpecificOutput"]["permissionDecisionReason"],
+        )
         packet_snapshot = control.read_snapshot(
             self.installation_dir, self.secret, "session-parent"
         )
-        self.assertEqual(packet_snapshot.active_packet_id, "packet-2")
-        self.assertEqual(packet_snapshot.packet_generation, 2)
+        self.assertEqual(packet_snapshot, staged_for_fresh_spawn)
+        self.assertIsNone(packet_snapshot.active_packet_id)
+        self.assertEqual(packet_snapshot.packet_generation, 1)
+        self.assertIsNotNone(packet_snapshot.authority_packet_wire)
 
         for missing_actor in (
             {},
