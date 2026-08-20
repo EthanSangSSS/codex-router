@@ -131,11 +131,10 @@ class K1RenderedContractTests(unittest.TestCase):
         instructions = rendered["developer_instructions"]
 
         for required in (
-            "When a new Router transport trigger arrives and no `[CODEX_ROUTER_PACKET_V3_1]` developer context is present yet, issue exactly one harmless, read-only/no-side-effect ordinary tool request as the first-tool handshake probe.",
-            "The probe is only a handshake probe, not work authority: do not derive an objective, scope, or permissions from the native message.",
-            "Router is expected to deny the probe and inject canonical `[CODEX_ROUTER_PACKET_V3_1]` as developer context.",
+            "On a new Router transport trigger with no canonical packet yet, issue exactly the Codex `Bash` tool with `{\"command\":\"pwd\"}`. This is the only V3.2 allowlisted bootstrap probe.",
+            "Router may allow that read-only probe while injecting canonical K1 through `additionalContext`. The probe itself supplies no work authority.",
             "Only after canonical `[CODEX_ROUTER_PACKET_V3_1]` is present may substantive packet work begin.",
-            "If the probe unexpectedly executes normally and no `[CODEX_ROUTER_PACKET_V3_1]` developer context appears, stop fail-closed and report `BLOCKED_ROUTER_HANDSHAKE_MISSING`; do not continue the task.",
+            "If the probe executes and no canonical K1 appears, stop fail-closed with `BLOCKED_ROUTER_HANDSHAKE_MISSING`.",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, instructions)
