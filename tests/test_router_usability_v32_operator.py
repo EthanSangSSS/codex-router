@@ -74,6 +74,13 @@ class RouterUsabilityV32OperatorTests(unittest.TestCase):
         self.assertIn("structured staging error", text)
         self.assertIn("SAFE_LOCAL_FALLBACK", text)
 
+    def test_v32_luna_instructions_do_not_contain_denial_retry_protocol(self) -> None:
+        text = adapter.LUNA_DEVELOPER_INSTRUCTIONS_V3
+        self.assertIn("allowlisted bootstrap probe", text)
+        self.assertIn('{"command":"pwd"}', text)
+        self.assertNotIn("Router is expected to deny the probe", text)
+        self.assertNotIn("Legacy deny-retry compatibility text applies", text)
+
 
 if __name__ == "__main__":
     unittest.main()
