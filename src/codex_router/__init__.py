@@ -12,6 +12,10 @@ from .usability_v32 import install as _install_router_usability_v32
 
 _install_router_usability_v32()
 
+from .usability_v32_integration import install as _install_router_usability_v32_integration
+
+_install_router_usability_v32_integration()
+
 __all__ = [
     "Router",
     "RouterRunError",
