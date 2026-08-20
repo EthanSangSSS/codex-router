@@ -2,6 +2,7 @@ from contextlib import redirect_stderr
 from io import StringIO
 import json
 from pathlib import Path
+import shlex
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -100,7 +101,9 @@ class RouterUsabilityV32Tests(unittest.TestCase):
 
     def _request_path_from_context(self) -> Path:
         context = self.routed_context()
-        return Path(str(context["K1_STAGE_REQUEST_PATH"]))
+        arguments = shlex.split(str(context["K1_STAGE_COMMAND"]), posix=True)
+        index = arguments.index("--request-file")
+        return Path(arguments[index + 1])
 
     def _invoke_request(self, request_path: Path) -> tuple[int, list[dict[str, object]], str]:
         stderr = StringIO()
@@ -111,8 +114,8 @@ class RouterUsabilityV32Tests(unittest.TestCase):
 
         context = self.routed_context()
         command = str(context["K1_STAGE_COMMAND"])
-        argv = command.split()
-        stage_index = argv.index("stage-k1-request")
+        argv = shlex.split(command, posix=True)
+        stage_index = argv.index("stage-k1-fields")
         with (
             patch.object(cli, "_print_json", side_effect=capture),
             redirect_stderr(stderr),
@@ -181,16 +184,50 @@ class RouterUsabilityV32Tests(unittest.TestCase):
         )
         return packet
 
+    def _complete_gen1(self) -> None:
+        self._bind_luna_with_packet()
+        bootstrap = handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": self.session_id,
+                "turn_id": "luna-turn-v32",
+                "tool_name": "Bash",
+                "tool_use_id": "pwd-v32",
+                "tool_input": {"command": "pwd"},
+                "agent_id": "luna-v32",
+                "agent_type": "luna_worker",
+            },
+            self.installation,
+        )
+        self.assertEqual(
+            bootstrap["hookSpecificOutput"]["permissionDecision"], "allow"
+        )
+        stopped = handle_hook_event(
+            {
+                "hook_event_name": "SubagentStop",
+                "session_id": self.session_id,
+                "turn_id": "luna-turn-v32",
+                "agent_id": "luna-v32",
+                "agent_type": "luna_worker",
+            },
+            self.installation,
+        )
+        self.assertEqual(
+            stopped,
+            {"hookSpecificOutput": {"hookEventName": "SubagentStop"}},
+        )
+
     def test_hook_renders_complete_request_staging_command(self) -> None:
         context = self.routed_context()
         command = str(context["K1_STAGE_COMMAND"])
-        request_path = str(context["K1_STAGE_REQUEST_PATH"])
+        arguments = shlex.split(command, posix=True)
 
-        self.assertIn("stage-k1-request", command)
-        self.assertIn("--request-file", command)
-        self.assertIn(request_path, command)
-        self.assertNotIn("stage-k1-fields", command)
-        self.assertNotIn("--packet-id", command)
+        self.assertIn("stage-k1-fields", arguments)
+        self.assertIn("--request-file", arguments)
+        self.assertNotIn("--packet-id", arguments)
+        request_path = Path(arguments[arguments.index("--request-file") + 1])
+        self.assertTrue(request_path.is_absolute())
+        self.assertNotIn("K1_STAGE_REQUEST_PATH", context)
 
     def test_stage_k1_request_stages_exact_canonical_packet(self) -> None:
         request_path = self._request_path_from_context()
@@ -222,11 +259,12 @@ class RouterUsabilityV32Tests(unittest.TestCase):
         self._write_request(request_path, generation=999)
         before = self.snapshot()
 
-        result, _outputs, _stderr = self._invoke_request(request_path)
+        result, outputs, _stderr = self._invoke_request(request_path)
 
         self.assertNotEqual(result, 0)
         self.assertEqual(self.snapshot(), before)
         self.assertTrue(request_path.exists())
+        self.assertEqual(outputs[-1]["primary_fallback_state"], "SAFE_LOCAL_FALLBACK")
 
     def test_primary_fallback_requires_idle_cleared_authority(self) -> None:
         classify = getattr(control, "classify_primary_fallback")
@@ -273,7 +311,14 @@ class RouterUsabilityV32Tests(unittest.TestCase):
             "degrade_primary_safe_local",
         )
 
-    def test_normal_route_exposes_safe_local_fallback_state(self) -> None:
+    def test_initial_route_keeps_stable_context_shape(self) -> None:
+        context = self.routed_context()
+        self.assertNotIn("strict_router", context)
+        self.assertNotIn("primary_fallback_state", context)
+        self.assertEqual(context["capacity_failure_policy"], "return_to_sol")
+
+    def test_completed_gen1_exposes_safe_local_fallback_state(self) -> None:
+        self._complete_gen1()
         context = self.routed_context()
         self.assertIs(context["strict_router"], False)
         self.assertEqual(context["primary_fallback_state"], "SAFE_LOCAL_FALLBACK")
