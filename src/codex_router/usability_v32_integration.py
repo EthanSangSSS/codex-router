@@ -22,6 +22,7 @@ _LEGACY_STAGE_REQUIRED_FLAGS = (
     "--objective",
     "--working-directory",
 )
+_LEGACY_LUNA_TEXT_MARKER = "\nLegacy deny-retry compatibility text applies only"
 
 
 def _context_from_output(hook_module: Any, output: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -279,6 +280,17 @@ def _install_adapter_compat(adapter: Any) -> None:
     adapter.AGENTS_BLOCK_V3 = primary
     adapter.AGENTS_BLOCK = primary
     adapter.AGENTS_BLOCK_V2 = primary
+
+    # Code keeps the V3.1 non-Bash deny-retry path for wire/test compatibility,
+    # but new V3.2 Luna must not see contradictory bootstrap instructions.
+    luna = adapter.LUNA_DEVELOPER_INSTRUCTIONS_V3.split(
+        _LEGACY_LUNA_TEXT_MARKER,
+        1,
+    )[0].rstrip() + "\n"
+    adapter.LUNA_DEVELOPER_INSTRUCTIONS_V32 = luna
+    adapter.LUNA_DEVELOPER_INSTRUCTIONS_V3 = luna
+    adapter.LUNA_DEVELOPER_INSTRUCTIONS = luna
+    adapter.LUNA_DEVELOPER_INSTRUCTIONS_V2 = luna
 
     # The V3.1 core self-test intentionally checks a stable comparison view.
     # Normalize only that local comparison after the real Hook subprocess has
