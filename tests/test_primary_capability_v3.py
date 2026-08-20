@@ -92,6 +92,13 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
         status = self._feature("primary_readiness")
         self.assertEqual(status(self._PRIMARY_V2_EVIDENCE), "UNKNOWN_REQUIRES_CAPABILITY_CHECK")
 
+    def test_primary_readiness_keeps_incomplete_runtime_inventory_unknown(self):
+        status = self._feature("primary_readiness")
+        self.assertEqual(
+            status({"router_stage_k1_exec": True}),
+            "UNKNOWN_REQUIRES_CAPABILITY_CHECK",
+        )
+
     def test_primary_readiness_incompatible_when_sideband_exec_explicitly_unavailable(self):
         status = self._feature("primary_readiness")
         self.assertEqual(
@@ -111,6 +118,27 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
         self.assertEqual(value.spawn_profile, "multi_agent_v1")
         self.assertEqual(value.primary_gen1_readiness, "PASS")
         self.assertEqual(value.persistent_followup_availability, "UNAVAILABLE")
+
+    def test_primary_status_does_not_claim_v2_or_followup_for_v1_surface(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            codex_home = Path(temporary)
+            (codex_home / "config.toml").write_text(
+                "[agents]\nenabled = true\n[features]\nmulti_agent = true\nhooks = true\n",
+                encoding="utf-8",
+            )
+
+            compatibility, reason = adapter._primary_capability(
+                codex_home,
+                {
+                    "sideband_structured_k1_staging": True,
+                    "multi_agent_v1__spawn_agent": True,
+                    "followup_task": False,
+                },
+            )
+
+        self.assertEqual(compatibility, adapter.COMPATIBLE)
+        self.assertNotIn("primary V2", reason)
+        self.assertIn("follow-up is explicitly unavailable", reason)
 
     def test_incomplete_runtime_inventory_is_unknown(self):
         classify = self._feature("native_surface_compatibility")
@@ -186,6 +214,21 @@ class PrimaryCapabilityV3Tests(unittest.TestCase):
             compatibility, _reason = adapter._primary_capability(codex_home)
 
         self.assertEqual(compatibility, adapter.UNKNOWN)
+
+    def test_explicit_incomplete_runtime_inventory_is_unknown(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            codex_home = Path(temporary)
+            (codex_home / "config.toml").write_text(
+                "[agents]\nenabled = true\n[features]\nmulti_agent = true\nhooks = true\n",
+                encoding="utf-8",
+            )
+
+            compatibility, reason = adapter._primary_capability(
+                codex_home, {"router_stage_k1_exec": True}
+            )
+
+        self.assertEqual(compatibility, adapter.UNKNOWN)
+        self.assertIn("incomplete", reason)
 
     def test_executor_requested_model_is_rendered_explicitly(self):
         render = self._feature("render_executor_config")

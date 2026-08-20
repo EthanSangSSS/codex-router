@@ -438,12 +438,10 @@ def sideband_stage_capability(runtime_capabilities: Any) -> str:
 
 
 def primary_readiness(runtime_capabilities: Any) -> str:
-    if not primary_capability_gate(runtime_capabilities):
-        return INCOMPATIBLE
-    sideband = sideband_stage_capability(runtime_capabilities)
-    if sideband == SIDEBAND_STAGE_AVAILABLE:
+    compatibility = native_surface_compatibility(runtime_capabilities)
+    if compatibility.primary_gen1_readiness == PRIMARY_GEN1_PASS:
         return COMPATIBLE
-    if sideband == SIDEBAND_STAGE_UNAVAILABLE:
+    if compatibility.primary_gen1_readiness == PRIMARY_GEN1_INCOMPATIBLE:
         return INCOMPATIBLE
     return UNKNOWN
 
@@ -693,16 +691,23 @@ def _primary_capability(
 ) -> tuple[str, str]:
     """Classify only statically observable primary capabilities; never mutate config."""
     def runtime_result() -> tuple[str, str]:
-        readiness = primary_readiness(runtime_capabilities)
-        if readiness == COMPATIBLE:
+        surface = native_surface_compatibility(runtime_capabilities)
+        if surface.primary_gen1_readiness == PRIMARY_GEN1_PASS:
+            if surface.persistent_followup_availability == PERSISTENT_FOLLOWUP_AVAILABLE:
+                detail = " and persistent follow-up"
+            elif surface.persistent_followup_availability == PERSISTENT_FOLLOWUP_UNAVAILABLE:
+                detail = "; persistent follow-up is explicitly unavailable"
+            else:
+                detail = "; persistent follow-up remains unknown"
             return (
                 COMPATIBLE,
-                "runtime evidence satisfies the primary V2 and K1 sideband capability contracts",
+                "runtime evidence satisfies Gen1 sideband and native spawn contracts"
+                + detail,
             )
-        if readiness == UNKNOWN:
+        if surface.primary_gen1_readiness == PRIMARY_GEN1_UNKNOWN:
             return (
                 UNKNOWN,
-                "primary V2 evidence is present but router_stage_k1_exec is unproven",
+                "current runtime capability evidence is incomplete or ambiguous",
             )
         return (
             INCOMPATIBLE,

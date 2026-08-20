@@ -365,6 +365,39 @@ class ExactRootHookIdentityTests(unittest.TestCase):
         self.assertNotEqual(denied, {})
         base["tool_input"] = base["tool_input"] | {"fork_context": False}
         self.assertEqual(handle_hook_event(base, self.installation_dir), {})
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "PostToolUse",
+                    "session_id": "session-a",
+                    "turn_id": "root-turn-1",
+                    "tool_name": "spawn_agent",
+                    "tool_use_id": "collapsed-v1-spawn",
+                    "tool_input": base["tool_input"],
+                    "tool_response": {"agent_id": "native-collapsed-v1"},
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "PostToolUse"}},
+        )
+        self.assertEqual(
+            handle_hook_event(
+                {
+                    "hook_event_name": "SubagentStart",
+                    "session_id": "session-a",
+                    "turn_id": "luna-turn-collapsed-v1",
+                    "agent_id": "native-collapsed-v1",
+                    "agent_type": "luna_worker",
+                },
+                self.installation_dir,
+            ),
+            {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
+        )
+        snapshot = control.read_snapshot(
+            self.installation_dir, self.secret, "session-a"
+        )
+        self.assertEqual(snapshot.luna_agent_id, "native-collapsed-v1")
+        self.assertIsNone(snapshot.luna_task_path)
 
     def test_v1_wait_accepts_only_exact_bound_agent_id_without_state_change(self):
         self._submit_root_prompt()
@@ -438,6 +471,23 @@ class ExactRootHookIdentityTests(unittest.TestCase):
             ),
             {},
         )
+        self.assertEqual(
+            control.read_snapshot(self.installation_dir, self.secret, "session-a"),
+            before,
+        )
+
+        denied_extra = handle_hook_event(
+            wait
+            | {
+                "tool_input": {
+                    "targets": ["native-v1-wait"],
+                    "timeout_ms": 1000,
+                    "unexpected": "value",
+                }
+            },
+            self.installation_dir,
+        )
+        self.assertNotEqual(denied_extra, {})
         self.assertEqual(
             control.read_snapshot(self.installation_dir, self.secret, "session-a"),
             before,

@@ -679,6 +679,8 @@ def _handle_parent_pretool(
         match = base.get("native_tool_match")
         if tool_name == "wait_agent":
             if isinstance(match, NativeToolMatch) and match.input_schema == "v1_wait":
+                if any(key not in {"targets", "timeout_ms"} for key in tool_input):
+                    raise _invalid("V1 wait accepts targets and timeout_ms only")
                 snapshot = luna_control.read_snapshot(
                     installation_dir, secret, base["session_id"]
                 )
@@ -803,6 +805,9 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             _normalize_event_tool_name(base)
             if base["tool_name"] != "spawn_agent":
                 return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
+            post_tool_input = event.get("tool_input")
+            if isinstance(post_tool_input, Mapping):
+                _discriminate_spawn_profile(base, post_tool_input)
             if (
                 _root_lifecycle_identity(
                     event, base, Path(installation_dir), secret
@@ -811,7 +816,10 @@ def handle_hook_event(event: Mapping[str, Any], installation_dir: Path) -> dict[
             ):
                 raise _invalid("Router actor identity is missing or ambiguous")
             match = base.get("native_tool_match")
-            if isinstance(match, NativeToolMatch) and match.surface_profile == "multi_agent_v1":
+            if isinstance(match, NativeToolMatch) and match.surface_profile in {
+                "multi_agent_v1",
+                "collapsed_v1_spawn",
+            }:
                 luna_control.observe_v1_spawn_result(
                     Path(installation_dir),
                     secret,
