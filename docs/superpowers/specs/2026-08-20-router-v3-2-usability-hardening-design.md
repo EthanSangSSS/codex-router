@@ -2,72 +2,57 @@
 
 ## Status
 
-Approved for implementation on 2026-08-20.
+Approved for implementation on 2026-08-20. This document reflects the final implementation contract rather than the initial spike shape.
 
 ## Problem
 
-Router V3.1 correctly fails closed on authority ambiguity, but several ordinary runtime capability failures are currently escalated into whole-task failure. Live records show three recurring usability failures:
+Router V3.1 correctly fails closed on authority ambiguity, but several ordinary runtime capability failures were escalated into whole-task failure:
 
-1. PRIMARY must append many packet fields to an injected `stage-k1-fields` command prefix. A local/runtime version mismatch or model-authored extra flag can produce `invalid-input / unexpected arguments` before any packet or Luna exists.
-2. The first Luna tool is intentionally denied so K1 can be injected through `PreToolUse.additionalContext`; execution then depends on the model interpreting the denial as a successful bootstrap and issuing another tool in the same turn.
-3. If persistent `followup_task` is unavailable after Gen1, the policy currently returns `BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE` and forbids PRIMARY from continuing, even when Router scheduling authority is already idle and no unsafe state exists.
+1. PRIMARY had to append many semantic packet flags to an injected `stage-k1-fields` prefix. Version drift, quoting, or one model-authored extra flag could fail staging before any packet or Luna existed.
+2. Luna bootstrap intentionally denied the first harmless tool to inject K1, so progress depended on the model treating a denial as successful bootstrap and issuing a second same-turn tool.
+3. When persistent `followup_task` was unavailable after a completed Gen1, Router blocked the entire Codex task even when scheduling authority was mechanically idle and clear.
 
-The result is excessive operational fragility: a capability/compatibility failure is often treated like a security failure.
-
-## Design Principle
+The product rule for V3.2 is:
 
 **Fail closed on safety ambiguity; degrade gracefully on capability failure.**
 
-Router keeps hard blocking semantics for authority and safety properties, while recoverable runtime capability failures may enter a mechanically bounded PRIMARY fallback mode.
+## Safety failures versus capability failures
 
 ### Hard-block class
 
-The following remain fail-closed and may not fall back automatically:
+These remain fail-closed and never authorize automatic PRIMARY fallback:
 
 - missing or ambiguous actor identity;
-- stale or conflicting generation;
-- mismatched Luna identity or target;
-- overlapping active authority;
+- stale/conflicting generation or K1 capability;
+- mismatched Luna identity or lifecycle target;
+- active/overlapping authority;
 - pending or ambiguous spawn correlation;
-- unverified A1 side-effect authorization;
-- unsafe installation/journal state;
-- any state in which Router cannot prove that Luna authority is idle and cleared.
+- unsafe installation or journal state;
+- unverified A1/external side-effect authority;
+- any state in which Router cannot prove scheduling authority is idle and cleared.
 
 ### Capability-degradation class
 
-The following may degrade only when the Router state is mechanically proven fallback-safe:
+These may degrade only when Router mechanically proves `SAFE_LOCAL_FALLBACK`:
 
-- structured staging interface incompatibility before authority mutation;
-- persistent follow-up unavailable on the exact runtime;
+- request-file staging validation/compatibility failure before authority mutation;
+- persistent follow-up unavailable after a completed Luna turn;
 - Luna capacity unavailable before a child is created;
-- completed/closed Luna turn with no supported continuation primitive;
-- runtime exposes a supported Gen1 surface but not the preferred V2 continuation surface.
+- supported Gen1 runtime without the preferred continuation primitive.
 
-A degradation is never evidence that the missing Router property exists.
+Degradation never proves or emulates the missing Router capability.
 
-## 1. Stable K1 request interface
+## 1. Stable `stage-k1-fields --request-file` mode
 
-### Goal
+V3.2 keeps the public `stage-k1-fields` operator name. The active Hook injects one **complete** command; PRIMARY does not append semantic packet flags.
 
-Remove model-authored semantic packet fields from the protected command argv.
+The command contains only Router-owned identity/capability arguments plus:
 
-### Interface
+```text
+--request-file <exact-private-path>
+```
 
-Add a new CLI subcommand:
-
-`stage-k1-request`
-
-The Hook injects a complete command containing only Router-owned identity arguments plus a Router-owned request-file path:
-
-- `--installation-dir`
-- `--session-id`
-- `--root-turn-id`
-- `--capability`
-- `--request-file`
-
-PRIMARY does not append packet flags to this command.
-
-The request file contains exactly one UTF-8 JSON object with this schema:
+PRIMARY writes one UTF-8 JSON object to the exact path carried by that complete command:
 
 ```json
 {
@@ -81,58 +66,54 @@ The request file contains exactly one UTF-8 JSON object with this schema:
 }
 ```
 
-No `generation`, session identity, task/luna epoch, capability, K1 wire, or native agent identity may appear in the request.
+No generation, session identity, task/luna epoch, capability, native agent identity, or K1 wire may appear in the request.
+
+The original flag-based `stage-k1-fields` mode remains a compatibility seam for older installed/session-loaded V3.1 instructions, but new V3.2 instructions use request-file mode.
 
 ### Request-file safety
 
-The Hook derives a request path under the private Router installation directory from keyed session/root-turn tags. It exposes that exact path in the routed context.
+The expected path is derived from keyed session/root-turn tags under the private Router installation `stage-requests` directory. Request handling:
 
-`stage-k1-request` must:
+- requires the exact expected absolute path;
+- opens with no-follow semantics when supported;
+- rejects symlinks and non-regular files;
+- requires current-user ownership;
+- rejects group/world-writable files;
+- normalizes otherwise safe readable files to mode `0600` before reading;
+- enforces the existing Hook input-size bound;
+- requires exactly the seven schema keys above;
+- validates string/list types and an absolute working directory;
+- constructs canonical K1 inside Router;
+- reuses the existing one-time session/root/task/generation capability validation;
+- deletes the same-inode request only after successful staging;
+- retains a failed request for bounded diagnostics;
+- never persists model-authored raw K1.
 
-- require an absolute path inside the installation's dedicated `stage-requests` directory;
-- reject symlinks and non-regular files;
-- require the file to be owned by the current user and mode `0600`;
-- enforce the existing hook input size bound;
-- reject any schema key outside the seven packet-field keys;
-- validate list/string types and the absolute working directory;
-- construct canonical K1 inside Router;
-- validate the one-time root/session/task/generation capability through existing `stage_authority_packet` logic;
-- delete the request file after a successful stage;
-- leave the request file in place on validation failure so diagnostics remain inspectable;
-- never persist model-authored raw K1.
+A request-mode staging error returns the current mechanical `primary_fallback_state`. That is diagnostic state, not authority.
 
-`stage-k1-fields` remains supported as a compatibility seam, but rendered policy and new Hook contexts use `stage-k1-request`.
+## 2. Bootstrap without denial-dependent continuation
 
-## 2. Bootstrap handshake without denial dependency
+The V3.2 live-path bootstrap is tied to the actual Codex Bash Hook schema.
 
-### Goal
+For the first bound-executor `PreToolUse` of a staged generation:
 
-Remove the requirement that Luna must interpret a permission denial as a successful bootstrap signal.
+- exact tool must be `Bash`;
+- exact input must be `{"command":"pwd"}` with no extra fields;
+- exact current/pending Luna identity and staged authority must already validate;
+- Router atomically binds the child turn using the existing authority transition;
+- Router returns `permissionDecision=allow` and canonical K1 in `additionalContext`;
+- the read-only `pwd` probe may execute while K1 is injected;
+- any other first Bash payload is denied **before** executor state is started.
 
-### Mechanism
+Thus no substantive side effect can precede K1, while model continuation no longer depends on interpreting an expected permission denial.
 
-For the first bound-executor `PreToolUse` of a committed generation:
+Older/non-Bash synthetic compatibility paths retain the V3.1 deny-retry behavior so the mature safety core and older wire assumptions remain testable. The active V3.2 installed Luna instructions use the allowlisted Bash/pwd path.
 
-- Router validates exact current/pending Luna identity, current packet, and child turn as before;
-- the first tool must be an exact harmless bootstrap probe;
-- baseline probe is canonical `pwd` with no semantic work payload;
-- Router atomically transitions execution to the current child turn and returns `permissionDecision=allow` plus canonical K1 in `additionalContext`;
-- the probe itself may execute, but no substantive side effect may occur before K1 because only the exact allowlisted read-only probe is accepted as the first tool;
-- any other first tool is denied and receives no authority relaxation.
+Repository tests prove the output/state contract; whether a particular App build visibly delivers `allow + additionalContext` remains a live acceptance fact and is not inferred from tests.
 
-After bootstrap, ordinary tools use the existing packet and policy path. The transient staged wire is cleared on the next authorized same-turn tool as today, or may be cleared immediately if tests prove the runtime preserves `additionalContext` on `allow` without needing a second wire-delivery state.
+## 3. Mechanical PRIMARY fallback
 
-### Compatibility fallback
-
-Because live support for `additionalContext` combined with `allow` must not be assumed, the implementation must include an offline contract test and a clearly separated runtime capability claim. If the exact App runtime later proves that `allow + additionalContext` is not delivered, Router must keep the old deny handshake as a compatibility mode rather than silently weakening authority.
-
-The rendered policy must state which handshake mode is active. The default for V3.2 is `allowlisted_probe` only if the managed Hook contract accepts the output shape in tests; live hard claims remain acceptance evidence until observed.
-
-## 3. Mechanically bounded PRIMARY fallback
-
-### State classification
-
-Add a pure helper that classifies current Router state for PRIMARY fallback:
+`classify_primary_fallback(snapshot)` is pure and returns one of:
 
 - `SAFE_LOCAL_FALLBACK`
 - `BLOCKED_ACTIVE_AUTHORITY`
@@ -141,148 +122,142 @@ Add a pure helper that classifies current Router state for PRIMARY fallback:
 
 `SAFE_LOCAL_FALLBACK` requires all of:
 
-- logical task is `ACTIVE`;
-- execution is `IDLE`;
-- `active_packet_id is None`;
-- `active_child_turn_id is None`;
-- `authority_packet_wire is None`;
-- `pending_spawn is None`.
+- logical task `ACTIVE`;
+- execution `IDLE`;
+- no active packet;
+- no active child turn;
+- no staged authority wire;
+- no pending spawn.
 
-A bound idle Luna identity may remain; fallback does not retire or replace it.
+An already-bound but idle Luna may remain. Fallback does not retire, replace, resume, or send work to it.
 
-### Allowed fallback scope
+### Degraded PRIMARY scope
 
-When Router capability is unavailable and state is `SAFE_LOCAL_FALLBACK`, PRIMARY may continue only ordinary workspace-local development work:
+When a Router capability is missing and the state is `SAFE_LOCAL_FALLBACK`, non-strict PRIMARY may continue only bounded workspace-local work:
 
-- read/inspect repository files;
-- edit files inside the current workspace;
-- run tests/builds/linters;
-- inspect local Git state;
-- perform bounded local debugging.
+- repository reads/inspection;
+- edits inside the current workspace;
+- tests/builds/linters;
+- local Git inspection;
+- bounded local debugging.
 
-Automatic degraded fallback does not authorize:
+Automatic degradation does **not** authorize:
 
 - deploy/publish/release;
-- credential, token, cookie, private-key access;
+- credential/token/cookie/private-key access;
 - cloud/service mutation;
 - package publication;
 - external A1 side effects;
-- privilege or authentication changes;
-- new agent creation/delegation.
+- privilege/authentication changes;
+- new agent creation or delegation.
 
-Those remain blocked unless the user explicitly bypasses Router/directly authorizes a separate flow under native controls.
+Those remain blocked or require a separately explicit direct/native flow.
 
-### Routed context
+## 4. Context compatibility
 
-`UserPromptSubmit` adds:
+V3.2 does not inflate every initial Gen1 Hook context with fallback metadata.
 
-- `capability_failure_policy=degrade_primary_safe_local`
-- `primary_fallback_state=<classification>`
-- `strict_router=<true|false>`
+For a normal fresh Gen1 route, the stable V3.1 route context shape is preserved apart from the complete request-file staging command. This reduces session/runtime compatibility churn.
 
-PRIMARY may use degraded local execution only if the exact injected classification is `SAFE_LOCAL_FALLBACK`.
+The following fields are injected only when capability degradation is operationally relevant (a prior Router epoch exists) or strict mode is explicitly requested:
 
-## 4. Strict Router mode
+```text
+capability_failure_policy=degrade_primary_safe_local
+primary_fallback_state=<mechanical classifier>
+strict_router=<true|false>
+```
 
-Add an exact first-line marker:
+An initial staging error can still communicate `primary_fallback_state` through its structured CLI error result without changing Router authority.
 
-`[CODEX_ROUTER_STRICT]`
+## 5. Strict Router mode
 
-It still classifies the prompt as routed work, but sets `strict_router=true`.
+Exact first non-empty line:
 
-In strict mode any Router capability failure remains fail-closed. There is no automatic PRIMARY fallback.
+```text
+[CODEX_ROUTER_STRICT]
+```
 
-Natural-language phrases such as "must use Router" are not parsed as authority markers; only the exact marker changes this security behavior.
+forces `strict_router=true` and routes the turn. Capability failure then remains fail-closed; automatic PRIMARY degradation is prohibited.
 
-Existing direct/bypass markers keep their current one-turn semantics.
+Natural-language phrases such as “must use Router” are not parsed as a security marker. Existing direct/bypass first-line markers retain their one-turn behavior.
 
-## 5. Follow-up unavailable semantics
+## 6. Follow-up unavailable
 
-`native_surface_compatibility()` continues to report persistent follow-up independently of Gen1 readiness.
+Gen1 readiness and persistent follow-up remain separate capabilities.
 
-`primary_gen2_readiness()` must no longer use `BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE` as the ordinary operational instruction. It should produce a capability classification that distinguishes:
+If `followup_task` is available, PRIMARY stages the next K1 and reuses the same Luna.
 
-- `AVAILABLE`
-- `UNAVAILABLE_DEGRADE_ALLOWED`
-- `UNAVAILABLE_STRICT_BLOCK`
-- `UNKNOWN`
+If follow-up is explicitly unavailable:
 
-The pure capability helper itself must not authorize fallback; fallback authorization always requires the current Router state classification from the Hook context.
+- do not stage Gen2;
+- if non-strict and `primary_fallback_state=SAFE_LOCAL_FALLBACK`, continue bounded local PRIMARY work in the **same Codex task**;
+- if strict or fallback state is not safe, stop fail-closed.
 
-Rendered PRIMARY instructions become:
+V3.2 does not emulate follow-up with `send_input`, `resume_agent`, `send_message`, replacement-spawn loops, polling, sleeps, or `wait_agent` synchronization.
 
-- if follow-up is available, stage the next K1 and reuse the same Luna;
-- if follow-up is unavailable and `strict_router=false` and `primary_fallback_state=SAFE_LOCAL_FALLBACK`, do not stage Gen2 and continue bounded local work as PRIMARY;
-- if strict or state is not fallback-safe, stop fail-closed.
+`primary_gen2_readiness()` retains its V3.1 one-argument compatibility behavior. V3.2-aware callers may additionally classify an unavailable follow-up as `UNAVAILABLE_DEGRADE_ALLOWED`, `UNAVAILABLE_STRICT_BLOCK`, or `UNAVAILABLE_SAFETY_BLOCK` using explicit strict/fallback state. The capability helper itself does not grant authority.
 
-No `send_input`, `resume_agent`, `send_message`, replacement-spawn loop, polling, or wait-as-sync fallback is introduced.
+## 7. PRIMARY model/readiness compatibility
 
-## 6. Staging/spawn/bootstrap failure semantics
+A complete previously-supported V2 collaboration inventory remains sufficient for the legacy PRIMARY admission helper.
 
-A capability failure may degrade only when the state is mechanically safe:
+V3.2 additionally admits a proven V1 Gen1 path when structured sideband staging is positively evidenced, independently of persistent follow-up availability.
 
-- staging request fails before any authority mutation: safe local fallback may be used if injected state classification allows it;
-- no-followup after a completed Luna turn: safe local fallback may be used if state is idle/clear;
-- spawn ambiguity, pending reservation, or active staged authority: block until authority is cleared by existing safe lifecycle handling;
-- bootstrap failure while a Luna turn is active: block; after an exact bound `SubagentStop` clears Router scheduling authority, a later user turn may classify as safe fallback.
+Global Gen1/readiness reporting continues to require the appropriate sideband/native evidence and does not infer follow-up from Gen1 capability.
 
-No new "clear state because it is inconvenient" command is added.
+## 8. New-task requirements
 
-## 7. Session/new-task requirements
-
-A new Codex task remains required for session-loaded configuration changes:
+A new Codex task remains required after session-loaded configuration changes:
 
 - global install/uninstall;
 - Hook trust changes;
-- AGENTS/profile changes from a refreshed live installation.
+- refreshed AGENTS/agent-profile installation.
 
-Ordinary runtime capability failures do not require a new task:
+Ordinary runtime capability failures do **not** inherently require a new task:
 
-- stage request validation failure;
-- no follow-up capability;
-- Luna capacity failure;
+- request staging validation failure with safe state;
+- unavailable follow-up after completed Gen1;
+- capacity failure before spawn;
 - completed Luna turn;
-- safe bootstrap failure after lifecycle closure.
+- a bootstrap failure after the exact lifecycle boundary has returned Router authority to a safe idle state.
 
-## 8. Compatibility/readiness cleanup
+## 9. Offline self-test
 
-Unify model admission/readiness with `native_surface_compatibility()` so a proven supported V1 Gen1 surface is not rejected merely because a complete V2 triad is absent.
+The installed Hook subprocess is still exercised. V3.2 normalizes only the self-test's internal comparison view back to the stable V3.1 route-shape contract so new request mechanics do not cause false failures. Production Hook output is not rewritten for self-test convenience.
 
-Persistent follow-up remains a separate capability and must never be inferred from Gen1 readiness.
-
-## 9. Non-goals
+## 10. Non-goals
 
 V3.2 does not:
 
 - weaken actor/identity correlation;
 - make native messages authoritative;
 - authorize pending identity as a general lifecycle target;
-- use `wait_agent` as binding synchronization;
+- use `wait_agent` as synchronization;
 - make `send_message` a work channel;
 - restore `send_input` or `resume_agent`;
-- add polling/sleep retry as a security primitive;
-- add a daemon/supervisor;
+- add polling/sleep as a security primitive;
+- add a daemon or second control plane;
 - claim K1 scope is an OS sandbox;
-- claim nested Codex is mechanically impossible from an unrestricted shell;
-- automatically perform A1 side effects during degraded PRIMARY mode.
+- claim nested Codex is mechanically impossible from unrestricted shell;
+- automatically perform A1/external side effects during degraded PRIMARY mode.
 
-## 10. Verification
+## 11. Verification contract
 
-Required automated coverage:
+Automated coverage must include:
 
-1. `stage-k1-request` stages an exact canonical packet from the seven-field request schema.
-2. Unknown request keys, unsafe path, symlink, wrong mode, invalid type, oversized file, and replay leave Router authority unchanged.
-3. Rendered routed context contains a complete exact stage command plus request path; it no longer tells PRIMARY to append semantic packet flags.
-4. First Luna bootstrap accepts only the exact harmless probe and injects K1; any substantive first tool is denied.
-5. Safe fallback classification is pure and requires idle/cleared state.
-6. Follow-up unavailable maps to degraded PRIMARY instructions only when non-strict and fallback-safe.
-7. Strict marker prevents degradation.
-8. Existing fail-closed identity, generation, V1/V2 normalization, send-message QueueOnly, and no-descendant tests continue to pass.
-9. V1 Gen1 model/readiness admission remains compatible when sideband staging is proven, independently of follow-up.
-10. Full unit suite, compileall, diff check, fake adapter smoke, wheel build, fresh wheel install/offline self-test, and exact-head GitHub CI/Secret Scan pass.
+1. exact canonical staging through `stage-k1-fields --request-file`;
+2. unknown schema keys, path escape, symlink, group-writable file, invalid list type, relative working directory, and stale capability replay without authority mutation;
+3. safe request permissions normalized to private mode;
+4. complete injected command with no model-appended packet flags;
+5. exact Bash/pwd bootstrap gets `allow + K1`, while substantive/extra-payload first Bash is denied without execution-state mutation;
+6. pure safe-fallback classifier and strict marker behavior;
+7. completed Gen1 exposes safe fallback for continuation while fresh Gen1 keeps the stable route-context shape;
+8. V1 Gen1 admission independent of persistent follow-up while legacy V2 admission remains compatible;
+9. existing identity/generation/V1-V2 normalization/QueueOnly/no-descendant/lifecycle tests remain green;
+10. full unit suite, compileall, diff check, fake-adapter smoke, wheel build, fresh wheel install/offline self-test, and exact-head GitHub CI/Secret Scan pass.
 
-## 11. Live rollout
+## 12. Live rollout
 
 Repository landing and live activation remain separate.
 
-After merge, refresh the live installation from the landed `main`, review/trust managed Hook changes, then start a new Codex task. Existing tasks must not be used to validate session-loaded V3.2 instructions.
+After merge, refresh the live installation from landed `main`, review/trust the managed changes, and start a **new Codex task** before validating session-loaded V3.2 behavior. Existing tasks are not valid evidence for a newly installed policy/profile.
