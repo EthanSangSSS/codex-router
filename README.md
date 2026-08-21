@@ -119,7 +119,7 @@ Luna becomes a Full Executor for the current K1 only after the exact first Codex
 Bash {"command":"pwd"}
 ```
 
-No extra input fields are allowed. Router validates current-generation identity and authority, then returns `permissionDecision=allow` with canonical K1 in developer `additionalContext`. Any other substantive first tool is denied before execution starts. Repository tests prove this output/state contract; a specific Codex App build still requires separate live observation before activation is claimed.
+No extra input fields are allowed. Router validates current-generation identity and authority, then returns a `PreToolUse` `hookSpecificOutput` containing only `hookEventName=PreToolUse` and canonical K1 in `additionalContext`; Codex default-continue semantics allow the exact read-only probe to execute. Any other substantive first tool is denied before execution starts. Repository tests prove this output/state contract; a specific Codex App build still requires separate live observation before activation is claimed.
 
 ### Safe local fallback
 
@@ -322,7 +322,7 @@ The editable installation is required for global-install tests because the produ
 ## Known limitations
 
 - Global Router activation depends on Codex actually loading and trusting the current five managed Hook definitions; a routed policy marker is not independent runtime telemetry.
-- V3.3 repository tests prove the request-file, generation-scoped lifecycle, and Bash/pwd `allow + K1 additionalContext` output/state contracts, but the exact deployed App must still be observed before that behavior is claimed live.
+- V3.3 repository tests prove the request-file, generation-scoped lifecycle, and Bash/pwd context-only `K1 additionalContext` output/state contracts, but the exact deployed App must still be observed before that behavior is claimed live.
 - Live activation must reverify native child identity fields/order and the generated Full Executor Luna effective tool inventory against the exact deployed Codex build. Repository fixtures are not a substitute for that capability check.
 - Current-App turn-boundary mode gives a hard Router scheduling-authority boundary, not a physical OS-process settlement guarantee. `SubagentStop` cannot prove that detached/background processes are gone.
 - Luna intentionally retains ordinary process-capable Full Executor tools, so the current-App profile relies on the explicit policy prohibition against intentional daemonization/detached long-lived background work where no stronger native process boundary is exposed.

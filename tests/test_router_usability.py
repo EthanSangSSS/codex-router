@@ -186,7 +186,7 @@ class RouterUsabilityV33Tests(unittest.TestCase):
         return packet
 
     def _complete_gen1(self) -> None:
-        self._bind_luna_with_packet()
+        packet = self._bind_luna_with_packet()
         bootstrap = handle_hook_event(
             {
                 "hook_event_name": "PreToolUse",
@@ -200,9 +200,12 @@ class RouterUsabilityV33Tests(unittest.TestCase):
             },
             self.installation,
         )
-        self.assertEqual(
-            bootstrap["hookSpecificOutput"]["permissionDecision"], "allow"
-        )
+        hook_output = bootstrap["hookSpecificOutput"]
+        self.assertEqual(hook_output["hookEventName"], "PreToolUse")
+        self.assertEqual(hook_output["additionalContext"], packet)
+        self.assertNotIn("permissionDecision", hook_output)
+        self.assertNotIn("permissionDecisionReason", hook_output)
+        self.assertNotIn("updatedInput", hook_output)
         stopped = handle_hook_event(
             {
                 "hook_event_name": "SubagentStop",
@@ -425,12 +428,12 @@ class RouterUsabilityV33Tests(unittest.TestCase):
             },
             self.installation,
         )
-        self.assertEqual(
-            bootstrap["hookSpecificOutput"]["permissionDecision"], "allow"
-        )
-        self.assertEqual(
-            bootstrap["hookSpecificOutput"]["additionalContext"], packet
-        )
+        hook_output = bootstrap["hookSpecificOutput"]
+        self.assertEqual(hook_output["hookEventName"], "PreToolUse")
+        self.assertEqual(hook_output["additionalContext"], packet)
+        self.assertNotIn("permissionDecision", hook_output)
+        self.assertNotIn("permissionDecisionReason", hook_output)
+        self.assertNotIn("updatedInput", hook_output)
 
     def test_late_worker_a_events_cannot_mutate_active_gen2(self) -> None:
         self._complete_gen1()
@@ -566,14 +569,24 @@ class RouterUsabilityV33Tests(unittest.TestCase):
             self.installation,
         )
 
+        hook_output = output["hookSpecificOutput"]
         self.assertEqual(
-            output["hookSpecificOutput"]["permissionDecision"],
-            "allow",
+            hook_output["hookEventName"],
+            "PreToolUse",
         )
         self.assertEqual(
-            output["hookSpecificOutput"]["additionalContext"],
+            hook_output["additionalContext"],
             packet,
         )
+        self.assertNotIn("permissionDecision", hook_output)
+        self.assertNotIn("permissionDecisionReason", hook_output)
+        self.assertNotIn("updatedInput", hook_output)
+        snapshot = self.snapshot()
+        assert snapshot is not None
+        self.assertEqual(snapshot.execution_status, "RUNNING")
+        self.assertEqual(snapshot.active_packet_id, "packet-v32")
+        self.assertEqual(snapshot.active_child_turn_id, "luna-turn-v32")
+        self.assertEqual(snapshot.luna_agent_id, "luna-v32")
 
     def test_substantive_first_luna_tool_is_denied_before_k1(self) -> None:
         self._bind_luna_with_packet()

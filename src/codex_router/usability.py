@@ -449,11 +449,12 @@ def _install_hook(hook_module: Any, control: Any, policy_module: Any) -> None:
                             return hook_module._pretool_output(
                                 "deny", "Router K1 bootstrap authority is unavailable"
                             )
-                        return hook_module._pretool_output(
-                            "allow",
-                            "Router allowlisted read-only K1 bootstrap probe",
-                            additional_context=packet_wire,
-                        )
+                        return {
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "additionalContext": packet_wire,
+                            }
+                        }
                 except Exception:
                     # Delegate to the mature fail-closed handler; never turn a
                     # diagnostic problem into a permission grant.
