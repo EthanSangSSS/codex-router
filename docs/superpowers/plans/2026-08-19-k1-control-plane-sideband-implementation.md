@@ -1,5 +1,7 @@
 # K1 Control-Plane Sideband Implementation Plan
 
+> **Historical / superseded:** The active lifecycle is V3.3 “Persistent Task, Disposable Luna.” Persistent-worker identity and required-follow-up steps below are non-authoritative history; see [the V3.3 design](../specs/2026-08-20-router-v3-3-persistent-task-disposable-luna-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Move K1 authority off opaque native V2 collaboration messages into a one-shot authenticated Router sideband while preserving generation, scope/A1, persistent-executor, QueueOnly, recovery-overlay, and fail-closed guarantees.

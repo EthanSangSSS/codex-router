@@ -443,7 +443,7 @@ class RouterCliTests(unittest.TestCase):
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("provider-not-configured", completed.stderr)
 
-    def test_global_status_payload_exposes_blocked_v31_acceptance(self):
+    def test_global_status_payload_exposes_blocked_v33_acceptance(self):
         status = GlobalStatus(
             state="installed",
             installation_dir=Path("/tmp/router-installation"),
@@ -457,19 +457,19 @@ class RouterCliTests(unittest.TestCase):
         )
         payload = cli_module._global_status_payload(status)
 
-        self.assertEqual(payload["router_design"], "v3.1")
+        self.assertEqual(payload["router_design"], "v3.3")
         self.assertEqual(payload["live_activation"], "BLOCKED_ACCEPTANCE_GATES")
         self.assertEqual(
             set(payload["live_activation_blockers"]),
             {
-                "G1_STRONG_IDENTITY_PROFILE",
+                "G1_CURRENT_GENERATION_SPAWN_CORRELATION",
                 "G2_SETTLEMENT_OBSERVATION",
                 "G3_ACTOR_ATTRIBUTION",
                 "G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY",
                 "G5_NESTED_CODEX",
                 "G6_NATIVE_AUTHORITY_PROFILE",
                 "G7_A1_CAPABILITY_MATRIX",
-                "G8_RECOVERY_CORRELATION",
+                "G8_STALE_GENERATION_REJECTION",
             },
         )
         self.assertNotIn("G9_ECONOMICS", payload["live_activation_blockers"])

@@ -157,12 +157,18 @@ def install(base) -> None:
             data["current_root_turn_tag"] = None
         if "authority_packet_wire" not in data:
             data["authority_packet_wire"] = None
+        if "retired_luna_agent_tags" not in data:
+            data["retired_luna_agent_tags"] = ()
         expected_fields = set(ControlSnapshot.__dataclass_fields__)
         if set(data) != expected_fields:
             raise base._error("control snapshot schema is invalid")
         for field in packet_metadata_fields:
             if isinstance(data[field], list):
                 data[field] = tuple(data[field])
+        if isinstance(data["retired_luna_agent_tags"], list):
+            data["retired_luna_agent_tags"] = tuple(
+                data["retired_luna_agent_tags"]
+            )
 
         pending = data.get("pending_spawn")
         if pending is not None:
@@ -422,13 +428,18 @@ def install(base) -> None:
             if snapshot.pending_spawn is not None or snapshot.luna_agent_id is not None:
                 raise base._error("a Luna spawn is already pending or bound")
             committed = _commit_staged_packet(snapshot)
+            generation_luna_epoch = base._new_epoch("luna")
             reservation = base.SpawnReservation(
-                task_epoch=committed.task_epoch, luna_epoch=committed.luna_epoch,
+                task_epoch=committed.task_epoch, luna_epoch=generation_luna_epoch,
                 expected_role="luna_worker", root_session_tag=committed.root_session_tag,
                 expected_parent=committed.native_parent_identity, tool_use_id=tool_id,
                 task_path=None, agent_id=None,
             )
-            updated = replace(committed, pending_spawn=reservation)
+            updated = replace(
+                committed,
+                luna_epoch=generation_luna_epoch,
+                pending_spawn=reservation,
+            )
             base._store_snapshot(state, updated)
             return updated
 
@@ -729,6 +740,9 @@ def install(base) -> None:
                 return "STALE"
             updated = replace(
                 snapshot,
+                luna_agent_id=None,
+                luna_task_path=None,
+                pending_spawn=None,
                 active_packet_id=None,
                 active_child_turn_id=None,
                 authority_packet_wire=None,
@@ -736,6 +750,9 @@ def install(base) -> None:
                 intended_write_scope=(),
                 explicit_side_effect_authorizations=(),
                 recovery_baseline=None,
+                retired_luna_agent_tags=base._remember_retired_luna_agent(
+                    snapshot, secret
+                ),
             )
             base._store_snapshot(state, updated)
             return "CURRENT"
@@ -772,10 +789,22 @@ def install(base) -> None:
                     raise base._error(
                         "quiescing turn boundary requires the active child turn"
                     )
-                updated = replace(snapshot, execution_status="PAUSED_SETTLED")
+                updated = replace(
+                    snapshot,
+                    luna_agent_id=None,
+                    luna_task_path=None,
+                    pending_spawn=None,
+                    execution_status="PAUSED_SETTLED",
+                    retired_luna_agent_tags=base._remember_retired_luna_agent(
+                        snapshot, secret
+                    ),
+                )
             elif snapshot.execution_status in {"IDLE", "RUNNING"}:
                 updated = replace(
                     snapshot,
+                    luna_agent_id=None,
+                    luna_task_path=None,
+                    pending_spawn=None,
                     active_packet_id=None,
                     active_child_turn_id=None,
                     authority_packet_wire=None,
@@ -783,6 +812,9 @@ def install(base) -> None:
                     intended_write_scope=(),
                     explicit_side_effect_authorizations=(),
                     recovery_baseline=None,
+                    retired_luna_agent_tags=base._remember_retired_luna_agent(
+                        snapshot, secret
+                    ),
                 )
             else:
                 return "STALE"
@@ -923,6 +955,9 @@ def install(base) -> None:
                 recovery_baseline=None,
                 current_root_turn_tag=previous.current_root_turn_tag,
                 authority_packet_wire=None,
+                retired_luna_agent_tags=base._remember_retired_luna_agent(
+                    previous, secret
+                ),
             )
             base._store_snapshot(state, replacement_snapshot)
             return replacement_snapshot

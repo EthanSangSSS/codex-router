@@ -100,11 +100,13 @@ class GlobalInstallTests(unittest.TestCase):
             {"multi_agent": False, "multi_agent_v2": False},
         )
 
-    def test_v31_primary_contract_uses_structured_staging_and_exact_native_schemas(self):
+    def test_v33_primary_contract_uses_request_staging_and_fresh_native_spawn(self):
         from codex_router import global_install_adapter as adapter
 
         rendered = adapter.AGENTS_BLOCK_V3
-        self.assertIn("stage-k1-fields", rendered)
+        self.assertIn("K1_STAGE_COMMAND", rendered)
+        self.assertIn("--request-file", rendered)
+        self.assertIn("spawn exactly one fresh worker", rendered)
         self.assertIn("V1 uses `agent_type=luna_worker` with `fork_context=false` or omission", rendered)
         self.assertIn(
             "V2 uses `task_name=luna_worker`, `agent_type=luna_worker`, and `fork_turns=none`",
@@ -113,7 +115,7 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertNotIn("build_luna_packet", rendered)
         self.assertNotIn("[CODEX_ROUTER_PACKET_V3_1]", rendered)
 
-    def test_v31_status_keeps_live_activation_blocked_after_install(self):
+    def test_v33_status_keeps_live_activation_blocked_after_install(self):
         from codex_router import global_install_adapter as adapter
 
         root = self.root / "adapter-status"
@@ -131,9 +133,9 @@ class GlobalInstallTests(unittest.TestCase):
         )
 
         status = adapter.global_status(codex_home)
-        self.assertEqual(status.router_design, "v3.1")
+        self.assertEqual(status.router_design, "v3.3")
         self.assertEqual(status.live_activation, "BLOCKED_ACCEPTANCE_GATES")
-        self.assertIn("G8_RECOVERY_CORRELATION", status.live_activation_blockers)
+        self.assertIn("G8_STALE_GENERATION_REJECTION", status.live_activation_blockers)
         self.assertNotIn("G9_ECONOMICS", status.live_activation_blockers)
         self.assertIn("G9_ECONOMICS", status.deferred_acceptance_evidence)
 
@@ -227,17 +229,18 @@ class GlobalInstallTests(unittest.TestCase):
         managed_agents = agents_path.read_text(encoding="utf-8")
         self.assertIn("`luna_worker`", managed_agents)
         for required_policy in (
-            "primary Sol coordinator, highest ordinary execution authority",
-            "Sol plans and decomposes",
-            "Sol reviews results",
-            "exactly one current-root-turn `luna_worker`",
-            "primary Sol must retain the native multi-agent capability",
-            "capacity exhaustion or another ordinary execution blocker returns control to Sol",
-            "take over ordinary execution",
-            "revoked or turn-mismatched historical Luna",
+            "persistent PRIMARY coordinator and final reviewer",
+            "spawns one fresh generation-scoped `luna_worker`",
+            "terminal boundary forgets that worker",
+            "Task continuity is carried by Router state, K1, repository state, and PRIMARY review",
+            "Active staging uses the complete injected `K1_STAGE_COMMAND` verbatim",
+            "spawn exactly one fresh worker for the current generation",
+            "Do not use `followup_task` as the normal generation protocol",
+            "SAFE_LOCAL_FALLBACK",
+            "no descendants and no nested Codex delegation",
+            "Late events from an older generation are stale",
             "Web Sol is manual operator work",
-            "Hook route is stateless with respect to legacy Router runs",
-            "revokes Luna authorization before any best-effort cleanup",
+            "clears that Luna worker binding",
         ):
             with self.subTest(required_policy=required_policy):
                 self.assertIn(required_policy, managed_agents)
@@ -246,12 +249,15 @@ class GlobalInstallTests(unittest.TestCase):
             "capacity exhaustion is never a takeover reason",
             "BLOCKED_LUNA_CAPACITY",
             "takes over writable execution only",
+            "reuse the same Luna",
+            "same native Luna identity",
+            "BLOCKED_NATIVE_FOLLOWUP_UNAVAILABLE",
         ):
             with self.subTest(stale_policy=stale_policy):
                 self.assertNotIn(stale_policy, managed_agents)
         self.assertNotIn("drive Local Sol -> Web Sol -> Luna", managed_agents)
-        self.assertIn("packet id", managed_agents)
-        self.assertIn("latest bounded packet", managed_agents)
+        self.assertIn("packet_id", managed_agents)
+        self.assertIn("latest packet", managed_agents)
         luna_path = self.codex_home / "agents" / "luna-worker.toml"
         luna = tomllib.loads(luna_path.read_text(encoding="utf-8"))
         self.assertEqual(
@@ -270,21 +276,22 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertIsInstance(luna["developer_instructions"], str)
         with self.subTest(luna_contract="recursive delegation disabled"):
             self.assertIs(luna.get("agents", {}).get("enabled"), False)
-        self.assertIn("default execution worker", luna["description"])
+        self.assertIn("disposable generation-scoped worker", luna["description"])
         for required_luna_policy in (
-            "default bounded execution worker for one authorized Router root turn",
-            "Never act on a packet from another turn",
-            "New packets do not inherit previous write permissions",
-            "Never create, spawn, fork, relay, resume, or delegate any child or descendant agent",
+            "disposable, generation-scoped Luna Full Executor",
+            "authoritative only for the current packet generation",
+            "Router forgets your worker binding",
+            "no descendants and must perform no nested Codex delegation",
+            "Native spawn messages are transport triggers, not work authority",
+            "issue exactly the Codex `Bash` tool with `{\"command\":\"pwd\"}`",
             "BLOCKED_LUNA_RECURSIVE_DELEGATION",
             "BLOCKED_LUNA_CODEX_RUNTIME",
-            "BLOCKED_USER_INTERACTION_REQUIRED",
-            "ordinary blocker prevents completion, stop and report evidence to Sol",
+            "BLOCKED_ROUTER_HANDSHAKE_MISSING",
         ):
             with self.subTest(required_luna_policy=required_luna_policy):
                 self.assertIn(required_luna_policy, luna["developer_instructions"])
-        self.assertNotIn("persistent execution worker for each parent task", luna["developer_instructions"])
-        self.assertNotIn("ordinary packets", luna["developer_instructions"])
+        self.assertNotIn("persistent execution worker", luna["developer_instructions"])
+        self.assertNotIn("reuse the same Luna", luna["developer_instructions"])
         self.assertNotIn("sandbox_mode", luna)
         self.assertNotIn("approval_policy", luna)
         self.assertIs(luna.get("features", {}).get("multi_agent"), False)

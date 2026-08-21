@@ -54,77 +54,111 @@ run-<id>/
 
 `state.json` is the sole canonical workflow state. It is committed under a per-run lock with atomic replacement and directory durability. Packets, stage files, events, request, and result are derived views that `router status` can regenerate.
 
-## Global default routing policy (V3.1)
+## Global default routing policy (V3.3 — Persistent Task, Disposable Luna)
 
-The optional global policy routes substantive Codex turns to one persistent native Luna task epoch without adding a daemon, background service, browser bridge, second App instance, or per-prompt legacy Router run. `UserPromptSubmit` classifies each prompt locally and deterministically.
+V3.3 keeps the Router task, K1 generation journal, repository state, and PRIMARY review continuous. A Luna identity is not continuous: every substantive generation uses one fresh, generation-scoped `luna_worker`, and the exact terminal transition forgets that worker. Task continuity therefore never depends on child memory, UUID persistence, or a native agent remaining in the live registry.
+
+`UserPromptSubmit` classifies each prompt locally and deterministically. The global policy adds no daemon, polling loop, browser bridge, second App instance, or per-prompt legacy Router run.
 
 Routing behavior:
 
 1. `[CODEX_ROUTER_DIRECT]` or `本轮不用 Luna` on the first non-empty line applies direct execution to the current turn only; no Luna is created for that turn.
-2. Existing exact first-line `本次不用 Router` or `仅本地执行` bypass markers also apply only to the current turn.
-3. Greetings, thanks, trivial arithmetic, brief concept explanations, current-task metadata, and one-step read-only inspection may run directly.
-4. Changes, reviews, security or architecture work, research, verification, comparisons, decisions, plans, multi-step work, sensitive content, and ambiguity route through Router by default when the Hook is active and trusted.
+2. Exact first-line `本次不用 Router` or `仅本地执行` bypass markers also apply only to the current turn.
+3. `[CODEX_ROUTER_STRICT]` on the exact first non-empty line keeps the turn routed and disables automatic capability degradation for that turn. Natural-language variants are not security markers.
+4. Greetings, thanks, trivial arithmetic, brief concept explanations, current-task metadata, and one-step read-only inspection may run directly.
+5. Changes, reviews, architecture or security work, research, verification, comparisons, plans, and multi-step work route by default when the Hook is active and trusted.
 
-A routed turn injects a policy context equivalent to:
+A routed context identifies the active design explicitly:
 
 ```text
-workflow=persistent_native_luna
+workflow=persistent_task_disposable_luna
 sol_role=plan_review_final_authority
-luna_role=default_execution
-delegation_mode=sequential_work_packets
-luna_lifecycle=persistent_task_epoch
+luna_role=generation_scoped_execution
+delegation_mode=fresh_worker_per_generation
+luna_lifecycle=generation_scoped_disposable
+luna_execution_mode=full_executor_v3_3_generation_scoped
 parent_terminal_policy=hard_authority_pause
-capacity_failure_policy=return_to_sol
 luna_descendant_policy=forbidden
 luna_codex_runtime_policy=forbidden
-interactive_blocker_policy=return_to_sol_or_user
-initial_context_mode=packet_only
-pause_semantics=hard_authority_pause
-sol_supervision=event_driven
-luna_execution_mode=full_executor
 web_mode=manual_operator
 ```
 
-Sol remains the planner, reviewer, and final authority. A routed task has one `luna_worker` per persistent `task_epoch`; sequential packets and bounded corrections reuse that native Luna while the epoch remains valid. A packet replaces the previous packet authority and restates its working directory, allowed paths, forbidden operations, validation, stop conditions, and required output. Intended write-scope changes inside the same native authority profile do not replace Luna.
+### Generation lifecycle and identity
 
-K1 uses a control-plane sideband on current native multi-agent surfaces. For every generation, PRIMARY passes only structured packet fields to `router stage-k1-fields` with the one-time current-root capability; Router constructs canonical K1 before native `spawn_agent` or `followup_task`. The native `message` is a transport trigger, not authority: Router never parses, compares, or searches it for K1 plaintext. `send_message` remains QueueOnly; it cannot consume staged K1 or advance a generation. Sideband routing is compatible only when exact runtime evidence positively exposes `router_stage_k1_exec`; an absent or ambiguous capability remains unknown rather than being inferred from the native tool surface.
+For generation N, PRIMARY stages K1 and spawns exactly one worker. Router correlates the spawn reservation, native worker identity, child turn, actor, packet, and generation only while that generation is active. Two workers cannot consume one generation, and ambiguous correlation fails closed.
 
-`spawn_agent` is admitted only for the Router Luna with `fork_turns=none`. Spawn results and `SubagentStart` are correlated to the exact task/luna epoch, root session, parent, role, task path, and available native agent identity. Ambiguous, stale, resumable-only, or mismatched identities fail closed; transcript JSON and child/root `turn_id` equality are not authorization sources.
+At the exact `SubagentStop`/verified terminal boundary, Router clears the active packet, child turn, pending spawn, current worker id/path, write scope, side-effect authorization, and recovery binding, then returns the execution state to `IDLE`. Generation N+1 stages normally and spawns a new worker B; B may and ordinarily will differ from worker A. Late `PreToolUse` or `SubagentStop` events from A are stale and cannot consume or mutate B's authority.
 
-Luna is a Full Executor for ordinary inspect, research, edit, test, debug, retry, and verification work. Its profile disables only the descendant-agent triad. Ordinary shell/process, Unified Exec, Code Mode, apps, plugins, web, and other runtime capabilities remain available to the extent the target runtime exposes them. Router's narrow lifecycle gate denies descendant/delegation operations while leaving ordinary executor tools under native controls; it is not a broad shell parser or ordinary-tool firewall. The first bound-executor `PreToolUse` for a committed generation is denied before the tool can run and receives canonical K1 as developer `additionalContext`; the next same-turn `PreToolUse` clears the transient wire and then uses ordinary policy. A mismatched turn, an unbound executor, or an active packet with neither a child turn nor staged wire fails closed. Child `UserPromptSubmit` may establish identity only and is not K1 authority.
+`followup_task` is not the normal V3.3 continuation protocol and is not a readiness requirement. A missing historical worker or an unavailable follow-up surface does not block the next generation. Low-level parser compatibility, where retained, carries no cross-generation or task-continuity authority. `send_message` remains QueueOnly; `send_input` and `resume_agent` are forbidden authority fallbacks. Wait, polling, and sleep are not work authority or synchronization primitives.
 
-Hard Authority Pause freezes Router authority immediately. On the current ChatGPT App, Router uses the exact bound-Luna native turn boundary (`SubagentStop`) to close **Router scheduling authority**. That boundary is deliberately narrower than physical process settlement: interrupt acknowledgements, `Interrupted`, timeouts, sleeps, polling, PID observations, and `SubagentStop` itself do not prove that detached or background OS processes are dead. Luna therefore must not intentionally daemonize, detach, or leave long-lived background work running beyond its bounded turn. Late or stale generations cannot regain Router authority.
+### K1 request-file staging
 
-No Luna descendants or nested Codex delegation are permitted by the packet contract and lifecycle gate. The effective target-profile capability and nested-Codex properties remain acceptance claims, not assumptions.
+Router injects one complete `stage-k1-fields --request-file <exact-private-path>` command containing its root/session/task/generation capability. PRIMARY writes exactly these seven fields and runs the injected command verbatim:
 
-A1 hard claims are made only when an explicit packet authorization names a canonical category and the exact runtime surface provides a proven pre-action gate with proven actor attribution. Unknown categories fail at K1, authorizations never inherit across packet generations, and cooperative-only evidence is not presented as a hard claim. A native turn boundary does not prove an external persistent mutation completed safely. `PermissionRequest` is conditional and A1-specific; it is not part of the baseline Hook set.
+```json
+{
+  "packet_id": "...",
+  "objective": "...",
+  "working_directory": "/absolute/path",
+  "intended_write_scope": ["..."],
+  "explicit_side_effect_authorizations": ["..."],
+  "success_criteria": ["..."],
+  "stop_conditions": ["..."]
+}
+```
 
-The managed V3.1 Hook set is exactly:
+PRIMARY does not append semantic argv fields or write generation, session identity, task/luna epoch, capability, native identity, or K1 wire into the request. Router checks the exact absolute path, directory and file ownership/mode, regular-file identity, symlinks, size, UTF-8, exact schema, field types, and replay state before constructing canonical K1. The legacy flag parser remains only as an external compatibility seam.
 
-- `UserPromptSubmit` — route/direct classification, task-epoch context, and immediate freeze of a still-running old generation on supersession;
-- `PreToolUse` — staged K1 parent admission, executor first-tool developer-context handshake, exact bound-Luna execution-start binding, primary lifecycle control, and narrow Luna lifecycle denial;
-- `PostToolUse` — spawn-result reconciliation only;
-- `SubagentStart` — spawn reservation identity reconciliation;
-- `SubagentStop` — exact Luna turn-boundary reconciliation for Router scheduling authority only.
+The native spawn message is a transport trigger, never authority. Exact V1 spawn uses `agent_type=luna_worker` with `fork_context=false` or omission; exact V2 uses `task_name=luna_worker`, `agent_type=luna_worker`, and `fork_turns=none`.
 
-`Stop` and `PermissionRequest` CLI entry points remain callable for safe upgrade compatibility, but neither is rendered by the baseline installer. `SubagentStop` is not a process-kill or physical-settlement Hook. The durable native control journal stores bounded task/luna epochs, packet authority, spawn correlation, execution pause/turn-boundary state, and current identity; it does not persist prompt text, transcripts, model output, or unbounded history.
+### Exact bootstrap
 
-Global readiness is intentionally honest. `global-status` and offline self-test report `live_activation=BLOCKED_ACCEPTANCE_GATES` even when disposable installer invariants pass. The current live blockers are:
+Luna becomes a Full Executor for the current K1 only after the exact first Codex tool/input:
 
 ```text
-G1_STRONG_IDENTITY_PROFILE
+Bash {"command":"pwd"}
+```
+
+No extra input fields are allowed. Router validates current-generation identity and authority, then returns a `PreToolUse` `hookSpecificOutput` containing only `hookEventName=PreToolUse` and canonical K1 in `additionalContext`; Codex default-continue semantics allow the exact read-only probe to execute. Any other substantive first tool is denied before execution starts. Repository tests prove this output/state contract; a specific Codex App build still requires separate live observation before activation is claimed.
+
+### Safe local fallback
+
+Fresh-spawn failure is a capability failure, not automatically a security failure. Router may report `SAFE_LOCAL_FALLBACK` only when the task is active, execution is `IDLE`, and there is no active or staged packet, child turn, pending spawn, or current/stale worker binding. In non-strict mode PRIMARY may then continue bounded workspace-local read, edit, test, build, lint, local-Git inspection, and debugging.
+
+Automatic fallback never authorizes deploy, publish, release, credentials/tokens/cookies/private keys, cloud/service mutation, package publication, external A1 effects, privilege or authentication changes, or agent creation/delegation. Active, pending, stale, ambiguous, or otherwise unsafe authority blocks. Strict mode blocks the same capability failure instead of degrading.
+
+Hard Authority Pause freezes Router scheduling authority immediately. A native terminal event is not proof that detached or background OS processes are dead; Luna must not intentionally daemonize or detach long-lived work. K1 is an authority packet, not an OS sandbox.
+
+No Luna descendants or nested Codex orchestration are permitted. A1 hard claims still require an explicit current-generation authorization, a proven pre-action gate, and proven actor attribution. Authorizations never inherit across generations.
+
+### Hooks and readiness
+
+The managed baseline remains exactly five events:
+
+- `UserPromptSubmit` — routing/strict classification, task state, request command, and mechanical fallback state;
+- `PreToolUse` — current-generation spawn admission, exact K1 bootstrap, actor checks, and lifecycle denials;
+- `PostToolUse` — current-generation spawn-result reconciliation;
+- `SubagentStart` — current-generation worker identity correlation with durable prior-generation replay rejection;
+- `SubagentStop` — exact terminal reconciliation, worker-binding clearance, and one-way retired-worker tagging.
+
+`global-status` and offline self-test keep live activation blocked until target-runtime evidence proves:
+
+```text
+G1_CURRENT_GENERATION_SPAWN_CORRELATION
 G2_SETTLEMENT_OBSERVATION
 G3_ACTOR_ATTRIBUTION
 G4_NO_DESCENDANTS_EFFECTIVE_INVENTORY
 G5_NESTED_CODEX
 G6_NATIVE_AUTHORITY_PROFILE
 G7_A1_CAPABILITY_MATRIX
-G8_RECOVERY_CORRELATION
+G8_STALE_GENERATION_REJECTION
 ```
 
-For the current-App turn-boundary mode, G2 is satisfied only as a Router scheduling-authority claim; it must not be interpreted as physical OS/process settlement. `G9_ECONOMICS` remains deferred acceptance evidence, not a live safety blocker. If the managed Hook is absent, disabled, untrusted, incompatible, or not injected, the turn is **Router inactive/degraded** and must not be reported as `Router: active`.
+`G9_ECONOMICS` remains deferred evidence. No gate requires a worker to survive across generations or requires native follow-up. If Hook loading, trust, identity, or capability evidence is absent or ambiguous, Router does not claim active status.
 
-Install only from a durable Python environment where `codex_router` is installed for the same absolute interpreter recorded in the Hook command. The generated command uses `-E -P -m codex_router` so it cannot depend on the caller's `PYTHONPATH` or working directory. Before changing managed files, installation preflights the exact `UserPromptSubmit` command with a synthetic direct event and requires one valid Router Hook-protocol JSON response. A failed probe leaves managed user files unchanged:
+### Installation and offline self-test
+
+Install only from a durable Python environment where `codex_router` is installed for the exact absolute interpreter recorded in the Hook command. The command uses `-E -P -m codex_router` and does not depend on caller `PYTHONPATH` or working directory:
 
 ```bash
 router global-install \
@@ -139,11 +173,7 @@ router global-install \
   --luna-reasoning "max"
 ```
 
-Installation manages the five V3.1 Router command Hooks listed above, one bounded block in `AGENTS.md`, and one custom Full Executor agent at `agents/luna-worker.toml`. It preserves unrelated Hook groups and user files. The installer does not edit the user's primary `config.toml`, `AGENTS.override.md`, or unrelated agent files.
-
-Because Router does not own the primary Codex `config.toml`, `global-status` performs a read-only compatibility preflight. The global-install default `--local-model inherit` records that PRIMARY uses the current Codex App session model rather than selecting a Sol-named model. Readiness is capability-based: a complete V2 surface (`spawn_agent`, `followup_task`, and `send_message`) or an exact supported V1 spawn surface, together with positively evidenced `router_stage_k1_exec`, may establish safe Gen1 compatibility. Persistent follow-up availability is classified separately as `AVAILABLE`, `UNAVAILABLE`, or `UNKNOWN`; it is never inferred from Gen1 readiness. It classifies statically observable Gen1 primary compatibility as `COMPATIBLE`, `INCOMPATIBLE`, or `UNKNOWN_REQUIRES_CAPABILITY_CHECK` and reports `luna_execution_mode=full_executor_v3_1`, `router_design=v3.1`, and the blocked readiness gates above. Explicitly disabled primary agents, multi-agent capability, sideband staging, or Hooks are incompatible. Ambiguous layered/effective configuration remains unknown rather than being guessed; static configuration alone cannot establish sideband readiness, so `COMPATIBLE` requires positive runtime evidence for `router_stage_k1_exec`.
-
-Original managed files are backed up byte-for-byte under `.codex-router-policy-v1/` with private permissions. The prepared manifest records original and installed digests and modes before any managed write. If the process stops after a managed write, `global-status` reports partial state; the same compatible `global-install` can complete remaining writes, while `global-uninstall` restores exact originals. Recovery validates every target before its first write and refuses post-interruption user edits.
+Installation manages the five Hook commands, one bounded `AGENTS.md` block, and `agents/luna-worker.toml`. It preserves unrelated Hook groups and files and does not edit primary `config.toml` or `AGENTS.override.md`. Original bytes and modes are backed up under `.codex-router-policy-v1/`; refresh and uninstall refuse conflicting user edits.
 
 Inspect or reverse the installation with:
 
@@ -152,9 +182,9 @@ router global-status --codex-home "/absolute/path/to/active-codex-home"
 router global-uninstall --codex-home "/absolute/path/to/active-codex-home"
 ```
 
-Uninstall restores exact original bytes and modes when managed files still match installed hashes. It refuses concurrent or unrelated edits instead of overwriting them. Backups, installation evidence, and legacy Router run state remain. Install/uninstall changes require a new Codex task before session-loaded instructions can change.
+Install/uninstall, Hook trust, and session-loaded policy/profile changes require a new Codex task. A failed request validation or unavailable worker spawn does not inherently require a new task.
 
-The offline self-test deliberately refuses the live default Codex home. Run it only against a disposable installed home:
+The offline self-test deliberately refuses the live default Codex home. Use a disposable home and state directory:
 
 ```bash
 ROUTER_TEST_HOME="$(mktemp -d)"
@@ -168,26 +198,22 @@ router global-self-test --codex-home "$ROUTER_TEST_HOME"
 router global-uninstall --codex-home "$ROUTER_TEST_HOME"
 ```
 
-The self-test invokes the configured Hook command as a child process instead of calling the Hook function in-process. It verifies disposable installer and route invariants without allocating a legacy per-prompt Router run, performs no model/Web/browser/network action, does not activate Hook trust, leaves the configured legacy state root untouched, and does not close the V3.1 live-activation gates.
+The self-test invokes the configured Hook command as a subprocess, performs no model/Web/browser/network action, does not activate Hook trust, leaves the configured legacy state root untouched, and does not close live acceptance gates.
 
 ### Manual App acceptance checklist
 
-Automated repository tests cannot prove App Hook trust, exact deployed child Hook wire fields/order, the post-install Luna tool inventory, or a real Luna model turn. Before treating a live installation as active:
+Automated repository tests do not prove App Hook trust, deployed child identity fields/order, effective target-profile tools, or a real Luna turn. Before treating a later refreshed V3.3 installation as active:
 
-1. Verify the recorded absolute Python interpreter is durable and imports `codex_router` with the configured `-E -P -m codex_router` command.
-2. Verify primary Codex effective configuration has the multi-agent capability Sol needs to create/manage one Luna. Do not globally disable it to enforce child restrictions.
-3. Verify the exact deployed build exposes the required `SubagentStart.agent_id`, `SubagentStop.agent_id`, and Luna-sensitive `PreToolUse` identity fields/order. If trustworthy child identity cannot be established, keep the corresponding V3.1 claim blocked rather than falling back to transcript internals.
-4. Review and trust the exact five managed Router Hook definitions through the supported Codex trust flow. Do not bypass trust with unsafe launch flags.
-5. Start a **new** Codex task after installation/trust changes.
-6. Submit a normal substantive bounded task. Confirm routed context is present, Codex shows `Router: active`, Sol plans, one `luna_worker` executes as a Full Executor, and Sol reviews/finalizes.
-7. Confirm Luna uses the configured model/reasoning, has no usable descendant path, and record the exact nested-Codex/tool-inventory evidence before making a hard claim.
-8. Issue a bounded correction packet and verify the same task-epoch Luna is reused rather than a second Luna being created.
-9. Begin a new turn with `[CODEX_ROUTER_DIRECT]` or `本轮不用 Luna`. Confirm Sol performs that turn directly with no new Luna packet; the next substantive turn reuses the current task epoch when still valid.
-10. Exercise Hard Authority Pause. Confirm a pause freezes Router authority immediately, interrupt acknowledgement is not settlement, and the exact bound-Luna `SubagentStop` advances only Router scheduling authority. Do not report it as proof that detached/background OS work has terminated.
-11. Confirm every enabled A1 hard claim has explicit packet authorization, a proven pre-action gate, and proven actor attribution; otherwise keep it withheld or cooperative-only.
-12. Confirm no per-prompt legacy Router run is created and the configured legacy state root remains untouched by global routing.
-13. Perform any Web Sol consultation manually by copy/paste. Router must not open, close, focus, or automate browser pages.
-14. Run `global-uninstall`, start a new Codex task, and confirm managed Hooks, AGENTS block, and `luna_worker` are gone or restored while explicit legacy Router commands and retained installation evidence remain.
+1. Verify the recorded interpreter and exact five trusted Hook definitions, then start a new Codex task.
+2. Stage a bounded Gen1 request through the complete injected request-file command.
+3. Spawn worker A and observe exact `Bash {"command":"pwd"}` delivery with canonical K1 `additionalContext`.
+4. Observe A's exact terminal boundary and verify Router clears its worker binding.
+5. Stage Gen2 and spawn worker B, with B allowed to differ from A and no follow-up requirement.
+6. Verify late A events cannot affect Gen2 and simultaneous workers cannot consume one generation.
+7. Verify a safe non-strict spawn capability failure degrades locally, while strict or unsafe state blocks.
+8. Verify effective no-descendants, nested-Codex, actor-attribution, and A1 gates before making hard claims.
+9. Keep Web Sol manual and verify no per-prompt legacy Router run is created.
+10. Verify uninstall restores managed files, then start a new task.
 
 ## App-driven workflow
 
@@ -295,11 +321,13 @@ The editable installation is required for global-install tests because the produ
 
 ## Known limitations
 
-- Global Router activation depends on Codex actually loading and trusting the current five managed Hook definitions; `Router: active` is a routed policy marker, not independent runtime telemetry.
+- Global Router activation depends on Codex actually loading and trusting the current five managed Hook definitions; a routed policy marker is not independent runtime telemetry.
+- V3.3 repository tests prove the request-file, generation-scoped lifecycle, and Bash/pwd context-only `K1 additionalContext` output/state contracts, but the exact deployed App must still be observed before that behavior is claimed live.
 - Live activation must reverify native child identity fields/order and the generated Full Executor Luna effective tool inventory against the exact deployed Codex build. Repository fixtures are not a substitute for that capability check.
 - Current-App turn-boundary mode gives a hard Router scheduling-authority boundary, not a physical OS-process settlement guarantee. `SubagentStop` cannot prove that detached/background processes are gone.
 - Luna intentionally retains ordinary process-capable Full Executor tools, so the current-App profile relies on the explicit policy prohibition against intentional daemonization/detached long-lived background work where no stronger native process boundary is exposed.
 - A1 hard claims remain separately withheld unless the exact enabled runtime surface proves a deterministic pre-action gate and actor attribution.
+- Automatic V3.3 degraded PRIMARY mode is intentionally limited to workspace-local development work; it is not an A1 or external-side-effect fallback.
 - The installer does not own primary `config.toml`; compatibility preflight is read-only and ambiguous layered/effective configuration remains `UNKNOWN_REQUIRES_CAPABILITY_CHECK`.
 - App-driven legacy stages still require Codex App or the operator to execute the returned packet and supply bounded evidence files.
 - Real `--adapter-mode real` provider wiring is not configured or validated.

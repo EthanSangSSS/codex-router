@@ -1,5 +1,7 @@
 # Codex Router V3.1 — Persistent Luna Minimal Control Plane
 
+> **Historical / superseded:** The active lifecycle is V3.3 “Persistent Task, Disposable Luna.” Persistent-worker identity and required-follow-up statements below are non-authoritative history; see [the V3.3 design](2026-08-20-router-v3-3-persistent-task-disposable-luna-design.md).
+
 Date: 2026-08-17
 Status: DESIGN REVISED AFTER ADVERSARIAL REVIEW; SECOND-PASS REVIEW REQUIRED; NOT IMPLEMENTED
 Repository: `EthanSangSSS/codex-router`

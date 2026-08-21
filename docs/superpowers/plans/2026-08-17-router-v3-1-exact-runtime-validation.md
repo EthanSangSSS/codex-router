@@ -1,5 +1,7 @@
 # Router V3.1 Exact-Runtime Capability Validation Plan
 
+> **Historical / superseded:** The active lifecycle is V3.3 “Persistent Task, Disposable Luna.” Persistent-worker identity and required-follow-up steps below are non-authoritative history; see [the V3.3 design](../specs/2026-08-20-router-v3-3-persistent-task-disposable-luna-design.md).
+
 Date: 2026-08-17
 Status: V3.1 VALIDATION PLAN; IMPLEMENTATION COMPLETE; LIVE ACTIVATION BLOCKED
 Repository: `EthanSangSSS/codex-router`

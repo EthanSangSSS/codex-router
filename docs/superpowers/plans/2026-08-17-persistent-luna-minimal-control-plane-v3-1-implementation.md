@@ -1,5 +1,7 @@
 # Persistent Luna Minimal Control Plane V3.1 Implementation Plan
 
+> **Historical / superseded:** The active lifecycle is V3.3 “Persistent Task, Disposable Luna.” Persistent-worker identity and required-follow-up steps below are non-authoritative history; see [the V3.3 design](../specs/2026-08-20-router-v3-3-persistent-task-disposable-luna-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the V2 root-turn/revocation/hard-no-process policy with the approved V3.1 persistent-Luna Minimal Control Plane: one Luna per coherent task epoch, Full Executor ordinary capabilities, monotonic packet authority, Hard Authority Pause, narrow A1 authorization, and explicit live-activation acceptance gates.

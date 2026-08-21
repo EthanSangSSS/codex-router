@@ -1,5 +1,7 @@
 # Current-App Turn-Boundary Mode V3.1 Implementation Plan
 
+> **Historical / superseded:** The active lifecycle is V3.3 “Persistent Task, Disposable Luna.” Persistent-worker identity and required-follow-up steps below are non-authoritative history; see [the V3.3 design](../specs/2026-08-20-router-v3-3-persistent-task-disposable-luna-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Wire the approved current-App turn-boundary contract into the existing V3.1 Router so one persistent Luna can be used safely for normal work without claiming physical OS/process settlement.

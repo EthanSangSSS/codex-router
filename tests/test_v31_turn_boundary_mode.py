@@ -369,11 +369,36 @@ class TurnBoundaryHookTests(TurnBoundaryFixture):
         )
         self.assertEqual(completed.execution_status, "IDLE")
         self.assertIsNone(completed.active_packet_id)
+        self.assertIsNone(completed.luna_agent_id)
+        self.assertIsNone(completed.luna_task_path)
 
+        control.reserve_spawn(
+            self.installation_dir,
+            self.secret,
+            "session-a",
+            tool_use_id="spawn-2",
+            task_name="luna_worker",
+            fork_turns="none",
+        )
+        control.observe_spawn_result(
+            self.installation_dir,
+            self.secret,
+            "session-a",
+            tool_use_id="spawn-2",
+            task_path="/root/luna_worker",
+        )
+        control.observe_subagent_start(
+            self.installation_dir,
+            self.secret,
+            "session-a",
+            agent_id="agent-2",
+            agent_type="luna_worker",
+        )
         self.begin_packet(packet_id="packet-2")
         self.assertEqual(
             handle_hook_event(
-                self.subagent_stop(turn="luna-turn-2"), self.installation_dir
+                self.subagent_stop(turn="luna-turn-2", agent_id="agent-2"),
+                self.installation_dir,
             ),
             expected,
         )
@@ -382,6 +407,8 @@ class TurnBoundaryHookTests(TurnBoundaryFixture):
         )
         self.assertEqual(no_tool.execution_status, "IDLE")
         self.assertIsNone(no_tool.active_packet_id)
+        self.assertIsNone(no_tool.luna_agent_id)
+        self.assertIsNone(no_tool.luna_task_path)
 
     def test_mismatched_subagent_stop_does_not_mutate_current_authority(self):
         self.new_task_and_bind()
