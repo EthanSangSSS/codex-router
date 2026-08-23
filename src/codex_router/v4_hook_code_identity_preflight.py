@@ -100,6 +100,9 @@ def _probe_policy_identity(
             )
             context = core._self_test_context(output)
             encoded_output = core.canonical_json_bytes(output).decode("utf-8")
+            echoed_session = session_id in encoded_output
+            echoed_turn = turn_id in encoded_output
+            echoed_prompt = prompt in encoded_output
             if (
                 context.get("protocol") != core.HOOK_CONTEXT_PROTOCOL
                 or context.get("decision") != expected_decision
@@ -108,9 +111,9 @@ def _probe_policy_identity(
                     expected_workflow is not None
                     and context.get("workflow") != expected_workflow
                 )
-                or session_id in encoded_output
-                or turn_id in encoded_output
-                or prompt in encoded_output
+                or echoed_session
+                or echoed_turn
+                or echoed_prompt
             ):
                 observed = "/".join(
                     str(context.get(field))[:80]
@@ -128,8 +131,10 @@ def _probe_policy_identity(
                     "conflict",
                     (
                         "Router hook command policy identity failed preflight "
-                        f"probe={index} observed={observed} expected={expected}"
-                    )[:240],
+                        f"probe={index} observed={observed} expected={expected} "
+                        f"echo_session={echoed_session} echo_turn={echoed_turn} "
+                        f"echo_prompt={echoed_prompt}"
+                    )[:300],
                 )
 
 
