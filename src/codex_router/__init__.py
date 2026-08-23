@@ -14,10 +14,13 @@ _install_router_usability()
 
 # V4 authority extensions install on the dedicated lease-control module. Native
 # terminal notification is optional reconciliation evidence, never an admission
-# prerequisite for the next generation.
+# prerequisite for the next generation. Installation activation only creates or
+# validates an empty/valid V4 journal and never imports V3 authority.
 from . import lease_control as lease_control
+from .lease_control_activation import install as _install_v4_activation
 from .lease_control_terminal import install as _install_v4_terminal_reconciliation
 
+_install_v4_activation(lease_control)
 _install_v4_terminal_reconciliation(lease_control)
 
 # V4 lease fencing is an intentionally narrow Hook overlay installed after the
