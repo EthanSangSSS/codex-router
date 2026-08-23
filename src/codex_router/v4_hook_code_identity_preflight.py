@@ -112,8 +112,24 @@ def _probe_policy_identity(
                 or turn_id in encoded_output
                 or prompt in encoded_output
             ):
+                observed = "/".join(
+                    str(context.get(field))[:80]
+                    for field in ("decision", "reason", "workflow")
+                )
+                expected = "/".join(
+                    str(value)[:80]
+                    for value in (
+                        expected_decision,
+                        expected_reason,
+                        expected_workflow,
+                    )
+                )
                 raise core._error(
-                    "conflict", "Router hook command policy identity failed preflight"
+                    "conflict",
+                    (
+                        "Router hook command policy identity failed preflight "
+                        f"probe={index} observed={observed} expected={expected}"
+                    )[:240],
                 )
 
 
