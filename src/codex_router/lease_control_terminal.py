@@ -57,7 +57,15 @@ def install(base) -> None:
             if lease.worker_agent_id != agent or lease.child_turn_id != child:
                 return snapshot, "STALE"
 
-            updated = replace(snapshot, active_lease=None)
+            # Exact terminal closes both the lease and the root-turn staging
+            # authority in the same journal transaction. The completed session
+            # is then fully idle and may be reclaimed later under capacity
+            # pressure without invalidating any live command or worker lease.
+            updated = replace(
+                snapshot,
+                active_lease=None,
+                current_root_turn_tag=None,
+            )
             base._store_snapshot(state, updated)
             return updated, "CURRENT"
 
