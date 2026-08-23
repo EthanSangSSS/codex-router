@@ -36,9 +36,9 @@ _install_v4_terminal_hook(_hook)
 
 # Patch the installer adapter. The V3.3 usability installer imports cli.py
 # eagerly, so cli may already have copied pre-V4 function objects into module
-# globals before this point. Refresh those bindings after all V4 overlays are
-# installed; otherwise fresh ``python -m codex_router`` Hook subprocesses can
-# keep dispatching the V3 handler even while in-process hook calls use V4.
+# globals before this point. Refresh those bindings after all V4 Hook overlays
+# are installed; otherwise fresh ``python -m codex_router`` Hook subprocesses
+# can dispatch an earlier handler while in-process hook calls use the final one.
 from . import global_install as _global_install_core
 from .v4_hook_code_identity_preflight import (
     install as _install_v4_hook_code_identity_preflight,
@@ -57,13 +57,13 @@ from . import cli as _cli
 from .v4_cli import install as _install_v4_cli
 from .v4_request_staging import install as _install_v4_request_staging
 
-_cli.handle_hook_event = _hook.handle_hook_event
 _cli.global_install = _global_install_adapter.global_install
 _cli.global_status = _global_install_adapter.global_status
 _cli.global_uninstall = _global_install_adapter.global_uninstall
 _cli.global_self_test = _global_install_adapter.global_self_test
 _install_v4_cli(_cli)
 _install_v4_request_staging(_hook, _cli)
+_cli.handle_hook_event = _hook.handle_hook_event
 
 __all__ = [
     "Router",
