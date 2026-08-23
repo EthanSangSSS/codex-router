@@ -207,19 +207,36 @@ def _handle_v4_root_spawn_pre(
         tool_input = event.get("tool_input")
         if not isinstance(tool_input, Mapping):
             raise lease_control._error("V4 spawn tool_input must be an object")
-        expected_keys = {"task_name", "agent_type", "fork_turns", "message"}
-        if set(tool_input) != expected_keys:
-            raise lease_control._error("V4 spawn input schema is invalid")
+        hook_module._discriminate_spawn_profile(base, tool_input)
         expected_capability = lease_control.build_bootstrap_capability(secret, lease)
         expected_message = spawn_message(expected_capability)
-        if tool_input.get("task_name") != lease.expected_task_name:
-            raise lease_control._error("V4 spawn task_name does not match current lease")
-        if tool_input.get("agent_type") != "luna_worker":
-            raise lease_control._error("V4 spawn agent_type must be luna_worker")
-        if tool_input.get("fork_turns") != "none":
-            raise lease_control._error("V4 spawn must use fork_turns=none")
-        if tool_input.get("message") != expected_message:
-            raise lease_control._error("V4 spawn message does not match current lease")
+        match = base.get("native_tool_match")
+        is_v1 = (
+            isinstance(match, hook_module.NativeToolMatch)
+            and match.surface_profile in {"multi_agent_v1", "collapsed_v1_spawn"}
+        )
+        if is_v1:
+            allowed_v1_keys = (
+                {"agent_type", "message"},
+                {"agent_type", "fork_context", "message"},
+            )
+            if set(tool_input) not in allowed_v1_keys:
+                raise lease_control._error("V4 V1 spawn input schema is invalid")
+            hook_module._v1_spawn_projection(tool_input, match.surface_profile)
+            if tool_input.get("message") != expected_message:
+                raise lease_control._error("V4 spawn message does not match current lease")
+        else:
+            expected_keys = {"task_name", "agent_type", "fork_turns", "message"}
+            if set(tool_input) != expected_keys:
+                raise lease_control._error("V4 spawn input schema is invalid")
+            if tool_input.get("task_name") != lease.expected_task_name:
+                raise lease_control._error("V4 spawn task_name does not match current lease")
+            if tool_input.get("agent_type") != "luna_worker":
+                raise lease_control._error("V4 spawn agent_type must be luna_worker")
+            if tool_input.get("fork_turns") != "none":
+                raise lease_control._error("V4 spawn must use fork_turns=none")
+            if tool_input.get("message") != expected_message:
+                raise lease_control._error("V4 spawn message does not match current lease")
         lease_control.reserve_spawn(
             installation_dir,
             secret,
