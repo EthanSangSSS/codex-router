@@ -11,6 +11,7 @@ class HookCodeIdentityPreflightTests(unittest.TestCase):
         reason: str,
         *,
         workflow: str | None = None,
+        extra: dict | None = None,
     ) -> dict:
         import json
         from codex_router import hook
@@ -22,6 +23,8 @@ class HookCodeIdentityPreflightTests(unittest.TestCase):
         }
         if workflow is not None:
             context["workflow"] = workflow
+        if extra is not None:
+            context.update(extra)
         return {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
@@ -69,6 +72,13 @@ class HookCodeIdentityPreflightTests(unittest.TestCase):
                         "route",
                         "substantive_request",
                         workflow="generation_lease_v4",
+                        extra={
+                            "K1_STAGE_COMMAND": (
+                                "python -m codex_router stage-k1-fields "
+                                f"--session-id {event['session_id']} "
+                                f"--root-turn-id {event['turn_id']}"
+                            )
+                        },
                     )
                 return self._output("direct", "casual_greeting")
 
