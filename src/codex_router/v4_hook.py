@@ -19,6 +19,15 @@ from .v4_cli import spawn_message
 _BOOTSTRAP_COMMAND_RE = re.compile(
     r"\Apwd # CODEX_ROUTER_LEASE_BOOTSTRAP_V4=(v4b1\.[0-9a-f]{64})\Z"
 )
+_K1_REQUEST_SCHEMA = {
+    "packet_id": "non-empty UTF-8 string",
+    "objective": "non-empty UTF-8 string",
+    "working_directory": "absolute path string",
+    "intended_write_scope": "array[string]",
+    "explicit_side_effect_authorizations": "array[string]",
+    "success_criteria": "array[string]",
+    "stop_conditions": "array[string]",
+}
 _INSTALLED = False
 
 
@@ -152,6 +161,7 @@ def _handle_v4_root_prompt(
             "native_cleanup_policy": "independent_from_router_authority",
             "K1_STAGE_CAPABILITY": stage_capability,
             "K1_STAGE_COMMAND": stage_command,
+            "K1_REQUEST_SCHEMA": dict(_K1_REQUEST_SCHEMA),
             "spawn_contract": (
                 "Run K1_STAGE_COMMAND with the bounded K1 fields first and use the actually "
                 "exposed native spawn surface. V2: spawn the returned task_name with "
