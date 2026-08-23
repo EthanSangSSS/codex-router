@@ -642,3 +642,53 @@ def observe_subagent_start(
     with _locked_state(Path(directory), mutate=False) as state:
         snapshot = _record_for_session(state, tag)
         return snapshot, "NOOP"
+
+
+def authorize_executor_tool(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    agent_id: str,
+    agent_type: str,
+    child_turn_id: str,
+    bootstrap_capability: str | None,
+) -> tuple[LeaseSnapshot, str | None]:
+    """Bind or validate the exact native worker for the current V4 lease."""
+    agent = _text(agent_id, "executor agent_id")
+    role = _text(agent_type, "executor agent_type")
+    child = _text(child_turn_id, "executor child_turn_id")
+    assert agent is not None and role is not None and child is not None
+    if role != "luna_worker":
+        raise _error("executor agent_type must be luna_worker")
+
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        lease = snapshot.active_lease
+        if lease is None:
+            raise _error("Luna tool has no active V4 lease")
+
+        if lease.status == "STAGED":
+            if lease.worker_agent_id is not None or lease.child_turn_id is not None:
+                raise _error("staged V4 lease has inconsistent worker identity")
+            if bootstrap_capability is None:
+                raise _error("current V4 lease bootstrap capability is required")
+            verify_bootstrap_capability(secret, lease, bootstrap_capability)
+            updated_lease = replace(
+                lease,
+                worker_agent_id=agent,
+                child_turn_id=child,
+                status="ACTIVE",
+            )
+            updated = replace(snapshot, active_lease=updated_lease)
+            _store_snapshot(state, updated)
+            return updated, lease.authority_packet_wire
+
+        if lease.status != "ACTIVE":
+            raise _error("current V4 lease status is invalid for executor work")
+        if lease.worker_agent_id != agent:
+            raise _error("executor agent_id does not match the current V4 lease")
+        if lease.child_turn_id != child:
+            raise _error("executor child turn does not match the current V4 lease")
+        return snapshot, None
