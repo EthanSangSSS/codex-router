@@ -46,8 +46,10 @@ _install_v4_global_install(
 
 from . import cli as _cli
 from .v4_cli import install as _install_v4_cli
+from .v4_request_staging import install as _install_v4_request_staging
 
 _install_v4_cli(_cli)
+_install_v4_request_staging(_hook, _cli)
 _cli.global_self_test = _global_install_adapter.global_self_test
 
 __all__ = [
