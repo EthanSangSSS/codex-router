@@ -46,7 +46,7 @@ from .v4_hook_code_identity_preflight import (
 from . import global_install_adapter as _global_install_adapter
 from .v4_install_adapter import install as _install_v4_global_install
 
-_install_v4_hook_code_identity_preflight(_global_install_core)
+_install_v4_hook_code_identity_preflight(_global_install_core, lease_control)
 _install_v4_global_install(
     _global_install_adapter,
     _global_install_core,
