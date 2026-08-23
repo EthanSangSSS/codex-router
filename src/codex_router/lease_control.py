@@ -30,6 +30,7 @@ _TASK_EPOCH_RE = re.compile(r"task-[0-9a-f]{32}\Z")
 _LEASE_ID_RE = re.compile(r"lease-[0-9a-f]{32}\Z")
 _TASK_NAME_RE = re.compile(r"luna_g[1-9][0-9]*_[0-9a-f]{8}\Z")
 _BOOTSTRAP_CAPABILITY_RE = re.compile(r"v4b1\.[0-9a-f]{64}\Z")
+_STAGE_CAPABILITY_RE = re.compile(r"v4s1\.[0-9a-f]{64}\Z")
 
 LeaseStatus = Literal["STAGED", "ACTIVE"]
 ObservationDisposition = Literal["CURRENT", "STALE", "NOOP"]
@@ -62,6 +63,7 @@ class LeaseSnapshot:
     generation: int
     active_lease: LeaseRecord | None
     retired_worker_tags: tuple[str, ...] = ()
+    current_root_turn_tag: str | None = None
 
 
 _SNAPSHOT_FIELDS = frozenset(LeaseSnapshot.__dataclass_fields__)
@@ -179,6 +181,54 @@ def verify_bootstrap_capability(
         raise _error("bootstrap capability does not match the current lease")
 
 
+def _stage_capability_mac(
+    secret: bytes, snapshot: LeaseSnapshot, *, root_turn_id: str
+) -> str:
+    key = _secret(secret)
+    validate_snapshot(snapshot)
+    expected_root = _root_turn_tag(secret, root_turn_id)
+    if (
+        snapshot.current_root_turn_tag is None
+        or not hmac.compare_digest(snapshot.current_root_turn_tag, expected_root)
+    ):
+        raise _error("stage capability root turn is not current")
+    fields = (
+        snapshot.root_session_tag,
+        snapshot.task_epoch,
+        str(snapshot.generation + 1),
+        snapshot.current_root_turn_tag,
+    )
+    payload = b"v4-stage-capability\0" + b"\0".join(
+        field.encode("utf-8", errors="strict") for field in fields
+    )
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def build_stage_capability(
+    secret: bytes, snapshot: LeaseSnapshot, *, root_turn_id: str
+) -> str:
+    """Return a current-root, next-generation staging capability."""
+    return f"v4s1.{_stage_capability_mac(secret, snapshot, root_turn_id=root_turn_id)}"
+
+
+def verify_stage_capability(
+    secret: bytes,
+    snapshot: LeaseSnapshot,
+    *,
+    root_turn_id: str,
+    capability: str,
+) -> None:
+    candidate = _text(capability, "stage capability")
+    assert candidate is not None
+    if _STAGE_CAPABILITY_RE.fullmatch(candidate) is None:
+        raise _error("stage capability is invalid")
+    expected = build_stage_capability(
+        secret, snapshot, root_turn_id=root_turn_id
+    )
+    if not hmac.compare_digest(candidate, expected):
+        raise _error("stage capability does not match current root authority")
+
+
 def _authority_packet_wire(value: Any) -> tuple[str, dict[str, Any]]:
     if not isinstance(value, str) or not value:
         raise _error("authority_packet_wire is invalid")
@@ -254,6 +304,13 @@ def validate_snapshot(snapshot: LeaseSnapshot) -> None:
         raise _error("root_session_tag is invalid")
     if not isinstance(snapshot.generation, int) or isinstance(snapshot.generation, bool) or snapshot.generation < 0:
         raise _error("generation is invalid")
+    root_turn_tag = _text(
+        snapshot.current_root_turn_tag,
+        "current_root_turn_tag",
+        optional=True,
+    )
+    if root_turn_tag is not None and _TAG_RE.fullmatch(root_turn_tag) is None:
+        raise _error("current_root_turn_tag is invalid")
     retired = _text_sequence(
         snapshot.retired_worker_tags,
         "retired_worker_tags",
@@ -287,9 +344,14 @@ def _lease_from_mapping(value: Any) -> LeaseRecord:
 
 
 def _snapshot_from_mapping(value: Any) -> LeaseSnapshot:
-    if not isinstance(value, Mapping) or set(value) != _SNAPSHOT_FIELDS:
+    if not isinstance(value, Mapping):
         raise _error("lease snapshot schema is invalid")
     data = dict(value)
+    legacy_fields = _SNAPSHOT_FIELDS - {"current_root_turn_tag"}
+    if set(data) == legacy_fields:
+        data["current_root_turn_tag"] = None
+    elif set(data) != _SNAPSHOT_FIELDS:
+        raise _error("lease snapshot schema is invalid")
     if isinstance(data["retired_worker_tags"], list):
         data["retired_worker_tags"] = tuple(data["retired_worker_tags"])
     if data["active_lease"] is not None:
@@ -478,6 +540,7 @@ def initialize_session(directory: Path, secret: bytes, session_id: str) -> Lease
             generation=0,
             active_lease=None,
             retired_worker_tags=(),
+            current_root_turn_tag=None,
         )
         _store_snapshot(state, snapshot)
         return snapshot
@@ -492,6 +555,57 @@ def read_snapshot(directory: Path, secret: bytes, session_id: str) -> LeaseSnaps
         return _snapshot_from_mapping(record)
 
 
+def set_current_root_turn(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    turn_id: str | None,
+) -> LeaseSnapshot:
+    """Bind or clear the current root-turn authority without changing generation."""
+    tag = session_tag(secret, session_id)
+    root_tag = None if turn_id is None else _root_turn_tag(secret, turn_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        if snapshot.current_root_turn_tag == root_tag:
+            return snapshot
+        updated = replace(snapshot, current_root_turn_tag=root_tag)
+        _store_snapshot(state, updated)
+        return updated
+
+
+def _stage_lease_from_snapshot(
+    snapshot: LeaseSnapshot,
+    secret: bytes,
+    *,
+    root_turn_id: str,
+    packet_wire: str,
+) -> LeaseSnapshot:
+    if snapshot.active_lease is not None:
+        raise _error("current V4 lease must be revoked before staging another")
+    wire, packet = _authority_packet_wire(packet_wire)
+    generation = snapshot.generation + 1
+    if packet["generation"] != generation:
+        raise _error("staged lease generation is not current")
+    lease_id = _new_lease_id()
+    lease = LeaseRecord(
+        lease_id=lease_id,
+        task_epoch=snapshot.task_epoch,
+        generation=generation,
+        root_session_tag=snapshot.root_session_tag,
+        root_turn_tag=_root_turn_tag(secret, root_turn_id),
+        packet_id=packet["packet_id"],
+        authority_packet_wire=wire,
+        expected_task_name=_expected_task_name(generation, lease_id),
+        status="STAGED",
+        intended_write_scope=tuple(packet["intended_write_scope"]),
+        explicit_side_effect_authorizations=tuple(
+            packet["explicit_side_effect_authorizations"]
+        ),
+    )
+    return replace(snapshot, generation=generation, active_lease=lease)
+
+
 def stage_lease(
     directory: Path,
     secret: bytes,
@@ -500,37 +614,44 @@ def stage_lease(
     root_turn_id: str,
     packet_wire: str,
 ) -> LeaseSnapshot:
+    """Low-level trusted staging API retained for unit-level state construction."""
     tag = session_tag(secret, session_id)
     with _locked_state(Path(directory), mutate=True) as state:
         snapshot = _record_for_session(state, tag)
-        if snapshot.active_lease is not None:
-            raise _error("current V4 lease must be revoked before staging another")
-        wire, packet = _authority_packet_wire(packet_wire)
-        generation = snapshot.generation + 1
-        if packet["generation"] != generation:
-            raise _error("staged lease generation is not current")
-        lease_id = _new_lease_id()
-        lease = LeaseRecord(
-            lease_id=lease_id,
-            task_epoch=snapshot.task_epoch,
-            generation=generation,
-            root_session_tag=snapshot.root_session_tag,
-            root_turn_tag=_root_turn_tag(secret, root_turn_id),
-            packet_id=packet["packet_id"],
-            authority_packet_wire=wire,
-            expected_task_name=_expected_task_name(generation, lease_id),
-            status="STAGED",
-            intended_write_scope=tuple(packet["intended_write_scope"]),
-            explicit_side_effect_authorizations=tuple(
-                packet["explicit_side_effect_authorizations"]
-            ),
+        updated = _stage_lease_from_snapshot(
+            snapshot,
+            secret,
+            root_turn_id=root_turn_id,
+            packet_wire=packet_wire,
         )
-        updated = LeaseSnapshot(
-            task_epoch=snapshot.task_epoch,
-            root_session_tag=snapshot.root_session_tag,
-            generation=generation,
-            active_lease=lease,
-            retired_worker_tags=snapshot.retired_worker_tags,
+        _store_snapshot(state, updated)
+        return updated
+
+
+def stage_authorized_lease(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    root_turn_id: str,
+    capability: str,
+    packet_wire: str,
+) -> LeaseSnapshot:
+    """Verify current root authority and stage in one locked transaction."""
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        verify_stage_capability(
+            secret,
+            snapshot,
+            root_turn_id=root_turn_id,
+            capability=capability,
+        )
+        updated = _stage_lease_from_snapshot(
+            snapshot,
+            secret,
+            root_turn_id=root_turn_id,
+            packet_wire=packet_wire,
         )
         _store_snapshot(state, updated)
         return updated
@@ -545,13 +666,7 @@ def revoke_current_lease(
         snapshot = _record_for_session(state, tag)
         if snapshot.active_lease is None:
             return snapshot
-        updated = LeaseSnapshot(
-            task_epoch=snapshot.task_epoch,
-            root_session_tag=snapshot.root_session_tag,
-            generation=snapshot.generation,
-            active_lease=None,
-            retired_worker_tags=snapshot.retired_worker_tags,
-        )
+        updated = replace(snapshot, active_lease=None)
         _store_snapshot(state, updated)
         return updated
 
