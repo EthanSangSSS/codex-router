@@ -61,6 +61,20 @@ class V4InstalledPolicyTests(unittest.TestCase):
         self.assertNotIn("V2 uses `task_name=luna_worker`", agents)
         self.assertNotIn('`Bash` tool with `{"command":"pwd"}`', agents)
 
+    def test_installed_primary_policy_exposes_v1_and_v2_spawn_transports(self):
+        self._install()
+        agents = (self.codex_home / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("V1", agents)
+        self.assertIn("V2", agents)
+        self.assertIn("multi_agent_v1__spawn_agent", agents)
+        self.assertIn("fork_context=false", agents)
+        self.assertIn("task_name", agents)
+        self.assertIn("fork_turns=none", agents)
+        self.assertIn("spawn_message", agents)
+        self.assertIn("does not carry `task_name` or `fork_turns`", agents)
+        self.assertIn("Router lease identity", agents)
+
     def test_installed_luna_policy_uses_capability_bound_bootstrap(self):
         self._install()
         luna = (
