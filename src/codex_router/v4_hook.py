@@ -223,8 +223,6 @@ def _handle_v4_root_spawn_pre(
         if not isinstance(tool_input, Mapping):
             raise lease_control._error("V4 spawn tool_input must be an object")
         hook_module._discriminate_spawn_profile(base, tool_input)
-        expected_capability = lease_control.build_bootstrap_capability(secret, lease)
-        expected_message = spawn_message(expected_capability)
         match = base.get("native_tool_match")
         is_v1 = (
             isinstance(match, hook_module.NativeToolMatch)
@@ -238,6 +236,8 @@ def _handle_v4_root_spawn_pre(
             if set(tool_input) not in allowed_v1_keys:
                 raise lease_control._error("V4 V1 spawn input schema is invalid")
             hook_module._v1_spawn_projection(tool_input, match.surface_profile)
+            expected_capability = lease_control.build_bootstrap_capability(secret, lease)
+            expected_message = spawn_message(expected_capability)
             if tool_input.get("message") != expected_message:
                 raise lease_control._error("V4 spawn message does not match current lease")
         else:
@@ -250,8 +250,14 @@ def _handle_v4_root_spawn_pre(
                 raise lease_control._error("V4 spawn agent_type must be luna_worker")
             if tool_input.get("fork_turns") != "none":
                 raise lease_control._error("V4 spawn must use fork_turns=none")
-            if tool_input.get("message") != expected_message:
-                raise lease_control._error("V4 spawn message does not match current lease")
+            message = tool_input.get("message")
+            if not isinstance(message, str) or not message:
+                raise lease_control._error("V4 V2 spawn message is invalid")
+            # Codex V2 encrypts spawn_agent.message before the blocking
+            # PreToolUse hook. This boundary can validate only the visible
+            # generation/task envelope; it must not treat opaque ciphertext as
+            # Router authority. Worker authority remains unbound until the
+            # exact current capability is proven by the first child PreToolUse.
         lease_control.reserve_spawn(
             installation_dir,
             secret,
