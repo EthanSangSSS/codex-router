@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
+import json
 from pathlib import Path
 import threading
 from typing import Any, Iterator
@@ -80,10 +81,38 @@ def install(adapter_module: Any, core_module: Any, lease_control: Any) -> None:
     if _INSTALLED:
         return
 
+    original_install_hook_v3 = adapter_module.install_hook_v3
     original_global_install = adapter_module.global_install
     original_global_status = adapter_module.global_status
     original_global_uninstall = adapter_module.global_uninstall
     original_global_self_test = adapter_module.global_self_test
+
+    def install_hook_v4(*args, **kwargs):
+        rendered = original_install_hook_v3(*args, **kwargs)
+        document = json.loads(rendered)
+        hooks = document.get("hooks") if isinstance(document, dict) else None
+        groups = hooks.get("SubagentStop") if isinstance(hooks, dict) else None
+        if isinstance(groups, list):
+            for group in groups:
+                handlers = group.get("hooks") if isinstance(group, dict) else None
+                if not isinstance(handlers, list):
+                    continue
+                for handler in handlers:
+                    if isinstance(handler, dict):
+                        handler.pop("additionalContextLimit", None)
+        return (
+            json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True).encode(
+                "utf-8"
+            )
+            + b"\n"
+        )
+
+    # _rendering_adapter resolves install_hook_v3 by module-global name at call
+    # time. Patch both the canonical V3 renderer name and its compatibility
+    # alias so direct callers and managed installation produce the same V4
+    # config. SubagentStop cannot emit additionalContext in current Codex.
+    adapter_module.install_hook_v3 = install_hook_v4
+    adapter_module.install_hook_v2 = install_hook_v4
 
     @contextmanager
     def v4_policy() -> Iterator[None]:
