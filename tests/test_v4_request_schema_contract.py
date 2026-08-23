@@ -24,8 +24,8 @@ ROLE_CONFIG = {
 }
 
 EXPECTED_SCHEMA = {
-    "packet_id": "non-empty string",
-    "objective": "non-empty string",
+    "packet_id": "non-empty UTF-8 string",
+    "objective": "non-empty UTF-8 string",
     "working_directory": "absolute path string",
     "intended_write_scope": "array[string]",
     "explicit_side_effect_authorizations": "array[string]",
@@ -58,7 +58,7 @@ class V4RequestSchemaContractTests(unittest.TestCase):
                 "hook_event_name": "UserPromptSubmit",
                 "session_id": "schema-session",
                 "turn_id": "schema-turn",
-                "prompt": "Read project metadata and report the bounded result.",
+                "prompt": "Implement a bounded repository change and verify the result.",
                 "cwd": str(self.root),
             },
             self.installation,
