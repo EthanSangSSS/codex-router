@@ -165,6 +165,24 @@ class V4RootWiringTests(unittest.TestCase):
             capability=context["K1_STAGE_CAPABILITY"],
         )
 
+    def test_routed_root_exposes_v1_and_v2_spawn_transport_contracts(self):
+        output = handle_hook_event(
+            self.root_event(
+                "Implement a bounded repository change.",
+                turn_id="transport-root-turn",
+            ),
+            self.installation,
+        )
+
+        contract = self.context(output)["spawn_contract"]
+        self.assertIn("multi_agent_v1__spawn_agent", contract)
+        self.assertIn("fork_context", contract)
+        self.assertIn("task_name", contract)
+        self.assertIn("fork_turns=none", contract)
+        self.assertIn("spawn_message", contract)
+        self.assertIn("V1", contract)
+        self.assertIn("V2", contract)
+
     def test_v4_stage_fields_returns_generation_scoped_spawn_contract(self):
         route_output = handle_hook_event(
             self.root_event(
