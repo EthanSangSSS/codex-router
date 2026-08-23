@@ -104,6 +104,22 @@ class V4SpawnWiringTests(unittest.TestCase):
             "tool_input": tool_input,
         }
 
+    def pre_v1_spawn_event(self, result, *, turn_id: str, tool_use_id: str, **overrides):
+        tool_input = {
+            "agent_type": "luna_worker",
+            "fork_context": False,
+            "message": result["spawn_message"],
+        }
+        tool_input.update(overrides)
+        return {
+            "hook_event_name": "PreToolUse",
+            "session_id": self.session_id,
+            "turn_id": turn_id,
+            "tool_name": "multi_agent_v1__spawn_agent",
+            "tool_use_id": tool_use_id,
+            "tool_input": tool_input,
+        }
+
     def post_spawn_event(self, *, turn_id: str, tool_use_id: str, task_path: str):
         return {
             "hook_event_name": "PostToolUse",
@@ -134,6 +150,27 @@ class V4SpawnWiringTests(unittest.TestCase):
         self.assertEqual(current.active_lease.spawn_tool_use_id, "spawn-v4-1")
         self.assertIsNone(current.active_lease.worker_agent_id)
         self.assertIsNone(current.active_lease.child_turn_id)
+
+    def test_exact_current_v1_spawn_is_reserved_without_native_worker_binding(self):
+        result = self.route_and_stage(
+            generation=1, turn_id="root-turn-1", packet_id="packet-1"
+        )
+
+        output = handle_hook_event(
+            self.pre_v1_spawn_event(
+                result, turn_id="root-turn-1", tool_use_id="spawn-v1-1"
+            ),
+            self.installation,
+        )
+
+        self.assertEqual(output, {})
+        current = lease_control.read_snapshot(
+            self.installation, self.secret, self.session_id
+        )
+        self.assertEqual(current.active_lease.spawn_tool_use_id, "spawn-v1-1")
+        self.assertIsNone(current.active_lease.worker_agent_id)
+        self.assertIsNone(current.active_lease.child_turn_id)
+        self.assertIsNone(current.active_lease.worker_task_path)
 
     def test_wrong_task_name_or_spawn_message_is_denied_without_reservation(self):
         result = self.route_and_stage(
