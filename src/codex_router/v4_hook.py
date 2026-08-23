@@ -262,13 +262,10 @@ def _handle_v4_root_spawn_post(
     if base is None:
         return None
     try:
-        post_tool_input = event.get("tool_input")
-        if isinstance(post_tool_input, Mapping):
-            hook_module._discriminate_spawn_profile(base, post_tool_input)
         match = base.get("native_tool_match")
         is_v1 = (
             isinstance(match, hook_module.NativeToolMatch)
-            and match.surface_profile in {"multi_agent_v1", "collapsed_v1_spawn"}
+            and match.surface_profile == "multi_agent_v1"
         )
         lease = snapshot.active_lease
         # A late result for a superseded spawn is safe to classify by its stale
@@ -278,10 +275,10 @@ def _handle_v4_root_spawn_post(
                 secret, snapshot, root_turn_id=base["turn_id"]
             )
         if is_v1:
-            # V1 returns a native agent_id rather than the generation-scoped
-            # V2 task path. Validate it as correlated native telemetry only.
-            # Worker authority remains unbound until the capability-bound first
-            # child PreToolUse proves the exact agent and child turn.
+            # Namespaced V1 returns a native agent_id rather than the
+            # generation-scoped V2 task path. Validate it as correlated native
+            # telemetry only. Worker authority remains unbound until the
+            # capability-bound first child PreToolUse proves exact identity.
             hook_module._spawn_agent_id(event.get("tool_response"))
             return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
         lease_control.observe_spawn_result(
