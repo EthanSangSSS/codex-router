@@ -32,10 +32,19 @@ from .v4_terminal_hook import install as _install_v4_terminal_hook
 _install_v4_hook(_hook)
 _install_v4_terminal_hook(_hook)
 
-# cli.py imports adapter callables eagerly; refresh wrappers whose callable
-# identity changes when the active overlays are installed.
-from . import cli as _cli
+# Patch the installer adapter before importing cli.py because cli imports the
+# adapter callables eagerly. This ensures CLI global-install also activates V4.
+from . import global_install as _global_install_core
 from . import global_install_adapter as _global_install_adapter
+from .v4_install_adapter import install as _install_v4_global_install
+
+_install_v4_global_install(
+    _global_install_adapter,
+    _global_install_core,
+    lease_control,
+)
+
+from . import cli as _cli
 from .v4_cli import install as _install_v4_cli
 
 _install_v4_cli(_cli)
