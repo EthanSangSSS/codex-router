@@ -19,9 +19,11 @@ _install_router_usability()
 from . import lease_control as lease_control
 from .lease_control_activation import install as _install_v4_activation
 from .lease_control_terminal import install as _install_v4_terminal_reconciliation
+from .lease_control_capacity import install as _install_v4_session_capacity
 
 _install_v4_activation(lease_control)
 _install_v4_terminal_reconciliation(lease_control)
+_install_v4_session_capacity(lease_control)
 
 # V4 lease fencing is an intentionally narrow Hook overlay installed after the
 # mature V3.3 usability layer. Sessions without V4 state continue through V3.
