@@ -32,8 +32,11 @@ from .v4_terminal_hook import install as _install_v4_terminal_hook
 _install_v4_hook(_hook)
 _install_v4_terminal_hook(_hook)
 
-# Patch the installer adapter before importing cli.py because cli imports the
-# adapter callables eagerly. This ensures CLI global-install also activates V4.
+# Patch the installer adapter. The V3.3 usability installer imports cli.py
+# eagerly, so cli may already have copied the pre-V4 adapter callables into its
+# module globals before this point. Refresh all four adapter entry points below
+# after installing the V4 adapter; otherwise fresh ``python -m codex_router``
+# processes can install/report V3.3 while in-process adapter calls report V4.
 from . import global_install as _global_install_core
 from . import global_install_adapter as _global_install_adapter
 from .v4_install_adapter import install as _install_v4_global_install
@@ -48,9 +51,12 @@ from . import cli as _cli
 from .v4_cli import install as _install_v4_cli
 from .v4_request_staging import install as _install_v4_request_staging
 
+_cli.global_install = _global_install_adapter.global_install
+_cli.global_status = _global_install_adapter.global_status
+_cli.global_uninstall = _global_install_adapter.global_uninstall
+_cli.global_self_test = _global_install_adapter.global_self_test
 _install_v4_cli(_cli)
 _install_v4_request_staging(_hook, _cli)
-_cli.global_self_test = _global_install_adapter.global_self_test
 
 __all__ = [
     "Router",
