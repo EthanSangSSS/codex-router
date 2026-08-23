@@ -12,7 +12,8 @@ from .state import RouterStateError
 _INSTALLED = False
 
 
-def _spawn_message(capability: str) -> str:
+def spawn_message(capability: str) -> str:
+    """Return the exact current-lease bootstrap message expected by the Hook."""
     bootstrap = f"pwd # CODEX_ROUTER_LEASE_BOOTSTRAP_V4={capability}"
     return (
         "[CODEX_ROUTER_V4_LEASE_BOOTSTRAP]\n"
@@ -109,7 +110,7 @@ def install(cli_module: Any) -> None:
             "generation": staged.generation,
             "task_name": lease.expected_task_name,
             "bootstrap_capability": bootstrap_capability,
-            "spawn_message": _spawn_message(bootstrap_capability),
+            "spawn_message": spawn_message(bootstrap_capability),
         }
 
     cli_module._stage_k1_fields = stage_k1_fields
