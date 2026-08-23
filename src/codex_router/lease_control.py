@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import fcntl
 import hashlib
 import hmac
@@ -29,8 +29,10 @@ _TAG_RE = re.compile(r"[0-9a-f]{64}\Z")
 _TASK_EPOCH_RE = re.compile(r"task-[0-9a-f]{32}\Z")
 _LEASE_ID_RE = re.compile(r"lease-[0-9a-f]{32}\Z")
 _TASK_NAME_RE = re.compile(r"luna_g[1-9][0-9]*_[0-9a-f]{8}\Z")
+_BOOTSTRAP_CAPABILITY_RE = re.compile(r"v4b1\.[0-9a-f]{64}\Z")
 
 LeaseStatus = Literal["STAGED", "ACTIVE"]
+ObservationDisposition = Literal["CURRENT", "STALE", "NOOP"]
 _LEASE_STATUSES = {"STAGED", "ACTIVE"}
 
 
@@ -137,6 +139,46 @@ def _expected_task_name(generation: int, lease_id: str) -> str:
     return f"luna_g{generation}_{lease_id.removeprefix('lease-')[:8]}"
 
 
+def _expected_task_path(lease: LeaseRecord) -> str:
+    return f"/root/{lease.expected_task_name}"
+
+
+def _bootstrap_capability_mac(secret: bytes, lease: LeaseRecord) -> str:
+    key = _secret(secret)
+    validate_lease(lease)
+    fields = (
+        lease.root_session_tag,
+        lease.task_epoch,
+        str(lease.generation),
+        lease.lease_id,
+        lease.root_turn_tag,
+        lease.packet_id,
+        lease.expected_task_name,
+    )
+    payload = b"v4-lease-bootstrap\0" + b"\0".join(
+        field.encode("utf-8", errors="strict") for field in fields
+    )
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def build_bootstrap_capability(secret: bytes, lease: LeaseRecord) -> str:
+    """Return the current lease-scoped worker bootstrap capability."""
+    return f"v4b1.{_bootstrap_capability_mac(secret, lease)}"
+
+
+def verify_bootstrap_capability(
+    secret: bytes, lease: LeaseRecord, capability: str
+) -> None:
+    """Fail closed unless ``capability`` belongs to exactly ``lease``."""
+    candidate = _text(capability, "bootstrap capability")
+    assert candidate is not None
+    if _BOOTSTRAP_CAPABILITY_RE.fullmatch(candidate) is None:
+        raise _error("bootstrap capability is invalid")
+    expected = build_bootstrap_capability(secret, lease)
+    if not hmac.compare_digest(candidate, expected):
+        raise _error("bootstrap capability does not match the current lease")
+
+
 def _authority_packet_wire(value: Any) -> tuple[str, dict[str, Any]]:
     if not isinstance(value, str) or not value:
         raise _error("authority_packet_wire is invalid")
@@ -179,10 +221,19 @@ def validate_lease(lease: LeaseRecord) -> None:
         raise _error("lease expected_task_name is invalid")
     if lease.expected_task_name != _expected_task_name(lease.generation, lease.lease_id):
         raise _error("lease expected_task_name is inconsistent")
-    _text(lease.spawn_tool_use_id, "lease spawn_tool_use_id", optional=True)
+    spawn_tool_use_id = _text(
+        lease.spawn_tool_use_id, "lease spawn_tool_use_id", optional=True
+    )
     _text(lease.worker_agent_id, "lease worker_agent_id", optional=True)
-    _text(lease.worker_task_path, "lease worker_task_path", optional=True)
+    worker_task_path = _text(
+        lease.worker_task_path, "lease worker_task_path", optional=True
+    )
     _text(lease.child_turn_id, "lease child_turn_id", optional=True)
+    if worker_task_path is not None:
+        if spawn_tool_use_id is None:
+            raise _error("lease worker task path requires a spawn reservation")
+        if worker_task_path != _expected_task_path(lease):
+            raise _error("lease worker task path is inconsistent")
     scope = _text_sequence(lease.intended_write_scope, "lease intended_write_scope", unique=True)
     authorizations = _text_sequence(
         lease.explicit_side_effect_authorizations,
@@ -503,3 +554,91 @@ def revoke_current_lease(
         )
         _store_snapshot(state, updated)
         return updated
+
+
+def reserve_spawn(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    tool_use_id: str,
+    task_name: str,
+    agent_type: str,
+    fork_turns: str,
+) -> LeaseSnapshot:
+    """Reserve one native spawn inside the current lease only."""
+    tool_id = _text(tool_use_id, "spawn tool_use_id")
+    task = _text(task_name, "spawn task_name")
+    role = _text(agent_type, "spawn agent_type")
+    fork = _text(fork_turns, "spawn fork_turns")
+    assert tool_id is not None and task is not None and role is not None and fork is not None
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        lease = snapshot.active_lease
+        if lease is None or lease.status != "STAGED":
+            raise _error("current V4 lease cannot reserve a spawn")
+        if task != lease.expected_task_name:
+            raise _error("spawn task_name does not match the current lease")
+        if role != "luna_worker":
+            raise _error("spawn agent_type must be luna_worker")
+        if fork != "none":
+            raise _error("luna_worker must use fork_turns=none")
+        if lease.spawn_tool_use_id is not None:
+            if lease.spawn_tool_use_id == tool_id:
+                return snapshot
+            raise _error("current V4 lease already has a spawn reservation")
+        updated_lease = replace(lease, spawn_tool_use_id=tool_id)
+        updated = replace(snapshot, active_lease=updated_lease)
+        _store_snapshot(state, updated)
+        return updated
+
+
+def observe_spawn_result(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    tool_use_id: str,
+    task_path: str,
+) -> tuple[LeaseSnapshot, ObservationDisposition]:
+    """Corroborate the current spawn path without inferring a worker agent id."""
+    tool_id = _text(tool_use_id, "spawn result tool_use_id")
+    path = _text(task_path, "spawn result task_path")
+    assert tool_id is not None and path is not None
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        lease = snapshot.active_lease
+        if lease is None or lease.spawn_tool_use_id != tool_id:
+            return snapshot, "STALE"
+        expected_path = _expected_task_path(lease)
+        if path != expected_path:
+            raise _error("spawn result task path does not match the current lease")
+        if lease.worker_task_path == path:
+            return snapshot, "NOOP"
+        if lease.worker_task_path is not None:
+            raise _error("spawn result conflicts with prior current observation")
+        updated_lease = replace(lease, worker_task_path=path)
+        updated = replace(snapshot, active_lease=updated_lease)
+        _store_snapshot(state, updated)
+        return updated, "CURRENT"
+
+
+def observe_subagent_start(
+    directory: Path,
+    secret: bytes,
+    session_id: str,
+    *,
+    agent_id: str,
+    agent_type: str,
+    turn_id: str,
+) -> tuple[LeaseSnapshot, ObservationDisposition]:
+    """Observe native start telemetry without granting uncorrelated authority."""
+    _text(agent_id, "SubagentStart agent_id")
+    _text(agent_type, "SubagentStart agent_type")
+    _text(turn_id, "SubagentStart turn_id")
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=False) as state:
+        snapshot = _record_for_session(state, tag)
+        return snapshot, "NOOP"
