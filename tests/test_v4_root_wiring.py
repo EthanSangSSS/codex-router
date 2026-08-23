@@ -183,6 +183,29 @@ class V4RootWiringTests(unittest.TestCase):
         self.assertIn("V1", contract)
         self.assertIn("V2", contract)
 
+    def test_routed_root_exposes_exact_typed_k1_request_schema(self):
+        output = handle_hook_event(
+            self.root_event(
+                "Inspect a bounded repository file.",
+                turn_id="schema-root-turn",
+            ),
+            self.installation,
+        )
+
+        schema = self.context(output)["K1_REQUEST_SCHEMA"]
+        self.assertEqual(
+            schema,
+            {
+                "packet_id": "non-empty UTF-8 string",
+                "objective": "non-empty UTF-8 string",
+                "working_directory": "absolute path string",
+                "intended_write_scope": "array[string]",
+                "explicit_side_effect_authorizations": "array[string]",
+                "success_criteria": "array[string]",
+                "stop_conditions": "array[string]",
+            },
+        )
+
     def test_v4_stage_fields_returns_generation_scoped_spawn_contract(self):
         route_output = handle_hook_event(
             self.root_event(
