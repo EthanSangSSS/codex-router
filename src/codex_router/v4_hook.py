@@ -153,9 +153,14 @@ def _handle_v4_root_prompt(
             "K1_STAGE_CAPABILITY": stage_capability,
             "K1_STAGE_COMMAND": stage_command,
             "spawn_contract": (
-                "Run K1_STAGE_COMMAND with the bounded K1 fields first. Then spawn exactly "
-                "the task_name returned by that command using agent_type=luna_worker and "
-                "fork_turns=none, and pass the returned spawn_message unchanged."
+                "Run K1_STAGE_COMMAND with the bounded K1 fields first and use the actually "
+                "exposed native spawn surface. V2: spawn the returned task_name with "
+                "agent_type=luna_worker, fork_turns=none, and the returned spawn_message "
+                "unchanged. V1: use multi_agent_v1__spawn_agent with agent_type=luna_worker, "
+                "fork_context=false (or omit fork_context only when the namespaced V1 surface "
+                "permits omission), and the returned spawn_message unchanged. V1 transport "
+                "does not carry task_name or fork_turns; the generation-scoped task_name remains "
+                "Router lease identity. Never invent fields unsupported by the exposed surface."
             ),
         }
     )
