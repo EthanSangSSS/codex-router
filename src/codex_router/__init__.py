@@ -40,9 +40,13 @@ _install_v4_terminal_hook(_hook)
 # after installing the V4 adapter; otherwise fresh ``python -m codex_router``
 # processes can install/report V3.3 while in-process adapter calls report V4.
 from . import global_install as _global_install_core
+from .v4_hook_code_identity_preflight import (
+    install as _install_v4_hook_code_identity_preflight,
+)
 from . import global_install_adapter as _global_install_adapter
 from .v4_install_adapter import install as _install_v4_global_install
 
+_install_v4_hook_code_identity_preflight(_global_install_core)
 _install_v4_global_install(
     _global_install_adapter,
     _global_install_core,
