@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from . import lease_control
 from .state import RouterStateError
+from .v4_cli import spawn_message
 
 
 _BOOTSTRAP_COMMAND_RE = re.compile(
@@ -160,6 +161,109 @@ def _handle_v4_root_prompt(
     )
 
 
+def _v4_root_spawn_base(hook_module: Any, event: Mapping[str, Any], name: str):
+    base = hook_module._event_base(
+        event, name, ("session_id", "turn_id", "tool_name", "tool_use_id")
+    )
+    hook_module._normalize_event_tool_name(base)
+    if base["tool_name"] != "spawn_agent":
+        return None
+    if hook_module._identity_kind(event, lifecycle=False) != "root":
+        return None
+    return base
+
+
+def _require_current_v4_root(
+    secret: bytes,
+    snapshot: Any,
+    *,
+    root_turn_id: str,
+) -> None:
+    # build_stage_capability performs an exact HMAC comparison with the current
+    # root-turn tag. The returned next-generation capability is intentionally
+    # discarded here; this helper only proves the event belongs to current root.
+    lease_control.build_stage_capability(
+        secret, snapshot, root_turn_id=root_turn_id
+    )
+
+
+def _handle_v4_root_spawn_pre(
+    hook_module: Any,
+    event: Mapping[str, Any],
+    installation_dir: Path,
+    secret: bytes,
+    snapshot: Any,
+) -> dict[str, Any] | None:
+    base = _v4_root_spawn_base(hook_module, event, "PreToolUse")
+    if base is None:
+        return None
+    lease = snapshot.active_lease
+    if lease is None:
+        return _deny(hook_module, "Router V4 spawn has no current lease")
+    try:
+        _require_current_v4_root(
+            secret, snapshot, root_turn_id=base["turn_id"]
+        )
+        tool_input = event.get("tool_input")
+        if not isinstance(tool_input, Mapping):
+            raise lease_control._error("V4 spawn tool_input must be an object")
+        expected_keys = {"task_name", "agent_type", "fork_turns", "message"}
+        if set(tool_input) != expected_keys:
+            raise lease_control._error("V4 spawn input schema is invalid")
+        expected_capability = lease_control.build_bootstrap_capability(secret, lease)
+        expected_message = spawn_message(expected_capability)
+        if tool_input.get("task_name") != lease.expected_task_name:
+            raise lease_control._error("V4 spawn task_name does not match current lease")
+        if tool_input.get("agent_type") != "luna_worker":
+            raise lease_control._error("V4 spawn agent_type must be luna_worker")
+        if tool_input.get("fork_turns") != "none":
+            raise lease_control._error("V4 spawn must use fork_turns=none")
+        if tool_input.get("message") != expected_message:
+            raise lease_control._error("V4 spawn message does not match current lease")
+        lease_control.reserve_spawn(
+            installation_dir,
+            secret,
+            base["session_id"],
+            tool_use_id=base["tool_use_id"],
+            task_name=lease.expected_task_name,
+            agent_type="luna_worker",
+            fork_turns="none",
+        )
+        return {}
+    except RouterStateError as error:
+        return _deny(hook_module, str(error))
+
+
+def _handle_v4_root_spawn_post(
+    hook_module: Any,
+    event: Mapping[str, Any],
+    installation_dir: Path,
+    secret: bytes,
+    snapshot: Any,
+) -> dict[str, Any] | None:
+    base = _v4_root_spawn_base(hook_module, event, "PostToolUse")
+    if base is None:
+        return None
+    try:
+        lease = snapshot.active_lease
+        # A late result for a superseded spawn is safe to classify by its stale
+        # tool_use_id without requiring the old root turn to still be current.
+        if lease is not None and lease.spawn_tool_use_id == base["tool_use_id"]:
+            _require_current_v4_root(
+                secret, snapshot, root_turn_id=base["turn_id"]
+            )
+        lease_control.observe_spawn_result(
+            installation_dir,
+            secret,
+            base["session_id"],
+            tool_use_id=base["tool_use_id"],
+            task_path=hook_module._spawn_task_path(event.get("tool_response")),
+        )
+        return {"hookSpecificOutput": {"hookEventName": "PostToolUse"}}
+    except RouterStateError as error:
+        return {"continue": False, "stopReason": str(error)[:500]}
+
+
 def install(hook_module: Any) -> None:
     """Install the V4 overlay once, after the active V3.3 usability layer."""
     global _INSTALLED
@@ -174,14 +278,16 @@ def install(hook_module: Any) -> None:
         if not isinstance(event, Mapping):
             return original_handle_hook_event(event, installation_dir)
         name = event.get("hook_event_name")
-        if name not in {"UserPromptSubmit", "PreToolUse", "SubagentStart"}:
+        if name not in {
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PostToolUse",
+            "SubagentStart",
+        }:
             return original_handle_hook_event(event, installation_dir)
 
         session_id = event.get("session_id")
         if not isinstance(session_id, str) or not session_id:
-            return original_handle_hook_event(event, installation_dir)
-
-        if name != "UserPromptSubmit" and event.get("agent_type") != "luna_worker":
             return original_handle_hook_event(event, installation_dir)
 
         try:
@@ -215,6 +321,31 @@ def install(hook_module: Any) -> None:
                 return {"decision": "block", "reason": hook_module._BLOCK_REASON}
 
         if snapshot is None:
+            return original_handle_hook_event(event, installation_dir)
+
+        if name == "PreToolUse":
+            parent_spawn = _handle_v4_root_spawn_pre(
+                hook_module,
+                event,
+                Path(installation_dir),
+                secret,
+                snapshot,
+            )
+            if parent_spawn is not None:
+                return parent_spawn
+        elif name == "PostToolUse":
+            parent_spawn = _handle_v4_root_spawn_post(
+                hook_module,
+                event,
+                Path(installation_dir),
+                secret,
+                snapshot,
+            )
+            if parent_spawn is not None:
+                return parent_spawn
+            return original_handle_hook_event(event, installation_dir)
+
+        if event.get("agent_type") != "luna_worker":
             return original_handle_hook_event(event, installation_dir)
 
         if name == "SubagentStart":
