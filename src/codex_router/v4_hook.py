@@ -1,11 +1,13 @@
 """Narrow V4 lease Hook overlay.
 
-The V3.3 Hook remains the default. This overlay takes control only for native
-Luna child events in a session that already has V4 lease state.
+The V3.3 Hook remains the default. This overlay takes control only when an
+installation has opted into the V4 lease journal.
 """
 from __future__ import annotations
 
 import re
+import shlex
+import sys
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -49,8 +51,117 @@ def _bootstrap_capability(event: Mapping[str, Any]) -> str | None:
     return match.group(1)
 
 
+def _v4_stage_command(
+    installation_dir: Path,
+    *,
+    session_id: str,
+    root_turn_id: str,
+    capability: str,
+) -> str:
+    return shlex.join(
+        (
+            sys.executable,
+            "-E",
+            "-P",
+            "-m",
+            "codex_router",
+            "stage-k1-fields",
+            "--installation-dir",
+            str(installation_dir),
+            "--session-id",
+            session_id,
+            "--root-turn-id",
+            root_turn_id,
+            "--capability",
+            capability,
+        )
+    )
+
+
+def _handle_v4_root_prompt(
+    hook_module: Any,
+    event: Mapping[str, Any],
+    installation_dir: Path,
+    secret: bytes,
+    config: Mapping[str, Any],
+    snapshot: Any,
+) -> dict[str, Any]:
+    validated = hook_module._validate_event(event)
+    if "agent_id" in validated:
+        return hook_module._child_block()
+
+    policy = hook_module.classify_prompt(validated["prompt"])
+    if snapshot is None:
+        snapshot = lease_control.initialize_session(
+            installation_dir, secret, validated["session_id"]
+        )
+
+    # Every new root user turn supersedes the prior Router authority
+    # immediately. Native worker cleanup is deliberately not a prerequisite.
+    snapshot = lease_control.revoke_current_lease(
+        installation_dir, secret, validated["session_id"]
+    )
+
+    if policy.decision in ("direct", "bypass"):
+        lease_control.set_current_root_turn(
+            installation_dir,
+            secret,
+            validated["session_id"],
+            turn_id=None,
+        )
+        return hook_module._hook_output(
+            {
+                "protocol": hook_module.HOOK_CONTEXT_PROTOCOL,
+                "decision": policy.decision,
+                "reason": policy.reason_code,
+                "workflow": "primary_direct_v4",
+            }
+        )
+
+    snapshot = lease_control.set_current_root_turn(
+        installation_dir,
+        secret,
+        validated["session_id"],
+        turn_id=validated["turn_id"],
+    )
+    stage_capability = lease_control.build_stage_capability(
+        secret, snapshot, root_turn_id=validated["turn_id"]
+    )
+    stage_command = _v4_stage_command(
+        installation_dir,
+        session_id=validated["session_id"],
+        root_turn_id=validated["turn_id"],
+        capability=stage_capability,
+    )
+    luna = config["role_config"]["luna"]
+    return hook_module._hook_output(
+        {
+            "protocol": hook_module.HOOK_CONTEXT_PROTOCOL,
+            "decision": "route",
+            "reason": policy.reason_code,
+            "workflow": "generation_lease_v4",
+            "sol_role": "plan_review_final_authority",
+            "luna_role": "generation_lease_executor",
+            "delegation_mode": "fresh_worker_per_generation",
+            "luna_agent": "luna_worker",
+            "luna_model": luna["requested_model"],
+            "luna_reasoning": luna["requested_reasoning"],
+            "authority_model": "generation_lease_v4",
+            "terminal_reconciliation": "optional_not_admission_prerequisite",
+            "native_cleanup_policy": "independent_from_router_authority",
+            "K1_STAGE_CAPABILITY": stage_capability,
+            "K1_STAGE_COMMAND": stage_command,
+            "spawn_contract": (
+                "Run K1_STAGE_COMMAND with the bounded K1 fields first. Then spawn exactly "
+                "the task_name returned by that command using agent_type=luna_worker and "
+                "fork_turns=none, and pass the returned spawn_message unchanged."
+            ),
+        }
+    )
+
+
 def install(hook_module: Any) -> None:
-    """Install the V4 child overlay once, after the active V3.3 usability layer."""
+    """Install the V4 overlay once, after the active V3.3 usability layer."""
     global _INSTALLED
     if _INSTALLED:
         return
@@ -63,20 +174,18 @@ def install(hook_module: Any) -> None:
         if not isinstance(event, Mapping):
             return original_handle_hook_event(event, installation_dir)
         name = event.get("hook_event_name")
-        if name not in {"PreToolUse", "SubagentStart"}:
+        if name not in {"UserPromptSubmit", "PreToolUse", "SubagentStart"}:
             return original_handle_hook_event(event, installation_dir)
 
         session_id = event.get("session_id")
-        agent_type = event.get("agent_type")
-        if (
-            not isinstance(session_id, str)
-            or not session_id
-            or agent_type != "luna_worker"
-        ):
+        if not isinstance(session_id, str) or not session_id:
+            return original_handle_hook_event(event, installation_dir)
+
+        if name != "UserPromptSubmit" and event.get("agent_type") != "luna_worker":
             return original_handle_hook_event(event, installation_dir)
 
         try:
-            secret, _config = hook_module._load_installation(Path(installation_dir))
+            secret, config = hook_module._load_installation(Path(installation_dir))
             snapshot, v4_present = _v4_snapshot_if_present(
                 Path(installation_dir), secret, session_id
             )
@@ -87,7 +196,25 @@ def install(hook_module: Any) -> None:
         except Exception:
             return original_handle_hook_event(event, installation_dir)
 
-        if not v4_present or snapshot is None:
+        if not v4_present:
+            return original_handle_hook_event(event, installation_dir)
+
+        if name == "UserPromptSubmit":
+            try:
+                return _handle_v4_root_prompt(
+                    hook_module,
+                    event,
+                    Path(installation_dir),
+                    secret,
+                    config,
+                    snapshot,
+                )
+            except RouterStateError as error:
+                return {"decision": "block", "reason": str(error)[:500]}
+            except Exception:
+                return {"decision": "block", "reason": hook_module._BLOCK_REASON}
+
+        if snapshot is None:
             return original_handle_hook_event(event, installation_dir)
 
         if name == "SubagentStart":
