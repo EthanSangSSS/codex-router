@@ -1,10 +1,9 @@
-import io
 import json
 import shlex
 import tempfile
 import unittest
-from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_router import lease_control
 from codex_router import cli as cli_module
@@ -111,12 +110,17 @@ class V4RequestFileStagingTests(unittest.TestCase):
         request_path.chmod(0o600)
 
         command_argv = argv[argv.index("stage-k1-fields") :]
-        output = io.StringIO()
-        with redirect_stdout(output):
+        printed = []
+        with patch.object(
+            cli_module,
+            "_print_json",
+            side_effect=lambda value, **_kwargs: printed.append(value),
+        ):
             exit_code = cli_module.main(command_argv)
 
         self.assertEqual(exit_code, 0)
-        result = json.loads(output.getvalue())
+        self.assertEqual(len(printed), 1)
+        result = printed[0]
         self.assertEqual(result["status"], "staged")
         self.assertEqual(result["packet_id"], "packet-v4-request-2")
         self.assertEqual(result["generation"], 1)
