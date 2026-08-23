@@ -162,11 +162,19 @@ def _handle_v4_root_prompt(
             "K1_STAGE_CAPABILITY": stage_capability,
             "K1_STAGE_COMMAND": stage_command,
             "K1_REQUEST_SCHEMA": dict(_K1_REQUEST_SCHEMA),
+            "V2_PARENT_MESSAGE_PRETOOL_VISIBILITY": (
+                "encrypted_opaque_not_plaintext_verifiable"
+            ),
+            "V2_AUTHORITY_GATE": "first_child_capability_bootstrap",
             "spawn_contract": (
                 "Run K1_STAGE_COMMAND with the bounded K1 fields first and use the actually "
                 "exposed native spawn surface. V2: spawn the returned task_name with "
                 "agent_type=luna_worker, fork_turns=none, and the returned spawn_message "
-                "unchanged. V1: use multi_agent_v1__spawn_agent with agent_type=luna_worker, "
+                "unchanged. Codex V2 parent PreToolUse observes message as encrypted opaque, "
+                "so Router cannot mechanically compare its plaintext there; the parent check "
+                "validates only the current generation/task envelope and does not grant worker "
+                "authority. Authority remains unbound until the first child capability bootstrap. "
+                "V1: use multi_agent_v1__spawn_agent with agent_type=luna_worker, "
                 "fork_context=false (or omit fork_context only when the namespaced V1 surface "
                 "permits omission), and the returned spawn_message unchanged. V1 transport "
                 "does not carry task_name or fork_turns; the generation-scoped task_name remains "
