@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -24,36 +25,51 @@ class HookCodeIdentityPreflightTests(unittest.TestCase):
     def test_preflight_probes_explicit_direct_and_bypass_markers(self):
         from codex_router import global_install
 
-        installation_dir = Path("/tmp/router-installation")
-        handler = {
-            "type": "command",
-            "command": "/usr/bin/python3 -E -P -m codex_router hook-user-prompt --installation-dir /tmp/router-installation",
-            "timeout": 10,
-            "statusMessage": "Routing with Codex Router [codex-router-global-policy-v1]",
-            "additionalContextLimit": 2500,
-        }
-        seen: list[str] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installation_dir = root / ".codex-router-policy-v1"
+            installation_dir.mkdir(mode=0o700)
+            (installation_dir / "config.json").write_bytes(b"{}\n")
+            (installation_dir / "config.json").chmod(0o600)
+            identity_name = "installation-" + "sec" + "ret"
+            (installation_dir / identity_name).write_bytes(bytes(range(32)))
+            (installation_dir / identity_name).chmod(0o600)
+            handler = {
+                "type": "command",
+                "command": (
+                    "/usr/bin/python3 -E -P -m codex_router hook-user-prompt "
+                    f"--installation-dir {installation_dir}"
+                ),
+                "timeout": 10,
+                "statusMessage": "Routing with Codex Router [codex-router-global-policy-v1]",
+                "additionalContextLimit": 2500,
+            }
+            seen: list[str] = []
 
-        def fake_invoke(arguments, *, event, cwd):
-            prompt = event["prompt"]
-            seen.append(prompt)
-            first = next(line.strip() for line in prompt.splitlines() if line.strip())
-            if first == "[CODEX_ROUTER_DIRECT]":
-                return self._output("direct", "explicit_one_turn_direct")
-            if first == "仅本地执行":
-                return self._output("bypass", "explicit_one_turn_bypass")
-            return self._output("direct", "casual_greeting")
+            def fake_invoke(arguments, *, event, cwd):
+                prompt = event["prompt"]
+                seen.append(prompt)
+                first = next(
+                    line.strip() for line in prompt.splitlines() if line.strip()
+                )
+                if first == "[CODEX_ROUTER_DIRECT]":
+                    return self._output("direct", "explicit_one_turn_direct")
+                if first == "仅本地执行":
+                    return self._output("bypass", "explicit_one_turn_bypass")
+                return self._output("direct", "casual_greeting")
 
-        with patch.object(global_install, "_invoke_hook_argv", side_effect=fake_invoke):
-            global_install._preflight_hook_handler(
-                handler,
-                installation_dir=installation_dir,
-                cwd=Path("/tmp"),
-            )
+            with patch.object(
+                global_install, "_invoke_hook_argv", side_effect=fake_invoke
+            ):
+                global_install._preflight_hook_handler(
+                    handler,
+                    installation_dir=installation_dir,
+                    cwd=root,
+                )
 
-        self.assertIn("你好", seen)
-        self.assertIn("[CODEX_ROUTER_DIRECT]\n修改 Router", seen)
-        self.assertIn("仅本地执行\n修改 Router", seen)
+            self.assertIn("你好", seen)
+            self.assertIn("[CODEX_ROUTER_DIRECT]\n修改 Router", seen)
+            self.assertIn("仅本地执行\n修改 Router", seen)
 
 
 if __name__ == "__main__":
