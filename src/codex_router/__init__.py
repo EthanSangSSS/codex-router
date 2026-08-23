@@ -24,8 +24,10 @@ _install_v4_terminal_reconciliation(lease_control)
 # mature V3.3 usability layer. Sessions without V4 state continue through V3.
 from . import hook as _hook
 from .v4_hook import install as _install_v4_hook
+from .v4_terminal_hook import install as _install_v4_terminal_hook
 
 _install_v4_hook(_hook)
+_install_v4_terminal_hook(_hook)
 
 # cli.py imports adapter callables eagerly; refresh wrappers whose callable
 # identity changes when the active overlays are installed.
