@@ -306,35 +306,57 @@ class V4SpawnWiringTests(unittest.TestCase):
             "child-turn-v1-handshake",
         )
 
-    def test_wrong_task_name_or_spawn_message_is_denied_without_reservation(self):
+    def test_wrong_v2_task_name_is_denied_without_reservation(self):
         result = self.route_and_stage(
             generation=1, turn_id="root-turn-1", packet_id="packet-1"
         )
-        cases = (
-            {"task_name": "luna_worker"},
-            {"message": "stale or model-invented bootstrap message"},
+        before = lease_control.read_snapshot(
+            self.installation, self.secret, self.session_id
         )
-        for overrides in cases:
-            with self.subTest(overrides=overrides):
-                before = lease_control.read_snapshot(
-                    self.installation, self.secret, self.session_id
-                )
-                event = self.pre_spawn_event(
-                    result,
-                    turn_id="root-turn-1",
-                    tool_use_id="bad-spawn",
-                )
-                event["tool_input"].update(overrides)
-                output = handle_hook_event(event, self.installation)
-                self.assertEqual(
-                    output["hookSpecificOutput"]["permissionDecision"], "deny"
-                )
-                self.assertEqual(
-                    lease_control.read_snapshot(
-                        self.installation, self.secret, self.session_id
-                    ),
-                    before,
-                )
+        event = self.pre_spawn_event(
+            result,
+            turn_id="root-turn-1",
+            tool_use_id="bad-v2-spawn",
+            task_name="luna_worker",
+        )
+
+        output = handle_hook_event(event, self.installation)
+
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertEqual(
+            lease_control.read_snapshot(
+                self.installation, self.secret, self.session_id
+            ),
+            before,
+        )
+
+    def test_wrong_v1_plaintext_spawn_message_is_denied_without_reservation(self):
+        result = self.route_and_stage(
+            generation=1, turn_id="root-turn-1", packet_id="packet-1"
+        )
+        before = lease_control.read_snapshot(
+            self.installation, self.secret, self.session_id
+        )
+        event = self.pre_v1_spawn_event(
+            result,
+            turn_id="root-turn-1",
+            tool_use_id="bad-v1-spawn",
+            message="stale or model-invented bootstrap message",
+        )
+
+        output = handle_hook_event(event, self.installation)
+
+        self.assertEqual(
+            output["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+        self.assertEqual(
+            lease_control.read_snapshot(
+                self.installation, self.secret, self.session_id
+            ),
+            before,
+        )
 
     def test_current_spawn_post_result_records_exact_generation_scoped_path(self):
         result = self.route_and_stage(
