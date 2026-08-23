@@ -19,11 +19,13 @@ from .v4_hook import install as _install_v4_hook
 
 _install_v4_hook(_hook)
 
-# cli.py imports adapter callables eagerly; refresh the self-test wrapper whose
-# callable identity changes when the active usability layer is installed.
+# cli.py imports adapter callables eagerly; refresh wrappers whose callable
+# identity changes when the active overlays are installed.
 from . import cli as _cli
 from . import global_install_adapter as _global_install_adapter
+from .v4_cli import install as _install_v4_cli
 
+_install_v4_cli(_cli)
 _cli.global_self_test = _global_install_adapter.global_self_test
 
 __all__ = [
