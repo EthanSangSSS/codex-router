@@ -12,6 +12,13 @@ from .usability import install as _install_router_usability
 
 _install_router_usability()
 
+# V4 lease fencing is an intentionally narrow overlay installed after the
+# mature V3.3 usability layer. Sessions without V4 state continue through V3.
+from . import hook as _hook
+from .v4_hook import install as _install_v4_hook
+
+_install_v4_hook(_hook)
+
 # cli.py imports adapter callables eagerly; refresh the self-test wrapper whose
 # callable identity changes when the active usability layer is installed.
 from . import cli as _cli
