@@ -24,12 +24,13 @@ class V4FreshProcessBoundaryTests(unittest.TestCase):
         self.env = os.environ.copy()
         self.env["PYTHONPATH"] = str(REPO / "src")
 
-    def cli(self, *args):
+    def cli(self, *args, input_text=None):
         return subprocess.run(
             [sys.executable, "-m", "codex_router", *args],
             cwd=REPO,
             env=self.env,
             text=True,
+            input=input_text,
             capture_output=True,
         )
 
@@ -70,6 +71,39 @@ class V4FreshProcessBoundaryTests(unittest.TestCase):
         self.assertEqual(
             self_test_payload["router_design"], "v4.0_generation_lease"
         )
+
+    def test_hook_subprocess_uses_final_v4_request_staging_wrapper(self):
+        installed = self.cli(
+            "global-install",
+            "--codex-home",
+            str(self.codex_home),
+            "--state-dir",
+            str(self.state_root),
+            "--codex-bin",
+            str(self.binary),
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        installation_dir = Path(json.loads(installed.stdout)["installation_dir"])
+
+        event = {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "process-boundary-session",
+            "turn_id": "process-boundary-turn",
+            "prompt": "修改 Router process boundary probe",
+            "cwd": str(self.root),
+        }
+        routed = self.cli(
+            "hook-user-prompt",
+            "--installation-dir",
+            str(installation_dir),
+            input_text=json.dumps(event, ensure_ascii=False) + "\n",
+        )
+        self.assertEqual(routed.returncode, 0, routed.stderr)
+        payload = json.loads(routed.stdout)
+        additional = payload["hookSpecificOutput"]["additionalContext"]
+        self.assertIn('"workflow":"generation_lease_v4"', additional)
+        self.assertIn('"K1_STAGE_INTERFACE":"private_request_file_v4"', additional)
+        self.assertIn(" --request-file ", additional)
 
 
 if __name__ == "__main__":
