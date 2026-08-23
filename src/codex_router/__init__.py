@@ -12,7 +12,15 @@ from .usability import install as _install_router_usability
 
 _install_router_usability()
 
-# V4 lease fencing is an intentionally narrow overlay installed after the
+# V4 authority extensions install on the dedicated lease-control module. Native
+# terminal notification is optional reconciliation evidence, never an admission
+# prerequisite for the next generation.
+from . import lease_control as lease_control
+from .lease_control_terminal import install as _install_v4_terminal_reconciliation
+
+_install_v4_terminal_reconciliation(lease_control)
+
+# V4 lease fencing is an intentionally narrow Hook overlay installed after the
 # mature V3.3 usability layer. Sessions without V4 state continue through V3.
 from . import hook as _hook
 from .v4_hook import install as _install_v4_hook
