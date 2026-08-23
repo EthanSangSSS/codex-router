@@ -221,6 +221,91 @@ class V4SpawnWiringTests(unittest.TestCase):
         self.assertIsNone(after.active_lease.child_turn_id)
         self.assertIsNone(after.active_lease.worker_task_path)
 
+    def test_v1_spawn_to_first_child_bootstrap_delivers_k1_and_binds_exact_identity(self):
+        result = self.route_and_stage(
+            generation=1,
+            turn_id="root-turn-v1-handshake",
+            packet_id="packet-v1-handshake",
+        )
+        handle_hook_event(
+            self.pre_v1_spawn_event(
+                result,
+                turn_id="root-turn-v1-handshake",
+                tool_use_id="spawn-v1-handshake",
+            ),
+            self.installation,
+        )
+        handle_hook_event(
+            self.post_v1_spawn_event(
+                turn_id="root-turn-v1-handshake",
+                tool_use_id="spawn-v1-handshake",
+                agent_id="agent-v1-handshake",
+            ),
+            self.installation,
+        )
+
+        before = lease_control.read_snapshot(
+            self.installation, self.secret, self.session_id
+        )
+        self.assertEqual(before.active_lease.status, "STAGED")
+        self.assertIsNone(before.active_lease.worker_agent_id)
+        self.assertIsNone(before.active_lease.child_turn_id)
+
+        start_output = handle_hook_event(
+            {
+                "hook_event_name": "SubagentStart",
+                "session_id": self.session_id,
+                "turn_id": "child-turn-v1-handshake",
+                "agent_id": "agent-v1-handshake",
+                "agent_type": "luna_worker",
+            },
+            self.installation,
+        )
+        self.assertEqual(
+            start_output,
+            {"hookSpecificOutput": {"hookEventName": "SubagentStart"}},
+        )
+        after_start = lease_control.read_snapshot(
+            self.installation, self.secret, self.session_id
+        )
+        self.assertIsNone(after_start.active_lease.worker_agent_id)
+        self.assertIsNone(after_start.active_lease.child_turn_id)
+
+        bootstrap_command = (
+            "pwd # CODEX_ROUTER_LEASE_BOOTSTRAP_V4="
+            + result["bootstrap_capability"]
+        )
+        output = handle_hook_event(
+            {
+                "hook_event_name": "PreToolUse",
+                "session_id": self.session_id,
+                "turn_id": "child-turn-v1-handshake",
+                "tool_name": "Bash",
+                "tool_use_id": "bootstrap-v1-handshake",
+                "tool_input": {"command": bootstrap_command},
+                "agent_id": "agent-v1-handshake",
+                "agent_type": "luna_worker",
+            },
+            self.installation,
+        )
+
+        hook_output = output["hookSpecificOutput"]
+        self.assertEqual(hook_output["hookEventName"], "PreToolUse")
+        self.assertIn("packet-v1-handshake", hook_output["additionalContext"])
+        self.assertNotIn("permissionDecision", hook_output)
+        current = lease_control.read_snapshot(
+            self.installation, self.secret, self.session_id
+        )
+        self.assertEqual(current.active_lease.status, "ACTIVE")
+        self.assertEqual(
+            current.active_lease.worker_agent_id,
+            "agent-v1-handshake",
+        )
+        self.assertEqual(
+            current.active_lease.child_turn_id,
+            "child-turn-v1-handshake",
+        )
+
     def test_wrong_task_name_or_spawn_message_is_denied_without_reservation(self):
         result = self.route_and_stage(
             generation=1, turn_id="root-turn-1", packet_id="packet-1"
