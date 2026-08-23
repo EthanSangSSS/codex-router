@@ -115,7 +115,7 @@ class GlobalInstallTests(unittest.TestCase):
         self.assertNotIn("build_luna_packet", rendered)
         self.assertNotIn("[CODEX_ROUTER_PACKET_V3_1]", rendered)
 
-    def test_v33_status_keeps_live_activation_blocked_after_install(self):
+    def test_installed_status_reports_v4_pending_live_acceptance(self):
         from codex_router import global_install_adapter as adapter
 
         root = self.root / "adapter-status"
@@ -133,11 +133,20 @@ class GlobalInstallTests(unittest.TestCase):
         )
 
         status = adapter.global_status(codex_home)
-        self.assertEqual(status.router_design, "v3.3")
-        self.assertEqual(status.live_activation, "BLOCKED_ACCEPTANCE_GATES")
-        self.assertIn("G8_STALE_GENERATION_REJECTION", status.live_activation_blockers)
-        self.assertNotIn("G9_ECONOMICS", status.live_activation_blockers)
-        self.assertIn("G9_ECONOMICS", status.deferred_acceptance_evidence)
+        self.assertEqual(status.router_design, "v4.0_generation_lease")
+        self.assertEqual(status.live_activation, "PENDING_LIVE_ACCEPTANCE")
+        self.assertIn(
+            "V40_LIVE_STALE_WORKER_REJECTION",
+            status.live_activation_blockers,
+        )
+        self.assertNotIn(
+            "G8_STALE_GENERATION_REJECTION",
+            status.live_activation_blockers,
+        )
+        self.assertIn(
+            "V41_STABLE_DISPATCHER",
+            status.deferred_acceptance_evidence,
+        )
 
     def reset_case(self, name):
         case_root = self.root / name
@@ -965,8 +974,7 @@ class GlobalInstallTests(unittest.TestCase):
         hooks_installed = hooks_path.read_bytes()
         agents_installed = agents_path.read_bytes()
         state_path = (
-            self.codex_home
-            / ".codex-router-policy-v1"
+            self.codex_home / ".codex-router-policy-v1"
             / "install-state.json"
         )
         state = json.loads(state_path.read_text(encoding="utf-8"))
