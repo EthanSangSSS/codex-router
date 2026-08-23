@@ -483,3 +483,23 @@ def stage_lease(
         )
         _store_snapshot(state, updated)
         return updated
+
+
+def revoke_current_lease(
+    directory: Path, secret: bytes, session_id: str
+) -> LeaseSnapshot:
+    """Logically revoke current authority without waiting for native terminal state."""
+    tag = session_tag(secret, session_id)
+    with _locked_state(Path(directory), mutate=True) as state:
+        snapshot = _record_for_session(state, tag)
+        if snapshot.active_lease is None:
+            return snapshot
+        updated = LeaseSnapshot(
+            task_epoch=snapshot.task_epoch,
+            root_session_tag=snapshot.root_session_tag,
+            generation=snapshot.generation,
+            active_lease=None,
+            retired_worker_tags=snapshot.retired_worker_tags,
+        )
+        _store_snapshot(state, updated)
+        return updated
