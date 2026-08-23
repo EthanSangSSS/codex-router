@@ -103,6 +103,9 @@ def _probe_policy_identity(
             echoed_session = session_id in encoded_output
             echoed_turn = turn_id in encoded_output
             echoed_prompt = prompt in encoded_output
+            local_override_echo = expected_workflow is None and (
+                echoed_session or echoed_turn
+            )
             if (
                 context.get("protocol") != core.HOOK_CONTEXT_PROTOCOL
                 or context.get("decision") != expected_decision
@@ -111,8 +114,7 @@ def _probe_policy_identity(
                     expected_workflow is not None
                     and context.get("workflow") != expected_workflow
                 )
-                or echoed_session
-                or echoed_turn
+                or local_override_echo
                 or echoed_prompt
             ):
                 observed = "/".join(
