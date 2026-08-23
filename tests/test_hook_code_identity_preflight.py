@@ -5,7 +5,13 @@ from unittest.mock import patch
 
 
 class HookCodeIdentityPreflightTests(unittest.TestCase):
-    def _output(self, decision: str, reason: str) -> dict:
+    def _output(
+        self,
+        decision: str,
+        reason: str,
+        *,
+        workflow: str | None = None,
+    ) -> dict:
         import json
         from codex_router import hook
 
@@ -14,6 +20,8 @@ class HookCodeIdentityPreflightTests(unittest.TestCase):
             "decision": decision,
             "reason": reason,
         }
+        if workflow is not None:
+            context["workflow"] = workflow
         return {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
@@ -22,7 +30,7 @@ class HookCodeIdentityPreflightTests(unittest.TestCase):
             }
         }
 
-    def test_preflight_probes_explicit_direct_and_bypass_markers(self):
+    def test_preflight_probes_v4_route_and_explicit_local_overrides(self):
         from codex_router import global_install
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -56,6 +64,12 @@ class HookCodeIdentityPreflightTests(unittest.TestCase):
                     return self._output("direct", "explicit_one_turn_direct")
                 if first == "仅本地执行":
                     return self._output("bypass", "explicit_one_turn_bypass")
+                if first == "修改 Router identity probe":
+                    return self._output(
+                        "route",
+                        "substantive_request",
+                        workflow="generation_lease_v4",
+                    )
                 return self._output("direct", "casual_greeting")
 
             with patch.object(
@@ -70,6 +84,7 @@ class HookCodeIdentityPreflightTests(unittest.TestCase):
             self.assertIn("你好", seen)
             self.assertIn("[CODEX_ROUTER_DIRECT]\n修改 Router", seen)
             self.assertIn("仅本地执行\n修改 Router", seen)
+            self.assertIn("修改 Router identity probe", seen)
 
 
 if __name__ == "__main__":
