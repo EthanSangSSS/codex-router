@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import stat
 import tempfile
 import unittest
@@ -48,6 +49,19 @@ class LeaseControlV4Tests(unittest.TestCase):
             self.session_id,
             root_turn_id=root_turn_id or f"root-turn-{generation}",
             packet_wire=self.packet(generation=generation, packet_id=packet_id),
+        )
+
+    def reserve(self, *, tool_use_id="spawn-1"):
+        snapshot = control.read_snapshot(self.directory, self.secret, self.session_id)
+        lease = snapshot.active_lease
+        return control.reserve_spawn(
+            self.directory,
+            self.secret,
+            self.session_id,
+            tool_use_id=tool_use_id,
+            task_name=lease.expected_task_name,
+            agent_type="luna_worker",
+            fork_turns="none",
         )
 
     def force_persisted_lease_status_for_test(self, status):
@@ -204,6 +218,182 @@ class LeaseControlV4Tests(unittest.TestCase):
 
         self.assertEqual(once, initial)
         self.assertEqual(twice, once)
+
+    def test_expected_task_name_is_generation_and_lease_scoped(self):
+        first = self.stage(generation=1, packet_id="packet-1")
+        first_name = first.active_lease.expected_task_name
+        self.assertRegex(first_name, r"^luna_g1_[0-9a-f]{8}$")
+        control.revoke_current_lease(self.directory, self.secret, self.session_id)
+
+        second = self.stage(generation=2, packet_id="packet-2")
+        second_name = second.active_lease.expected_task_name
+
+        self.assertRegex(second_name, r"^luna_g2_[0-9a-f]{8}$")
+        self.assertNotEqual(first_name, second_name)
+
+    def test_spawn_reservation_rejects_wrong_task_name_agent_type_or_fork_mode(self):
+        staged = self.stage()
+        correct = staged.active_lease.expected_task_name
+        cases = (
+            {"task_name": "luna_worker", "agent_type": "luna_worker", "fork_turns": "none"},
+            {"task_name": correct, "agent_type": "reviewer", "fork_turns": "none"},
+            {"task_name": correct, "agent_type": "luna_worker", "fork_turns": "all"},
+        )
+        for index, values in enumerate(cases):
+            with self.subTest(values=values):
+                with self.assertRaises(RouterStateError):
+                    control.reserve_spawn(
+                        self.directory,
+                        self.secret,
+                        self.session_id,
+                        tool_use_id=f"bad-spawn-{index}",
+                        **values,
+                    )
+                current = control.read_snapshot(
+                    self.directory, self.secret, self.session_id
+                )
+                self.assertIsNone(current.active_lease.spawn_tool_use_id)
+
+    def test_spawn_reservation_belongs_only_to_current_lease(self):
+        staged = self.stage()
+        lease_id = staged.active_lease.lease_id
+
+        reserved = self.reserve(tool_use_id="spawn-current")
+
+        self.assertEqual(reserved.active_lease.lease_id, lease_id)
+        self.assertEqual(reserved.active_lease.spawn_tool_use_id, "spawn-current")
+        self.assertIsNone(reserved.active_lease.worker_agent_id)
+        self.assertIsNone(reserved.active_lease.worker_task_path)
+
+    def test_exact_spawn_result_records_only_current_task_path(self):
+        staged = self.stage()
+        expected_path = staged.active_lease.expected_task_name
+        self.reserve(tool_use_id="spawn-current")
+
+        updated, disposition = control.observe_spawn_result(
+            self.directory,
+            self.secret,
+            self.session_id,
+            tool_use_id="spawn-current",
+            task_path=expected_path,
+        )
+
+        self.assertEqual(disposition, "CURRENT")
+        self.assertEqual(updated.active_lease.worker_task_path, expected_path)
+        self.assertIsNone(updated.active_lease.worker_agent_id)
+        self.assertIsNone(updated.active_lease.child_turn_id)
+        self.assertEqual(updated.active_lease.status, "STAGED")
+
+    def test_wrong_path_for_current_spawn_result_fails_closed(self):
+        self.stage()
+        self.reserve(tool_use_id="spawn-current")
+        before = control.read_snapshot(self.directory, self.secret, self.session_id)
+
+        with self.assertRaises(RouterStateError):
+            control.observe_spawn_result(
+                self.directory,
+                self.secret,
+                self.session_id,
+                tool_use_id="spawn-current",
+                task_path="wrong-task-path",
+            )
+
+        self.assertEqual(
+            control.read_snapshot(self.directory, self.secret, self.session_id), before
+        )
+
+    def test_revoked_spawn_observation_is_stale_noop(self):
+        first = self.stage(generation=1, packet_id="packet-1")
+        first_path = first.active_lease.expected_task_name
+        self.reserve(tool_use_id="spawn-old")
+        control.revoke_current_lease(self.directory, self.secret, self.session_id)
+        self.stage(generation=2, packet_id="packet-2")
+        self.reserve(tool_use_id="spawn-new")
+        before = control.read_snapshot(self.directory, self.secret, self.session_id)
+
+        after, disposition = control.observe_spawn_result(
+            self.directory,
+            self.secret,
+            self.session_id,
+            tool_use_id="spawn-old",
+            task_path=first_path,
+        )
+
+        self.assertEqual(disposition, "STALE")
+        self.assertEqual(after, before)
+        self.assertEqual(
+            control.read_snapshot(self.directory, self.secret, self.session_id), before
+        )
+
+    def test_subagent_start_never_binds_uncorrelated_worker(self):
+        self.stage()
+        reserved = self.reserve(tool_use_id="spawn-current")
+
+        after, disposition = control.observe_subagent_start(
+            self.directory,
+            self.secret,
+            self.session_id,
+            agent_id="agent-current",
+            agent_type="luna_worker",
+            turn_id="child-turn-current",
+        )
+
+        self.assertEqual(disposition, "NOOP")
+        self.assertEqual(after, reserved)
+        self.assertIsNone(after.active_lease.worker_agent_id)
+        self.assertIsNone(after.active_lease.child_turn_id)
+
+    def test_late_subagent_start_after_revoke_is_noop(self):
+        self.stage(generation=1, packet_id="packet-1")
+        self.reserve(tool_use_id="spawn-old")
+        control.revoke_current_lease(self.directory, self.secret, self.session_id)
+        self.stage(generation=2, packet_id="packet-2")
+        before = control.read_snapshot(self.directory, self.secret, self.session_id)
+
+        after, disposition = control.observe_subagent_start(
+            self.directory,
+            self.secret,
+            self.session_id,
+            agent_id="unknown-old-agent",
+            agent_type="luna_worker",
+            turn_id="unknown-old-turn",
+        )
+
+        self.assertEqual(disposition, "NOOP")
+        self.assertEqual(after, before)
+        self.assertIsNone(after.active_lease.worker_agent_id)
+
+    def test_bootstrap_capability_is_lease_scoped(self):
+        first = self.stage(generation=1, packet_id="packet-1")
+        first_capability = control.build_bootstrap_capability(
+            self.secret, first.active_lease
+        )
+        control.verify_bootstrap_capability(
+            self.secret, first.active_lease, first_capability
+        )
+        control.revoke_current_lease(self.directory, self.secret, self.session_id)
+
+        second = self.stage(generation=2, packet_id="packet-2")
+        second_capability = control.build_bootstrap_capability(
+            self.secret, second.active_lease
+        )
+
+        self.assertRegex(first_capability, r"^v4b1\.[0-9a-f]{64}$")
+        self.assertRegex(second_capability, r"^v4b1\.[0-9a-f]{64}$")
+        self.assertNotEqual(first_capability, second_capability)
+
+    def test_old_bootstrap_capability_fails_against_new_lease(self):
+        first = self.stage(generation=1, packet_id="packet-1")
+        old_capability = control.build_bootstrap_capability(
+            self.secret, first.active_lease
+        )
+        control.revoke_current_lease(self.directory, self.secret, self.session_id)
+        second = self.stage(generation=2, packet_id="packet-2")
+
+        with self.assertRaises(RouterStateError):
+            control.verify_bootstrap_capability(
+                self.secret, second.active_lease, old_capability
+            )
 
 
 if __name__ == "__main__":
