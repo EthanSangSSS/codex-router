@@ -39,7 +39,7 @@ For root `UserPromptSubmit`, routing precedence is:
 
 ```text
 1. explicit no-Luna delegation veto
-2. existing explicit Router bypass/direct marker semantics
+2. legacy [CODEX_ROUTER_DIRECT] machine marker and explicit Router bypass (本次不用 Router / 仅本地执行)
 3. interactive browser/UI ownership -> PRIMARY
 4. protected-material classification
 5. substantive local-engineering routing
@@ -145,7 +145,7 @@ The following should be PRIMARY-owned when expressed as actual requested actions
 ```text
 打开浏览器访问这个网站
 在 Chrome 里打开这个页面
-点击 Login
+在网页里点击 Login
 登录这个网站
 填写网页表单
 滚动页面并检查结果
@@ -158,7 +158,7 @@ log in to the site and fill the form
 open Chrome and verify the UI manually
 ```
 
-The deterministic matcher should require evidence of an **interactive action** plus a **browser/UI target**. Merely mentioning HTML, CSS, a browser, a button, a URL, or a web framework is insufficient.
+The deterministic matcher must require evidence of an **interactive action** plus a **browser/UI target**. A standalone action word such as `click`, `登录`, or `截图` is insufficient without browser/UI context. Merely mentioning HTML, CSS, a browser, a button, a URL, or a web framework is also insufficient.
 
 ### What remains Luna-eligible
 
