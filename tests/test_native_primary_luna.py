@@ -37,6 +37,7 @@ Execute the delegated task in the current Codex workspace using the normal nativ
 You may inspect/search/read files; edit/create/delete task-related files; run shell/project tooling; build/test/lint/typecheck; run Playwright/Cypress/headless E2E; debug; refactor; retry; verify; and inspect local Git status/diff/log when relevant.
 Do not spawn descendants or another Codex runtime. Do not intentionally daemonize persistent background work.
 Do not perform unrelated destructive actions. Do not commit, push, mutate PRs, deploy/publish, communicate externally, mutate cloud resources, or perform system-level installation unless the delegated user objective explicitly requires that action and native platform controls permit/approve it.
+Do not claim an external or persistent effect completed without direct evidence.
 Return concise implementation evidence, tests run, blockers, and remaining risks to PRIMARY."""
 
 
@@ -113,6 +114,7 @@ class NativeContractRenderingTests(unittest.TestCase):
             "Playwright/Cypress/headless E2E",
             "Do not spawn descendants",
             "another Codex runtime",
+            "Do not claim an external or persistent effect completed without direct evidence",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, instructions)
@@ -173,6 +175,155 @@ class NativeInstallLifecycleTests(unittest.TestCase):
         path.write_bytes(content)
         os.chmod(path, mode)
         return path
+
+    def reset_home(self, name: str) -> None:
+        self.home = Path(self.temporary.name) / name
+        self.home.mkdir(mode=0o700)
+        os.chmod(self.home, 0o700)
+
+    def crash_after_native_managed_write(self, operation, write_number: int) -> None:
+        from codex_router import global_install as core
+
+        original_replace = core._replace_expected
+        original_unlink = core._unlink_expected
+        writes = 0
+
+        def crash_if_selected():
+            nonlocal writes
+            writes += 1
+            if writes == write_number:
+                raise KeyboardInterrupt("synthetic Native interruption")
+
+        def replace_then_crash(*args, **kwargs):
+            result = original_replace(*args, **kwargs)
+            crash_if_selected()
+            return result
+
+        def unlink_then_crash(*args, **kwargs):
+            result = original_unlink(*args, **kwargs)
+            crash_if_selected()
+            return result
+
+        with (
+            patch.object(core, "_replace_expected", side_effect=replace_then_crash),
+            patch.object(core, "_unlink_expected", side_effect=unlink_then_crash),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                operation()
+
+    def test_interrupted_install_resumes_after_each_managed_write(self):
+        for write_number in (1, 2):
+            with self.subTest(write_number=write_number):
+                self.reset_home(f"resume-install-{write_number}")
+                agents_original = b"# Existing guidance\n"
+                luna_original = b'name = "preexisting-luna"\n'
+                self.write("AGENTS.md", agents_original, 0o644)
+                self.write("agents/luna-worker.toml", luna_original, 0o640)
+
+                self.crash_after_native_managed_write(
+                    lambda: native_install(self.home), write_number
+                )
+
+                self.assertEqual(native_status(self.home).state, "modified")
+                self.assertEqual(native_install(self.home).state, "installed")
+                self.assertEqual(native_uninstall(self.home).state, "uninstalled")
+                self.assertEqual((self.home / "AGENTS.md").read_bytes(), agents_original)
+                self.assertEqual(
+                    (self.home / "agents/luna-worker.toml").read_bytes(),
+                    luna_original,
+                )
+                self.assertEqual(
+                    (self.home / "AGENTS.md").stat().st_mode & 0o777, 0o644
+                )
+                self.assertEqual(
+                    (self.home / "agents/luna-worker.toml").stat().st_mode & 0o777,
+                    0o640,
+                )
+
+    def test_interrupted_install_can_roll_back_after_each_managed_write(self):
+        for write_number in (1, 2):
+            with self.subTest(write_number=write_number):
+                self.reset_home(f"rollback-install-{write_number}")
+                agents_original = b"# Existing guidance\n"
+                self.write("AGENTS.md", agents_original, 0o644)
+
+                self.crash_after_native_managed_write(
+                    lambda: native_install(self.home), write_number
+                )
+
+                self.assertEqual(native_uninstall(self.home).state, "uninstalled")
+                self.assertEqual((self.home / "AGENTS.md").read_bytes(), agents_original)
+                self.assertFalse((self.home / "agents/luna-worker.toml").exists())
+                self.assertEqual(
+                    (self.home / "AGENTS.md").stat().st_mode & 0o777, 0o644
+                )
+
+    def test_interrupted_uninstall_resumes_after_each_managed_write(self):
+        for write_number in (1, 2):
+            with self.subTest(write_number=write_number):
+                self.reset_home(f"resume-uninstall-{write_number}")
+                agents_original = b"# Existing guidance\n"
+                luna_original = b'name = "preexisting-luna"\n'
+                self.write("AGENTS.md", agents_original, 0o644)
+                self.write("agents/luna-worker.toml", luna_original, 0o640)
+                native_install(self.home)
+
+                self.crash_after_native_managed_write(
+                    lambda: native_uninstall(self.home), write_number
+                )
+
+                state = json.loads(
+                    (
+                        self.home
+                        / NATIVE_INSTALL_DIRECTORY_NAME
+                        / "install-state.json"
+                    ).read_bytes()
+                )
+                self.assertEqual(state["phase"], "uninstalling")
+                self.assertEqual(native_uninstall(self.home).state, "uninstalled")
+                self.assertEqual((self.home / "AGENTS.md").read_bytes(), agents_original)
+                self.assertEqual(
+                    (self.home / "agents/luna-worker.toml").read_bytes(),
+                    luna_original,
+                )
+                self.assertEqual(
+                    (self.home / "AGENTS.md").stat().st_mode & 0o777, 0o644
+                )
+                self.assertEqual(
+                    (self.home / "agents/luna-worker.toml").stat().st_mode & 0o777,
+                    0o640,
+                )
+
+    def test_install_after_interrupted_uninstall_finishes_reversal_then_reinstalls(self):
+        for write_number in (1, 2):
+            with self.subTest(write_number=write_number):
+                self.reset_home(f"reinstall-after-uninstall-{write_number}")
+                agents_original = b"# Existing guidance\n"
+                self.write("AGENTS.md", agents_original, 0o644)
+                native_install(self.home)
+
+                self.crash_after_native_managed_write(
+                    lambda: native_uninstall(self.home), write_number
+                )
+
+                self.assertEqual(native_install(self.home).state, "installed")
+                self.assertEqual(native_uninstall(self.home).state, "uninstalled")
+                self.assertEqual((self.home / "AGENTS.md").read_bytes(), agents_original)
+                self.assertFalse((self.home / "agents/luna-worker.toml").exists())
+
+    def test_interrupted_install_recovery_preflights_all_targets_before_writing(self):
+        self.write("AGENTS.md", b"existing\n", 0o644)
+        self.crash_after_native_managed_write(lambda: native_install(self.home), 1)
+        agents_after_crash = (self.home / "AGENTS.md").read_bytes()
+        luna = self.write(
+            "agents/luna-worker.toml", b'user_modified = true\n', 0o600
+        )
+
+        with self.assertRaisesRegex(RouterStateError, "changed during installation"):
+            native_install(self.home)
+
+        self.assertEqual((self.home / "AGENTS.md").read_bytes(), agents_after_crash)
+        self.assertEqual(luna.read_bytes(), b'user_modified = true\n')
 
     def test_fresh_install_preserves_unrelated_files_and_records_exact_state(self):
         agents_original = b"# Existing guidance\n"
@@ -357,6 +508,89 @@ class NativeInstallLifecycleTests(unittest.TestCase):
         self.assertFalse(result["INSTALL_STATE_CONSISTENT"])
         self.assertEqual(agents.read_bytes(), modified_agents)
         self.assertEqual(luna.read_bytes(), luna_before)
+
+    def test_agents_mode_change_is_modified_in_status_and_self_test(self):
+        agents = self.write("AGENTS.md", b"existing\n", 0o644)
+        native_install(self.home)
+
+        os.chmod(agents, 0o666)
+
+        status = native_status(self.home)
+        self.assertEqual(status.state, "modified")
+        self.assertFalse(status.agents_managed)
+        self.assertFalse(native_self_test(self.home)["INSTALL_STATE_CONSISTENT"])
+
+    def test_all_legacy_router_hook_commands_are_detected_without_marker(self):
+        commands = (
+            "hook-user-prompt",
+            "hook-pre-tool",
+            "hook-post-tool",
+            "hook-permission-request",
+            "hook-stop",
+            "hook-subagent-start",
+            "hook-subagent-stop",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.reset_home(command)
+                native_install(self.home)
+                self.write(
+                    "hooks.json",
+                    json.dumps(
+                        {
+                            "hooks": {
+                                "Synthetic": [
+                                    {
+                                        "hooks": [
+                                            {
+                                                "type": "command",
+                                                "command": (
+                                                    "/usr/bin/python3 -m "
+                                                    f"codex_router {command}"
+                                                ),
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    ).encode("utf-8"),
+                )
+
+                status = native_status(self.home)
+                self.assertTrue(status.router_hooks_present)
+                self.assertEqual(status.state, "modified")
+                self.assertFalse(
+                    native_self_test(self.home)["ROUTER_ROUTING_HOOK_ABSENT"]
+                )
+
+    def test_unreadable_or_invalid_hooks_are_fail_closed(self):
+        malformed_hooks = (b"\xff\xfe", b'{"hooks":')
+        for index, content in enumerate(malformed_hooks):
+            with self.subTest(content=content):
+                self.reset_home(f"malformed-hooks-{index}")
+                self.write("hooks.json", content)
+
+                with self.assertRaisesRegex(RouterStateError, "ambiguous|hooks"):
+                    native_install(self.home)
+
+                self.assertFalse(
+                    (self.home / NATIVE_INSTALL_DIRECTORY_NAME).exists()
+                )
+
+    def test_installed_status_treats_unreadable_or_invalid_hooks_as_present(self):
+        for index, content in enumerate((b"\xff\xfe", b'{"hooks":')):
+            with self.subTest(content=content):
+                self.reset_home(f"installed-malformed-hooks-{index}")
+                native_install(self.home)
+                self.write("hooks.json", content)
+
+                status = native_status(self.home)
+                self.assertTrue(status.router_hooks_present)
+                self.assertEqual(status.state, "modified")
+                self.assertFalse(
+                    native_self_test(self.home)["ROUTER_ROUTING_HOOK_ABSENT"]
+                )
 
     def test_self_test_does_not_claim_no_ceremony_without_luna_instructions(self):
         native_install(self.home)

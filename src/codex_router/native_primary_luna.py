@@ -26,7 +26,7 @@ _NATIVE_BACKUPS = {
     _LUNA_TARGET: "backups/luna-worker.toml.original",
 }
 _ROUTER_HOOK_COMMAND = re.compile(
-    r"\bcodex_router\b.*\bhook-(?:user-prompt-submit|pre-tool|post-tool|subagent-start|subagent-stop)\b"
+    r"\bcodex_router\b.*\bhook-(?:user-prompt|pre-tool|post-tool|permission-request|stop|subagent-start|subagent-stop)\b"
 )
 
 
@@ -49,6 +49,7 @@ Execute the delegated task in the current Codex workspace using the normal nativ
 You may inspect/search/read files; edit/create/delete task-related files; run shell/project tooling; build/test/lint/typecheck; run Playwright/Cypress/headless E2E; debug; refactor; retry; verify; and inspect local Git status/diff/log when relevant.
 Do not spawn descendants or another Codex runtime. Do not intentionally daemonize persistent background work.
 Do not perform unrelated destructive actions. Do not commit, push, mutate PRs, deploy/publish, communicate externally, mutate cloud resources, or perform system-level installation unless the delegated user objective explicitly requires that action and native platform controls permit/approve it.
+Do not claim an external or persistent effect completed without direct evidence.
 Return concise implementation evidence, tests run, blockers, and remaining risks to PRIMARY."""
 
 
@@ -174,7 +175,8 @@ def _validate_state(
         not isinstance(state, Mapping)
         or set(state) != {"protocol", "phase", "targets"}
         or state.get("protocol") != NATIVE_INSTALL_STATE_PROTOCOL
-        or state.get("phase") not in {"prepared", "installed", "uninstalled"}
+        or state.get("phase")
+        not in {"prepared", "installed", "uninstalling", "uninstalled"}
         or not isinstance(state.get("targets"), Mapping)
         or set(state["targets"]) != set(_NATIVE_TARGETS)
     ):
@@ -274,13 +276,13 @@ def _router_hooks_present(home: Path) -> bool:
     try:
         raw = content.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
-        return False
+        return True
     if _core.HOOK_MARKER in raw:
         return True
     try:
         document = json.loads(raw)
     except json.JSONDecodeError:
-        return False
+        return True
     return any(_ROUTER_HOOK_COMMAND.search(value) for value in _walk_strings(document))
 
 
@@ -345,7 +347,7 @@ def _status_from_state(
 ) -> NativeStatus:
     installation_dir = _installation_dir(home)
     router_hooks = _router_hooks_present(home)
-    agents_exists, agents_content, _agents_mode = _core._read_target_file(
+    agents_exists, agents_content, agents_mode = _core._read_target_file(
         home, _AGENTS_TARGET
     )
     if state is None:
@@ -366,6 +368,7 @@ def _status_from_state(
     if (
         agents_exists
         and agents_content is not None
+        and agents_mode == _agents_installed_mode(agents_record)
         and agents_record.get("installed_block_sha256")
         == _core._sha256(_managed_primary_bytes())
     ):
@@ -540,6 +543,207 @@ def _target_record(
     }
 
 
+def _original_target(
+    installation_dir: Path, name: str, record: Mapping[str, Any]
+) -> bytes | object:
+    original = _backup_bytes(installation_dir, name, record)
+    return _core._MISSING if original is None else original
+
+
+def _apply_prepared_native_install(
+    *, home: Path, state: dict[str, Any], expected_luna: bytes
+) -> NativeStatus:
+    if state.get("phase") != "prepared":
+        raise _core._error("conflict", "Native installation is not resumable")
+    installation_dir = _installation_dir(home)
+    agents_record = state["targets"][_AGENTS_TARGET]
+    luna_record = state["targets"][_LUNA_TARGET]
+    if _core._sha256(expected_luna) != luna_record.get("installed_sha256"):
+        raise _core._error(
+            "conflict", "Native Luna configuration differs; uninstall before reinstall"
+        )
+    agents_original = _original_target(
+        installation_dir, _AGENTS_TARGET, agents_record
+    )
+    luna_original = _original_target(installation_dir, _LUNA_TARGET, luna_record)
+    installed_agents = _install_primary_block(
+        None if agents_original is _core._MISSING else agents_original
+    )
+    installed_agents_mode = (
+        agents_record.get("original_mode")
+        if agents_record.get("original_mode") is not None
+        else 0o600
+    )
+    plan = {
+        _AGENTS_TARGET: (
+            agents_original,
+            agents_record.get("original_mode"),
+            installed_agents,
+            installed_agents_mode,
+        ),
+        _LUNA_TARGET: (
+            luna_original,
+            luna_record.get("original_mode"),
+            expected_luna,
+            luna_record["installed_mode"],
+        ),
+    }
+    for name, (original, original_mode, installed, installed_mode) in plan.items():
+        target = home / name
+        original_match = _core._matches_current(
+            target, original, expected_mode=original_mode
+        )[0]
+        installed_match = _core._matches_current(
+            target, installed, expected_mode=installed_mode
+        )[0]
+        if not (original_match or installed_match):
+            raise _core._error(
+                "conflict", "Native managed file changed during installation"
+            )
+    _core._validate_agents_directory(home, create=True)
+    for name, (original, original_mode, installed, installed_mode) in plan.items():
+        target = home / name
+        if _core._matches_current(
+            target, installed, expected_mode=installed_mode
+        )[0]:
+            continue
+        _core._replace_expected(
+            target,
+            expected=original,
+            expected_mode=original_mode,
+            replacement=installed,
+            mode=installed_mode,
+        )
+    state["phase"] = "installed"
+    _write_state(home, state)
+    status = _status_from_state(home, state)
+    if status.state != "installed":
+        raise _core._error("conflict", "Native installation did not commit completely")
+    return status
+
+
+def _agents_installed_mode(record: Mapping[str, Any]) -> int:
+    original_mode = record.get("original_mode")
+    return original_mode if original_mode is not None else 0o600
+
+
+def _apply_native_uninstall(
+    *, home: Path, state: dict[str, Any]
+) -> NativeStatus:
+    phase = state.get("phase")
+    if phase not in {"prepared", "installed", "uninstalling"}:
+        raise _core._error("conflict", "Native installation is not safely uninstallable")
+    installation_dir = _installation_dir(home)
+    agents_record = state["targets"][_AGENTS_TARGET]
+    luna_record = state["targets"][_LUNA_TARGET]
+    agents_exists, agents_content, agents_mode = _core._read_target_file(
+        home, _AGENTS_TARGET
+    )
+    agents_installed = False
+    agents_reversed = False
+    stripped_agents: bytes | None = None
+    if agents_exists and agents_content is not None:
+        if agents_mode == _agents_installed_mode(agents_record):
+            try:
+                stripped_agents = _strip_primary_block(agents_content)
+                agents_installed = True
+            except RouterStateError:
+                pass
+        begin_count, end_count = _native_marker_counts(agents_content)
+        reversed_mode = agents_record.get("original_mode")
+        agents_reversed = (
+            begin_count == end_count == 0
+            and (reversed_mode is None or agents_mode == reversed_mode)
+        )
+    elif agents_record.get("existed") is False:
+        agents_reversed = True
+
+    original_luna = _original_target(
+        installation_dir, _LUNA_TARGET, luna_record
+    )
+    luna_exists, luna_content, luna_mode = _core._read_target_file(
+        home, _LUNA_TARGET
+    )
+    luna_installed = (
+        luna_exists
+        and luna_content is not None
+        and _core._sha256(luna_content) == luna_record.get("installed_sha256")
+        and luna_mode == luna_record.get("installed_mode")
+    )
+    luna_reversed = _core._matches_current(
+        home / _LUNA_TARGET,
+        original_luna,
+        expected_mode=luna_record.get("original_mode"),
+    )[0]
+    if phase == "installed":
+        if not agents_installed:
+            raise _core._error(
+                "conflict", "Native AGENTS ownership changed during uninstallation"
+            )
+        if not luna_installed:
+            raise _core._error(
+                "conflict", "Native Luna ownership changed during uninstallation"
+            )
+    else:
+        if not (agents_installed or agents_reversed):
+            raise _core._error(
+                "conflict", "Native AGENTS ownership changed during uninstallation"
+            )
+        if not (luna_installed or luna_reversed):
+            raise _core._error(
+                "conflict", "Native Luna ownership changed during uninstallation"
+            )
+
+    if phase != "uninstalling":
+        state["phase"] = "uninstalling"
+        _write_state(home, state)
+    if agents_installed:
+        assert agents_content is not None
+        if stripped_agents == b"" and agents_record.get("existed") is False:
+            _core._unlink_expected(
+                home / _AGENTS_TARGET,
+                expected=agents_content,
+                expected_mode=agents_mode,
+            )
+        else:
+            replacement_agents = b"" if stripped_agents is None else stripped_agents
+            replacement_mode = (
+                agents_record.get("original_mode")
+                if agents_record.get("original_mode") is not None
+                else agents_mode
+            )
+            _core._replace_expected(
+                home / _AGENTS_TARGET,
+                expected=agents_content,
+                expected_mode=agents_mode,
+                replacement=replacement_agents,
+                mode=replacement_mode,
+            )
+    if luna_installed:
+        assert luna_content is not None
+        if luna_record.get("existed") is False:
+            _core._unlink_expected(
+                home / _LUNA_TARGET,
+                expected=luna_content,
+                expected_mode=luna_mode,
+            )
+        else:
+            assert original_luna is not _core._MISSING
+            _core._replace_expected(
+                home / _LUNA_TARGET,
+                expected=luna_content,
+                expected_mode=luna_mode,
+                replacement=original_luna,
+                mode=luna_record["original_mode"],
+            )
+    state["phase"] = "uninstalled"
+    _write_state(home, state)
+    status = _status_from_state(home, state)
+    if status.state != "uninstalled":
+        raise _core._error("conflict", "Native uninstall did not commit completely")
+    return status
+
+
 def native_install(
     codex_home: Path | str,
     *,
@@ -559,6 +763,14 @@ def native_install(
     with _core._home_lock(home):
         state = _load_state(home)
         if state is not None:
+            if state["phase"] == "prepared":
+                return _apply_prepared_native_install(
+                    home=home, state=state, expected_luna=expected_luna
+                )
+            if state["phase"] == "uninstalling":
+                _apply_native_uninstall(home=home, state=state)
+                state = _load_state(home)
+                assert state is not None
             current_status = _status_from_state(home, state)
             if current_status.state == "installed":
                 _exists, current_luna, _mode = _core._read_target_file(
@@ -585,7 +797,6 @@ def native_install(
         luna_exists, luna_original, luna_mode = _core._read_target_file(
             home, _LUNA_TARGET
         )
-        installed_agents = _install_primary_block(agents_original)
         if state is None:
             installation_dir = _create_installation_directories(home)
         else:
@@ -626,29 +837,9 @@ def native_install(
         }
         _write_state(home, state)
 
-        agents_expected = agents_original if agents_exists else _core._MISSING
-        installed_agents_mode = agents_mode if agents_mode is not None else 0o600
-        _core._replace_expected(
-            home / _AGENTS_TARGET,
-            expected=agents_expected,
-            expected_mode=agents_mode,
-            replacement=installed_agents,
-            mode=installed_agents_mode,
+        return _apply_prepared_native_install(
+            home=home, state=state, expected_luna=expected_luna
         )
-        luna_expected = luna_original if luna_exists else _core._MISSING
-        _core._replace_expected(
-            home / _LUNA_TARGET,
-            expected=luna_expected,
-            expected_mode=luna_mode,
-            replacement=expected_luna,
-            mode=0o600,
-        )
-        state["phase"] = "installed"
-        _write_state(home, state)
-        status = _status_from_state(home, state)
-        if status.state != "installed":
-            raise _core._error("conflict", "Native installation did not commit completely")
-        return status
 
 
 def native_uninstall(codex_home: Path | str) -> NativeStatus:
@@ -660,84 +851,4 @@ def native_uninstall(codex_home: Path | str) -> NativeStatus:
         current_status = _status_from_state(home, state)
         if state["phase"] == "uninstalled" and current_status.state == "uninstalled":
             return current_status
-        if state["phase"] != "installed":
-            raise _core._error(
-                "conflict", "Native installation is not safely uninstallable"
-            )
-
-        agents_record = state["targets"][_AGENTS_TARGET]
-        luna_record = state["targets"][_LUNA_TARGET]
-        agents_exists, agents_content, agents_mode = _core._read_target_file(
-            home, _AGENTS_TARGET
-        )
-        if not agents_exists or agents_content is None:
-            raise _core._error("conflict", "Native AGENTS block is unavailable")
-        installed_agents_mode = (
-            agents_record.get("original_mode")
-            if agents_record.get("original_mode") is not None
-            else 0o600
-        )
-        if agents_mode != installed_agents_mode:
-            raise _core._error("conflict", "Native AGENTS mode changed")
-        if agents_record.get("installed_block_sha256") != _core._sha256(
-            _managed_primary_bytes()
-        ):
-            raise _core._error("conflict", "Native AGENTS block evidence changed")
-        stripped_agents = _strip_primary_block(agents_content)
-
-        luna_exists, luna_content, luna_mode = _core._read_target_file(
-            home, _LUNA_TARGET
-        )
-        if (
-            not luna_exists
-            or luna_content is None
-            or _core._sha256(luna_content) != luna_record.get("installed_sha256")
-            or luna_mode != luna_record.get("installed_mode")
-        ):
-            raise _core._error("conflict", "Native Luna file changed after installation")
-        original_luna = _backup_bytes(
-            _installation_dir(home), _LUNA_TARGET, luna_record
-        )
-
-        if stripped_agents is None and agents_record.get("existed") is False:
-            _core._unlink_expected(
-                home / _AGENTS_TARGET,
-                expected=agents_content,
-                expected_mode=agents_mode,
-            )
-        else:
-            replacement_agents = b"" if stripped_agents is None else stripped_agents
-            replacement_mode = (
-                agents_record.get("original_mode")
-                if agents_record.get("original_mode") is not None
-                else agents_mode
-            )
-            _core._replace_expected(
-                home / _AGENTS_TARGET,
-                expected=agents_content,
-                expected_mode=agents_mode,
-                replacement=replacement_agents,
-                mode=replacement_mode,
-            )
-
-        if luna_record.get("existed") is False:
-            _core._unlink_expected(
-                home / _LUNA_TARGET,
-                expected=luna_content,
-                expected_mode=luna_mode,
-            )
-        else:
-            assert original_luna is not None
-            _core._replace_expected(
-                home / _LUNA_TARGET,
-                expected=luna_content,
-                expected_mode=luna_mode,
-                replacement=original_luna,
-                mode=luna_record["original_mode"],
-            )
-        state["phase"] = "uninstalled"
-        _write_state(home, state)
-        status = _status_from_state(home, state)
-        if status.state != "uninstalled":
-            raise _core._error("conflict", "Native uninstall did not commit completely")
-        return status
+        return _apply_native_uninstall(home=home, state=state)
