@@ -503,7 +503,9 @@ def native_self_test(codex_home: Path | str) -> dict[str, bool]:
         "NATIVE_PRIMARY_BLOCK": status.agents_managed,
         "LUNA_AGENT_CONFIG": luna_config,
         "ROUTER_ROUTING_HOOK_ABSENT": not status.router_hooks_present,
-        "NO_K1_LEASE_CEREMONY": bool(managed_text is not None)
+        "NO_K1_LEASE_CEREMONY": bool(
+            managed_text is not None and developer_instructions
+        )
         and not forbidden_ceremony.search(ceremony_text),
         "NO_LUNA_DESCENDANTS": no_descendants,
         "INSTALL_STATE_CONSISTENT": status.state == "installed",

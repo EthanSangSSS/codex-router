@@ -358,6 +358,20 @@ class NativeInstallLifecycleTests(unittest.TestCase):
         self.assertEqual(agents.read_bytes(), modified_agents)
         self.assertEqual(luna.read_bytes(), luna_before)
 
+    def test_self_test_does_not_claim_no_ceremony_without_luna_instructions(self):
+        native_install(self.home)
+        luna = self.home / "agents/luna-worker.toml"
+        luna.write_bytes(
+            b'name = "luna_worker"\nmodel = "custom"\nmodel_reasoning_effort = "high"\n'
+        )
+
+        result = native_self_test(self.home)
+
+        self.assertFalse(result["LUNA_AGENT_CONFIG"])
+        self.assertFalse(result["NO_K1_LEASE_CEREMONY"])
+        self.assertFalse(result["NO_LUNA_DESCENDANTS"])
+        self.assertFalse(result["INSTALL_STATE_CONSISTENT"])
+
 
 class NativeLegacyMigrationTests(unittest.TestCase):
     LEGACY_DEFAULTS = {
