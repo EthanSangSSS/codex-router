@@ -16,6 +16,13 @@ from .global_install_adapter import (
     global_uninstall,
 )
 from . import luna_control
+from .native_primary_luna import (
+    NativeStatus,
+    native_install,
+    native_self_test,
+    native_status,
+    native_uninstall,
+)
 from .hook import MAX_HOOK_INPUT_BYTES, _load_installation, handle_hook_event, read_hook_event
 from .protocol import ProtocolError, build_luna_packet, parse_luna_packet
 from .pipeline import Router, RouterRunError
@@ -164,6 +171,20 @@ def parser() -> argparse.ArgumentParser:
         "global-self-test", help="run the offline global Router policy self-test"
     )
     self_test.add_argument("--codex-home", type=Path, required=True)
+
+    native_install_parser = subcommands.add_parser(
+        "native-install", help="install Native PRIMARY + Luna V1"
+    )
+    native_install_parser.add_argument("--codex-home", type=Path, required=True)
+    native_install_parser.add_argument("--luna-model", default="gpt-5.6-luna")
+    native_install_parser.add_argument("--luna-reasoning", default="max")
+    for command, help_text in (
+        ("native-status", "inspect Native PRIMARY + Luna V1"),
+        ("native-uninstall", "reversibly remove Native PRIMARY + Luna V1"),
+        ("native-self-test", "run the offline Native PRIMARY + Luna V1 self-test"),
+    ):
+        native_parser = subcommands.add_parser(command, help=help_text)
+        native_parser.add_argument("--codex-home", type=Path, required=True)
     return root
 
 
@@ -205,6 +226,18 @@ def _global_status_payload(status: GlobalStatus) -> dict[str, Any]:
         "live_activation": status.live_activation,
         "live_activation_blockers": list(blockers),
         "deferred_acceptance_evidence": list(deferred),
+    }
+
+
+def _native_status_payload(status: NativeStatus) -> dict[str, Any]:
+    return {
+        "state": status.state,
+        "installation_dir": str(status.installation_dir),
+        "agents_managed": status.agents_managed,
+        "luna_agent_configured": status.luna_agent_configured,
+        "router_hooks_present": status.router_hooks_present,
+        "new_session_required": status.new_session_required,
+        "mode": "native_primary_luna_v1",
     }
 
 
@@ -420,6 +453,23 @@ def main(argv=None) -> int:
             return 0
         if args.command == "global-self-test":
             _print_json(global_self_test(args.codex_home))
+            return 0
+        if args.command == "native-install":
+            native_result = native_install(
+                args.codex_home,
+                luna_model=args.luna_model,
+                luna_reasoning=args.luna_reasoning,
+            )
+            _print_json(_native_status_payload(native_result))
+            return 0
+        if args.command == "native-status":
+            _print_json(_native_status_payload(native_status(args.codex_home)))
+            return 0
+        if args.command == "native-uninstall":
+            _print_json(_native_status_payload(native_uninstall(args.codex_home)))
+            return 0
+        if args.command == "native-self-test":
+            _print_json(native_self_test(args.codex_home))
             return 0
         if args.command == "start":
             result = start_run(

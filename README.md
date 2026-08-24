@@ -16,6 +16,24 @@ All V1 access to the target workspace is read-only. Router writes only to its de
 
 That staged workflow remains available as an explicit CLI compatibility path. The optional global policy is intentionally lighter: primary Sol plans and retains final authority, exactly one persistent task-epoch native `luna_worker` normally executes bounded work, and Sol reviews/corrects/finalizes. All Web Sol work remains manual operator copy/paste.
 
+## Recommended mode: Native PRIMARY + Luna V1
+
+Native V1 is the recommended user-facing mode. Sol/PRIMARY remains the persistent planner, coordinator, reviewer, and final responder. When useful, PRIMARY delegates substantial local engineering to a fresh native disposable `luna_worker`; if native spawn is unavailable, PRIMARY continues locally when normal tools allow it.
+
+```bash
+router native-install --codex-home "/absolute/path/to/active-codex-home"
+router native-status --codex-home "/absolute/path/to/active-codex-home"
+router native-self-test --codex-home "/absolute/path/to/active-codex-home"
+```
+
+Native mode manages only its bounded `AGENTS.md` block, `agents/luna-worker.toml`, and reversible private ownership state under `.codex-native-primary-luna-v1/`. Its normal path installs no Router routing Hooks and uses no K1, generation lease, request-file staging, or bootstrap capability ceremony. The historical `global-*` commands remain available as the experimental hard-authority Router path; they are not part of normal Native V1 operation.
+
+To reverse only Native-owned changes:
+
+```bash
+router native-uninstall --codex-home "/absolute/path/to/active-codex-home"
+```
+
 ## Install
 
 Python 3.12 or newer is required. The runtime has no third-party dependencies.

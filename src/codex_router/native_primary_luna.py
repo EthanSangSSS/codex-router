@@ -431,6 +431,85 @@ def native_status(codex_home: Path | str) -> NativeStatus:
     return _status_from_state(home, state)
 
 
+def _native_managed_text(content: bytes | None) -> str | None:
+    if content is None:
+        return None
+    try:
+        text = content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if text.count(NATIVE_AGENTS_BEGIN) != 1 or text.count(NATIVE_AGENTS_END) != 1:
+        return None
+    start = text.index(NATIVE_AGENTS_BEGIN)
+    end = text.index(NATIVE_AGENTS_END, start) + len(NATIVE_AGENTS_END)
+    return text[start:end]
+
+
+def native_self_test(codex_home: Path | str) -> dict[str, bool]:
+    home = _core._validate_codex_home(codex_home)
+    status = native_status(home)
+    _agents_exists, agents_content, _agents_mode = _core._read_target_file(
+        home, _AGENTS_TARGET
+    )
+    _luna_exists, luna_content, _luna_mode = _core._read_target_file(
+        home, _LUNA_TARGET
+    )
+    managed_text = _native_managed_text(agents_content)
+    luna_document: dict[str, Any] | None = None
+    if luna_content is not None:
+        try:
+            parsed = tomllib.loads(luna_content.decode("utf-8", errors="strict"))
+            if isinstance(parsed, dict):
+                luna_document = parsed
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+            pass
+
+    luna_config = False
+    developer_instructions = ""
+    if luna_document is not None:
+        model = luna_document.get("model")
+        reasoning = luna_document.get("model_reasoning_effort")
+        developer = luna_document.get("developer_instructions")
+        if isinstance(developer, str):
+            developer_instructions = developer
+        if (
+            isinstance(model, str)
+            and model.strip()
+            and isinstance(reasoning, str)
+            and reasoning.strip()
+        ):
+            try:
+                luna_config = luna_content == render_luna_agent_bytes(
+                    model=model, reasoning=reasoning
+                )
+            except RouterStateError:
+                luna_config = False
+
+    forbidden_ceremony = re.compile(
+        r"(?:\bK1\b|\blease\b|\bgeneration\b|request-file|\bbootstrap\b|\bHMAC\b)",
+        re.IGNORECASE,
+    )
+    ceremony_text = "" if managed_text is None else managed_text
+    ceremony_text += "\n" + developer_instructions
+    no_descendants = bool(
+        luna_document is not None
+        and luna_document.get("agents") == {"enabled": False}
+        and luna_document.get("features")
+        == {"multi_agent": False, "multi_agent_v2": False}
+        and "Do not spawn descendants" in developer_instructions
+        and "another Codex runtime" in developer_instructions
+    )
+    return {
+        "NATIVE_PRIMARY_BLOCK": status.agents_managed,
+        "LUNA_AGENT_CONFIG": luna_config,
+        "ROUTER_ROUTING_HOOK_ABSENT": not status.router_hooks_present,
+        "NO_K1_LEASE_CEREMONY": bool(managed_text is not None)
+        and not forbidden_ceremony.search(ceremony_text),
+        "NO_LUNA_DESCENDANTS": no_descendants,
+        "INSTALL_STATE_CONSISTENT": status.state == "installed",
+    }
+
+
 def _create_installation_directories(home: Path) -> Path:
     installation_dir = _installation_dir(home)
     try:

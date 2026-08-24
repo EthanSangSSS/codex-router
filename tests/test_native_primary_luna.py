@@ -18,6 +18,7 @@ from codex_router.native_primary_luna import (
     _install_primary_block,
     _strip_primary_block,
     native_install,
+    native_self_test,
     native_status,
     native_uninstall,
     render_luna_agent_bytes,
@@ -324,6 +325,38 @@ class NativeInstallLifecycleTests(unittest.TestCase):
         self.assertFalse(status.agents_managed)
         self.assertFalse(status.luna_agent_configured)
         self.assertFalse(status.new_session_required)
+
+    def test_self_test_is_all_true_for_exact_installed_native_mode(self):
+        native_install(self.home, luna_model="custom-luna", luna_reasoning="high")
+
+        self.assertEqual(
+            native_self_test(self.home),
+            {
+                "NATIVE_PRIMARY_BLOCK": True,
+                "LUNA_AGENT_CONFIG": True,
+                "ROUTER_ROUTING_HOOK_ABSENT": True,
+                "NO_K1_LEASE_CEREMONY": True,
+                "NO_LUNA_DESCENDANTS": True,
+                "INSTALL_STATE_CONSISTENT": True,
+            },
+        )
+
+    def test_self_test_reports_each_modified_native_surface_without_writing(self):
+        native_install(self.home)
+        agents = self.home / "AGENTS.md"
+        luna = self.home / "agents/luna-worker.toml"
+        agents_before = agents.read_bytes()
+        luna_before = luna.read_bytes()
+
+        modified_agents = agents_before.replace(b"planner", b"K1", 1)
+        agents.write_bytes(modified_agents)
+        result = native_self_test(self.home)
+
+        self.assertFalse(result["NATIVE_PRIMARY_BLOCK"])
+        self.assertFalse(result["NO_K1_LEASE_CEREMONY"])
+        self.assertFalse(result["INSTALL_STATE_CONSISTENT"])
+        self.assertEqual(agents.read_bytes(), modified_agents)
+        self.assertEqual(luna.read_bytes(), luna_before)
 
 
 class NativeLegacyMigrationTests(unittest.TestCase):

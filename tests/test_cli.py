@@ -13,6 +13,7 @@ from codex_router import cli as cli_module
 from codex_router.protocol import web_response_marker
 from codex_router.state import RouterStateError
 from codex_router.types import GlobalStatus
+from codex_router.native_primary_luna import NativeStatus
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -186,6 +187,96 @@ class RouterCliTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stderr, "")
         self.assertIn("usage: router", completed.stdout)
+
+    def test_native_commands_parse_only_native_arguments(self):
+        root = Path("/tmp/native-cli-test")
+        cases = (
+            (
+                "native-install",
+                "--codex-home",
+                str(root),
+                "--luna-model",
+                "gpt-5.6-luna",
+                "--luna-reasoning",
+                "max",
+            ),
+            ("native-status", "--codex-home", str(root)),
+            ("native-uninstall", "--codex-home", str(root)),
+            ("native-self-test", "--codex-home", str(root)),
+        )
+        forbidden = {
+            "state_dir",
+            "codex_bin",
+            "local_model",
+            "local_reasoning",
+            "web_model",
+            "web_reasoning",
+            "packet_id",
+            "capability",
+        }
+
+        for arguments in cases:
+            with self.subTest(command=arguments[0]):
+                parsed = cli_module.parser().parse_args(arguments)
+                self.assertEqual(parsed.command, arguments[0])
+                self.assertEqual(parsed.codex_home, root)
+                self.assertTrue(forbidden.isdisjoint(vars(parsed)))
+
+    def test_native_status_payload_is_exact(self):
+        status = NativeStatus(
+            state="installed",
+            installation_dir=Path("/tmp/.codex-native-primary-luna-v1"),
+            agents_managed=True,
+            luna_agent_configured=True,
+            router_hooks_present=False,
+            new_session_required=True,
+        )
+
+        self.assertEqual(
+            cli_module._native_status_payload(status),
+            {
+                "state": "installed",
+                "installation_dir": "/tmp/.codex-native-primary-luna-v1",
+                "agents_managed": True,
+                "luna_agent_configured": True,
+                "router_hooks_present": False,
+                "new_session_required": True,
+                "mode": "native_primary_luna_v1",
+            },
+        )
+
+    def test_native_cli_lifecycle_and_self_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex-home"
+            home.mkdir(mode=0o700)
+
+            installed = self.cli("native-install", "--codex-home", str(home))
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            self.assertEqual(json.loads(installed.stdout)["state"], "installed")
+
+            status = self.cli("native-status", "--codex-home", str(home))
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertEqual(json.loads(status.stdout), json.loads(installed.stdout))
+
+            self_test = self.cli("native-self-test", "--codex-home", str(home))
+            self.assertEqual(self_test.returncode, 0, self_test.stderr)
+            self.assertEqual(
+                json.loads(self_test.stdout),
+                {
+                    "INSTALL_STATE_CONSISTENT": True,
+                    "LUNA_AGENT_CONFIG": True,
+                    "NATIVE_PRIMARY_BLOCK": True,
+                    "NO_K1_LEASE_CEREMONY": True,
+                    "NO_LUNA_DESCENDANTS": True,
+                    "ROUTER_ROUTING_HOOK_ABSENT": True,
+                },
+            )
+
+            uninstalled = self.cli(
+                "native-uninstall", "--codex-home", str(home)
+            )
+            self.assertEqual(uninstalled.returncode, 0, uninstalled.stderr)
+            self.assertEqual(json.loads(uninstalled.stdout)["state"], "uninstalled")
 
     def test_app_driver_cli_lifecycle_and_terminal_idempotency(self):
         with tempfile.TemporaryDirectory() as tmp:
