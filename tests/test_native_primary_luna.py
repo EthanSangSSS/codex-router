@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
 from codex_router.native_primary_luna import (
     NATIVE_AGENTS_BEGIN,
@@ -13,6 +14,7 @@ from codex_router.native_primary_luna import (
     NATIVE_INSTALL_DIRECTORY_NAME,
     NATIVE_INSTALL_STATE_PROTOCOL,
     NativeStatus,
+    _migrate_legacy_router_if_needed,
     _install_primary_block,
     _strip_primary_block,
     native_install,
@@ -322,6 +324,146 @@ class NativeInstallLifecycleTests(unittest.TestCase):
         self.assertFalse(status.agents_managed)
         self.assertFalse(status.luna_agent_configured)
         self.assertFalse(status.new_session_required)
+
+
+class NativeLegacyMigrationTests(unittest.TestCase):
+    LEGACY_DEFAULTS = {
+        "local_sol": {
+            "requested_model": "gpt-5.6-sol",
+            "requested_reasoning": "max",
+        },
+        "web_sol": {
+            "model_claimed": "sol",
+            "reasoning_claimed": "xhigh",
+            "verification": "operator_attested",
+        },
+        "luna": {
+            "requested_model": "gpt-5.6-luna",
+            "requested_reasoning": "max",
+        },
+    }
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.home = Path(self.temporary.name) / "codex-home"
+        self.home.mkdir(mode=0o700)
+        os.chmod(self.home, 0o700)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write(self, relative: str, content: bytes, mode: int = 0o600) -> Path:
+        path = self.home / relative
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.write_bytes(content)
+        os.chmod(path, mode)
+        return path
+
+    def install_legacy_router(self):
+        from codex_router import global_install_adapter as legacy
+
+        state_root = Path(self.temporary.name) / "legacy-state"
+        binary = Path(self.temporary.name) / "codex"
+        binary.write_text("synthetic binary", encoding="utf-8")
+        binary.chmod(0o700)
+        return legacy.global_install(
+            codex_home=self.home,
+            state_root=state_root,
+            codex_binary=binary,
+            defaults=self.LEGACY_DEFAULTS,
+        )
+
+    def test_native_install_migrates_real_legacy_install_and_preserves_unrelated(self):
+        from codex_router import global_install as legacy_core
+        from codex_router import global_install_adapter as legacy
+
+        agents_original = b"# User guidance before Router\n"
+        hooks_original = b'{"hooks":{"SessionStart":[{"hooks":[]}]}}\n'
+        other_agent = b'name = "other"\n'
+        self.write("AGENTS.md", agents_original, 0o644)
+        self.write("hooks.json", hooks_original, 0o600)
+        self.write("agents/other-agent.toml", other_agent, 0o600)
+        self.install_legacy_router()
+        self.assertEqual(legacy.global_status(self.home).state, "installed")
+        self.assertIn(
+            legacy_core.HOOK_MARKER,
+            (self.home / "hooks.json").read_text(encoding="utf-8"),
+        )
+
+        status = native_install(self.home)
+
+        self.assertEqual(status.state, "installed")
+        legacy_state = json.loads(
+            (
+                self.home
+                / legacy_core.INSTALL_DIRECTORY_NAME
+                / "install-state.json"
+            ).read_bytes()
+        )
+        self.assertEqual(legacy_state["phase"], "uninstalled")
+        self.assertEqual((self.home / "hooks.json").read_bytes(), hooks_original)
+        agents = (self.home / "AGENTS.md").read_bytes()
+        self.assertTrue(agents.startswith(agents_original))
+        self.assertEqual(agents.count(NATIVE_AGENTS_BEGIN.encode()), 1)
+        self.assertNotIn(legacy_core.AGENTS_BEGIN.encode(), agents)
+        self.assertEqual(
+            (self.home / "agents/other-agent.toml").read_bytes(), other_agent
+        )
+        self.assertEqual(
+            (self.home / "agents/luna-worker.toml").read_bytes(),
+            render_luna_agent_bytes(model="gpt-5.6-luna", reasoning="max"),
+        )
+
+    def test_modified_legacy_install_fails_before_any_native_write(self):
+        from codex_router import global_install_adapter as legacy
+
+        self.write("AGENTS.md", b"user guidance\n", 0o644)
+        self.install_legacy_router()
+        luna = self.home / "agents/luna-worker.toml"
+        luna.write_bytes(b'user_modified = true\n')
+        agents_before = (self.home / "AGENTS.md").read_bytes()
+        hooks_before = (self.home / "hooks.json").read_bytes()
+        self.assertEqual(legacy.global_status(self.home).state, "modified")
+
+        with self.assertRaisesRegex(RouterStateError, "legacy Router"):
+            native_install(self.home)
+
+        self.assertFalse((self.home / NATIVE_INSTALL_DIRECTORY_NAME).exists())
+        self.assertEqual((self.home / "AGENTS.md").read_bytes(), agents_before)
+        self.assertEqual((self.home / "hooks.json").read_bytes(), hooks_before)
+        self.assertEqual(luna.read_bytes(), b'user_modified = true\n')
+
+    def test_legacy_uninstall_failure_leaves_zero_native_writes(self):
+        from codex_router import global_install as legacy_core
+        from codex_router import global_install_adapter as legacy
+
+        self.write("AGENTS.md", b"user guidance\n", 0o644)
+        self.install_legacy_router()
+        agents_before = (self.home / "AGENTS.md").read_bytes()
+        hooks_before = (self.home / "hooks.json").read_bytes()
+        luna_before = (self.home / "agents/luna-worker.toml").read_bytes()
+
+        with patch.object(
+            legacy,
+            "global_uninstall",
+            side_effect=legacy_core._error("conflict", "synthetic uninstall failure"),
+        ):
+            with self.assertRaisesRegex(RouterStateError, "synthetic uninstall failure"):
+                native_install(self.home)
+
+        self.assertFalse((self.home / NATIVE_INSTALL_DIRECTORY_NAME).exists())
+        self.assertEqual((self.home / "AGENTS.md").read_bytes(), agents_before)
+        self.assertEqual((self.home / "hooks.json").read_bytes(), hooks_before)
+        self.assertEqual(
+            (self.home / "agents/luna-worker.toml").read_bytes(), luna_before
+        )
+
+    def test_migration_helper_is_false_for_clean_uninstalled_legacy_state(self):
+        self.install_legacy_router()
+        from codex_router import global_install_adapter as legacy
+
+        legacy.global_uninstall(self.home)
+        self.assertFalse(_migrate_legacy_router_if_needed(self.home))
 
 
 if __name__ == "__main__":

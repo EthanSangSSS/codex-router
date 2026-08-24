@@ -284,6 +284,52 @@ def _router_hooks_present(home: Path) -> bool:
     return any(_ROUTER_HOOK_COMMAND.search(value) for value in _walk_strings(document))
 
 
+def _legacy_agents_markers_present(home: Path) -> bool:
+    exists, content, _mode = _core._read_target_file(home, _AGENTS_TARGET)
+    if not exists or content is None:
+        return False
+    try:
+        text = content.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+    return _core.AGENTS_BEGIN in text or _core.AGENTS_END in text
+
+
+def _migrate_legacy_router_if_needed(home: Path) -> bool:
+    from . import global_install_adapter as legacy
+
+    status = legacy.global_status(home)
+    if status.state == "installed":
+        uninstalled = legacy.global_uninstall(home)
+        if (
+            uninstalled.state != "uninstalled"
+            or uninstalled.hook_configured
+            or uninstalled.agents_managed
+            or uninstalled.luna_agent_configured
+            or _router_hooks_present(home)
+            or _legacy_agents_markers_present(home)
+        ):
+            raise _core._error(
+                "conflict", "legacy Router managed uninstall did not reverse safely"
+            )
+        return True
+    if status.state in {"not-installed", "uninstalled"}:
+        if (
+            status.hook_configured
+            or status.agents_managed
+            or status.luna_agent_configured
+            or _router_hooks_present(home)
+            or _legacy_agents_markers_present(home)
+        ):
+            raise _core._error(
+                "conflict", "legacy Router ownership is ambiguous"
+            )
+        return False
+    raise _core._error(
+        "conflict", "legacy Router installation is modified or ambiguous"
+    )
+
+
 def _native_marker_counts(content: bytes | None) -> tuple[int, int]:
     if content is None:
         return 0, 0
@@ -423,6 +469,12 @@ def native_install(
         model=luna_model, reasoning=luna_reasoning
     )
     home = _core._validate_codex_home(codex_home)
+    existing_native_state = _load_state(home)
+    if (
+        existing_native_state is None
+        or existing_native_state["phase"] == "uninstalled"
+    ):
+        _migrate_legacy_router_if_needed(home)
     with _core._home_lock(home):
         state = _load_state(home)
         if state is not None:
