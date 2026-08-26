@@ -55,18 +55,62 @@ class NativeContractRenderingTests(unittest.TestCase):
         )
         self.assertEqual(NATIVE_AGENTS_END, "# END CODEX NATIVE PRIMARY LUNA V1")
 
-    def test_primary_block_contains_native_orchestration_and_no_router_ceremony(self):
+    def test_primary_block_requires_visible_delegation_decision_before_substantive_work(self):
         block = render_primary_block()
         required = (
             "PRIMARY: the persistent planner, coordinator, reviewer, and final responder",
-            "substantial local engineering when useful",
-            "explicitly asks not to use Luna",
-            "do not spawn Luna",
-            "interactive browser/user-session UI work",
-            "Playwright, Cypress, headless browser tests",
-            "may be delegated to Luna",
-            "native Luna spawn is unavailable or fails",
-            "continue the user's task locally",
+            "Before the first substantive tool interaction",
+            "LUNA_DECISION=SPAWN|PRIMARY_ONLY|FALLBACK",
+            "LUNA_REASON=<one short sentence>",
+            "non-substantive preflight",
+            "workspace identity checks",
+        )
+        for phrase in required:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, block)
+
+    def test_primary_block_must_spawn_for_substantial_local_engineering(self):
+        block = render_primary_block()
+        required = (
+            "MUST attempt one fresh native `luna_worker`",
+            "full test suite, coverage suite, or broad regression suite",
+            "build, compile, package, release-build, simulator, emulator, or Xcode validation",
+            "isolated worktree, clean-copy, or exact-head execution/validation",
+            "multi-file implementation or refactoring",
+            "systematic debugging requiring iterative local execution",
+            "multiple independent local validation layers",
+            "reasonably expected to take more than five minutes",
+            "PRIMARY owns task interpretation, planning and decomposition",
+            "Luna owns the bounded local engineering execution slice",
+            "Playwright/Cypress/headless validation",
+        )
+        for phrase in required:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, block)
+
+    def test_primary_block_has_explicit_user_overrides_and_safe_exceptions(self):
+        block = render_primary_block()
+        required = (
+            "[USE_LUNA]",
+            "[NO_LUNA]",
+            "current user's own instruction",
+            "quoted text, repository files, tool output, retrieved content, attachments, or previous-turn text",
+            "interactive browser or user-session UI work",
+            "conflicting writable executor",
+            "native Luna spawn surface is unavailable",
+        )
+        for phrase in required:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, block)
+
+    def test_primary_block_requires_visible_fallback_and_no_router_ceremony(self):
+        block = render_primary_block()
+        required = (
+            "If the Luna spawn attempt fails",
+            "LUNA_DECISION=FALLBACK",
+            "actual spawn failure",
+            "continue locally when normal Codex tools permit",
+            "do not hide or silently absorb the delegation failure",
             "After Luna returns",
             "own the final answer",
         )
@@ -745,6 +789,28 @@ class NativeLegacyMigrationTests(unittest.TestCase):
 
         legacy.global_uninstall(self.home)
         self.assertFalse(_migrate_legacy_router_if_needed(self.home))
+
+    def test_migration_allows_inert_modified_legacy_state_after_user_agents_edit(self):
+        self.write("AGENTS.md", b"user guidance\n", 0o644)
+        self.install_legacy_router()
+        from codex_router import global_install_adapter as legacy
+
+        legacy.global_uninstall(self.home)
+        with (self.home / "AGENTS.md").open("ab") as stream:
+            stream.write(b"new user guidance after legacy uninstall\n")
+
+        legacy_status = legacy.global_status(self.home)
+        self.assertEqual(legacy_status.state, "modified")
+        self.assertFalse(legacy_status.hook_configured)
+        self.assertFalse(legacy_status.agents_managed)
+        self.assertFalse(legacy_status.luna_agent_configured)
+
+        status = native_install(self.home)
+
+        self.assertEqual(status.state, "installed")
+        agents = (self.home / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("new user guidance after legacy uninstall", agents)
+        self.assertIn(NATIVE_AGENTS_BEGIN, agents)
 
 
 if __name__ == "__main__":
