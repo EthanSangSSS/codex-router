@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Repository: `EthanSangSSS/codex-router`.
-- Local checkout: `/Users/ethan/Desktop/Agent-lab/codex-router`.
+- Local checkout: `/path/to/codex-router`.
 - Validation branch: `hardening/native-luna-safety-v2`.
 - Baseline implementation reviewed before this plan: `ecf7b204735af6a6d2ec74fc6ee47e1659efff20`; validation must use the then-current remote PR head and report it explicitly.
 - PR #8 remains Draft throughout this pass.
@@ -35,7 +35,7 @@
 ### Task 1: Freeze repository and exact-build version reality
 
 **Files:**
-- Read only: `/Users/ethan/Desktop/Agent-lab/codex-router/.git/*`
+- Read only: `/path/to/codex-router/.git/*`
 - Read only: `/Applications/ChatGPT.app/Contents/Info.plist`
 - Read only: `/Applications/ChatGPT.app/Contents/Resources/codex`
 - Read only: `~/.codex/hooks.json`
@@ -49,7 +49,7 @@
 Run from the existing primary Sol session:
 
 ```bash
-cd /Users/ethan/Desktop/Agent-lab/codex-router
+cd /path/to/codex-router
 printf 'branch=' && git branch --show-current
 printf 'head=' && git rev-parse HEAD
 printf 'status_begin\n'
@@ -345,7 +345,7 @@ Do not add a logging Hook to obtain it.
 Only when local repository HEAD matches the current remote validation head, run from the repository source without installing it:
 
 ```bash
-cd /Users/ethan/Desktop/Agent-lab/codex-router
+cd /path/to/codex-router
 PYTHONPATH=src python3.12 -m codex_router global-status --codex-home "$HOME/.codex"
 ```
 

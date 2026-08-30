@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codex-router"
 version = "0.1.0"
-description = "Minimal Local Sol to Web Sol to Luna router"
+description = "Native-first Codex orchestration with PRIMARY planning and disposable Luna workers"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
