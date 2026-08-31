@@ -68,7 +68,7 @@ The implementation reports live activation as `BLOCKED_ACCEPTANCE_GATES` until t
 Before any active runtime probe, run from the existing local checkout:
 
 ```bash
-cd /Users/ethan/Desktop/Agent-lab/codex-router
+cd /path/to/codex-router
 git fetch origin
 git branch --show-current
 git status --short
