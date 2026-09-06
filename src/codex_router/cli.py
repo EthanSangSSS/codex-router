@@ -186,7 +186,7 @@ def parser() -> argparse.ArgumentParser:
     ):
         native_parser = subcommands.add_parser(command, help=help_text)
         native_parser.add_argument("--codex-home", type=Path, required=True)
-    migration = subcommands.add_parser("native-migrate-v2", help="migrate recognized Native V1 policy without uninstall")
+    migration = subcommands.add_parser("native-migrate-v2", help="migrate recognized Native V1 or initial V2 policy without uninstall")
     migration.add_argument("--codex-home", type=Path, required=True)
     migration.add_argument("--reviewed-worker-sha256")
     return root
