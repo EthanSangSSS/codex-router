@@ -15,7 +15,7 @@ User
 PRIMARY / Sol
   |-- simple answers, planning, review, interactive UI work --> PRIMARY
   |
-  `-- substantial local engineering -------------------------> fresh luna_worker
+  `-- quota-efficient bounded execution --------------------> fresh luna_worker
                                                                |
                                                                v
                                                          execution evidence
@@ -28,39 +28,25 @@ PRIMARY remains the persistent planner, coordinator, reviewer, and final respond
 
 Native mode intentionally does **not** install Router routing Hooks and does not use the historical K1 / generation-lease / request-staging control plane.
 
-## Current stable line: Native V1.1
+## Native policy V2
 
-Native V1.1 makes delegation explicit and observable.
+Direct Codex PRIMARY may delegate bounded execution-heavy work when expected premium-model quota savings exceed coordination cost without reducing quality. File count, duration, builds and complexity alone do not force delegation. PRIMARY retains interpretation, architecture, ambiguous decisions, security judgment, review and acceptance.
 
-Before substantive work, PRIMARY emits one decision:
+Routine success is quiet. Native tool/session evidence should retain the task, routing reason, actual model/profile, outcome and fallback. Spawn failure, model mismatch, policy conflict and unexpected fallback are visible. `[USE_LUNA]` and `[NO_LUNA]` remain explicit user overrides subject to native capability and workspace safety.
 
-```text
-LUNA_DECISION=SPAWN|PRIMARY_ONLY|FALLBACK
-LUNA_REASON=<short reason>
+Web capability-gap delegation and Company OS durable execution have separate contracts. They do not automatically enter this Direct Codex worker route. Prefer fresh bounded worker context when full-history inheritance overrides the configured role model; verify actual runtime identity before accepting offload evidence.
+
+### Managed V1 to V2 migration
+
+`native-install` generates V2 policy for new installations. Existing V1 state uses:
+
+```bash
+router native-migrate-v2 --codex-home /absolute/codex-home
 ```
 
-PRIMARY must attempt one fresh `luna_worker` for substantial local engineering including:
+If the worker has only the reviewed compatibility change removing obsolete `[agents].enabled`, pass `--reviewed-worker-sha256 sha256:<exact-current-digest>`. Unknown semantic drift is rejected even with a supplied digest. Reviewed worker bytes are preserved verbatim; model and effort are not substituted. The original uninstall backups and V1 ownership storage identifiers are preserved. The policy is V2 even though legacy state/marker names retain V1.
 
-- full test, coverage, or broad regression suites;
-- build, compile, package, release-build, simulator, emulator, or Xcode validation;
-- isolated-worktree, clean-copy, or exact-head validation;
-- multi-file implementation or refactoring;
-- iterative systematic debugging;
-- multiple independent validation layers such as tests + build + artifact/config inspection;
-- local engineering work reasonably expected to take more than five minutes.
-
-PRIMARY stays local for lightweight questions, planning/review-only work, interactive browser/user-session UI work, or when spawning Luna would create a conflicting writable executor.
-
-Optional user overrides:
-
-```text
-[USE_LUNA]   # require a Luna attempt when safe and available
-[NO_LUNA]    # keep the current turn in PRIMARY
-```
-
-Normal use does not require either token.
-
-If native spawning is unavailable or fails, PRIMARY reports a visible `FALLBACK` decision and may continue locally when normal Codex tools permit.
+Before replacement, `migration-v2/` under the managed installation stores copies, modes, before/after hashes and a journal. Each write compares expected content/mode. If interrupted, stop and inspect the journal: restore each exact target from its numbered backup only after verifying every current target matches its recorded before or after hash; never overwrite newer edits or delete the state directory. Original backups are not replaced. Successful migration is idempotent. Start a fresh Codex process and verify runtime behavior; the offline self-test alone is not runtime acceptance.
 
 ## Safety model
 

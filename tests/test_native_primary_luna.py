@@ -23,6 +23,7 @@ from codex_router.native_primary_luna import (
     native_uninstall,
     render_luna_agent_bytes,
     render_primary_block,
+    render_legacy_primary_block,
 )
 from codex_router.state import RouterStateError
 
@@ -55,8 +56,8 @@ class NativeContractRenderingTests(unittest.TestCase):
         )
         self.assertEqual(NATIVE_AGENTS_END, "# END CODEX NATIVE PRIMARY LUNA V1")
 
-    def test_primary_block_requires_visible_delegation_decision_before_substantive_work(self):
-        block = render_primary_block()
+    def test_legacy_recovery_block_requires_visible_delegation_decision_before_substantive_work(self):
+        block = render_legacy_primary_block()
         required = (
             "PRIMARY: the persistent planner, coordinator, reviewer, and final responder",
             "Before the first substantive tool interaction",
@@ -69,8 +70,8 @@ class NativeContractRenderingTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, block)
 
-    def test_primary_block_must_spawn_for_substantial_local_engineering(self):
-        block = render_primary_block()
+    def test_legacy_recovery_block_must_spawn_for_substantial_local_engineering(self):
+        block = render_legacy_primary_block()
         required = (
             "MUST attempt one fresh native `luna_worker`",
             "full test suite, coverage suite, or broad regression suite",
@@ -88,8 +89,8 @@ class NativeContractRenderingTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, block)
 
-    def test_primary_block_has_explicit_user_overrides_and_safe_exceptions(self):
-        block = render_primary_block()
+    def test_legacy_recovery_block_has_explicit_user_overrides_and_safe_exceptions(self):
+        block = render_legacy_primary_block()
         required = (
             "[USE_LUNA]",
             "[NO_LUNA]",
@@ -103,8 +104,8 @@ class NativeContractRenderingTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, block)
 
-    def test_primary_block_requires_visible_fallback_and_no_router_ceremony(self):
-        block = render_primary_block()
+    def test_legacy_recovery_block_requires_visible_fallback_and_no_router_ceremony(self):
+        block = render_legacy_primary_block()
         required = (
             "If the Luna spawn attempt fails",
             "LUNA_DECISION=FALLBACK",
@@ -146,7 +147,6 @@ class NativeContractRenderingTests(unittest.TestCase):
                 "model": "gpt-5.6-luna",
                 "model_reasoning_effort": "max",
                 "developer_instructions": EXPECTED_LUNA_INSTRUCTIONS,
-                "agents": {"enabled": False},
                 "features": {"multi_agent": False, "multi_agent_v2": False},
             },
         )
@@ -543,7 +543,7 @@ class NativeInstallLifecycleTests(unittest.TestCase):
         agents_before = agents.read_bytes()
         luna_before = luna.read_bytes()
 
-        modified_agents = agents_before.replace(b"planner", b"K1", 1)
+        modified_agents = agents_before.replace(b"interpretation", b"K1", 1)
         agents.write_bytes(modified_agents)
         result = native_self_test(self.home)
 
