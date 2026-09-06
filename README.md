@@ -15,7 +15,7 @@ User
 PRIMARY / Sol
   |-- simple answers, planning, review, interactive UI work --> PRIMARY
   |
-  `-- substantial local engineering -------------------------> fresh luna_worker
+  `-- quota-efficient bounded execution --------------------> fresh luna_worker
                                                                |
                                                                v
                                                          execution evidence
@@ -28,39 +28,27 @@ PRIMARY remains the persistent planner, coordinator, reviewer, and final respond
 
 Native mode intentionally does **not** install Router routing Hooks and does not use the historical K1 / generation-lease / request-staging control plane.
 
-## Current stable line: Native V1.1
+## Native policy V2
 
-Native V1.1 makes delegation explicit and observable.
+Before substantial execution, Direct Codex PRIMARY selects one owner by weighing whether expected premium-model quota savings exceed coordination cost without reducing quality. When a bounded slice clearly saves premium work, delegate it to one fresh, verified `luna_worker`; small, reasoning-heavy and tightly coupled tasks stay with PRIMARY. PRIMARY retains interpretation, architecture, ambiguous decisions, security judgment, review and acceptance.
 
-Before substantive work, PRIMARY emits one decision:
+Once Luna owns an execution phase, Luna exclusively owns its implementation, tests, builds, debugging, retries and validation. PRIMARY may inspect read-only evidence, monitor an active request, communicate with the user, make genuinely independent judgment or wait, but does not launch duplicate or overlapping work merely to stay busy or because of latency. Transfer execution ownership only after the worker reaches terminal state or a confirmed interruption; a timeout or missing observation alone never authorizes takeover. Separate parallel execution requires explicit current-task authorization and disjoint ownership.
 
-```text
-LUNA_DECISION=SPAWN|PRIMARY_ONLY|FALLBACK
-LUNA_REASON=<short reason>
+Routine success is quiet. Native tool/session evidence should retain the task, routing reason, actual model/profile, outcome and fallback. Spawn failure, model mismatch, policy conflict and unexpected fallback are visible. `[USE_LUNA]` and `[NO_LUNA]` remain explicit user overrides subject to native capability and workspace safety.
+
+Web capability-gap delegation and Company OS durable execution have separate contracts. They do not automatically enter this Direct Codex worker route. On native spawn surfaces that document it, bind the role explicitly with `agent_type="luna_worker"`; `task_name` is only a label, and `task_name="luna_worker"` cannot select the role or model. Use `fork_turns="none"` for a fresh bounded context when that field exists. If no explicit role field is documented, report capability failure and verify actual runtime identity before accepting offload evidence; never silently substitute a model.
+
+### Managed V1 and initial V2 policy migration
+
+`native-install` generates the current V2 policy for new installations. Existing V1 state and an active installation containing the initial V2 policy use the same command:
+
+```bash
+router native-migrate-v2 --codex-home /absolute/codex-home
 ```
 
-PRIMARY must attempt one fresh `luna_worker` for substantial local engineering including:
+If a V1 worker has only the reviewed compatibility change removing obsolete `[agents].enabled`, pass `--reviewed-worker-sha256 sha256:<exact-current-digest>`. Unknown block or worker drift is rejected, including when a digest is supplied. Reviewed worker bytes, and the current worker model and reasoning effort, are preserved; no model substitution occurs. The original uninstall backups and V1 ownership storage identifiers are preserved. The policy is V2 even though legacy state/marker names retain V1.
 
-- full test, coverage, or broad regression suites;
-- build, compile, package, release-build, simulator, emulator, or Xcode validation;
-- isolated-worktree, clean-copy, or exact-head validation;
-- multi-file implementation or refactoring;
-- iterative systematic debugging;
-- multiple independent validation layers such as tests + build + artifact/config inspection;
-- local engineering work reasonably expected to take more than five minutes.
-
-PRIMARY stays local for lightweight questions, planning/review-only work, interactive browser/user-session UI work, or when spawning Luna would create a conflicting writable executor.
-
-Optional user overrides:
-
-```text
-[USE_LUNA]   # require a Luna attempt when safe and available
-[NO_LUNA]    # keep the current turn in PRIMARY
-```
-
-Normal use does not require either token.
-
-If native spawning is unavailable or fails, PRIMARY reports a visible `FALLBACK` decision and may continue locally when normal Codex tools permit.
+V1 migration uses `migration-v2/`; the initial V2 execution-policy revision uses a separate `migration-policy-v2/`, leaving any existing `migration-v2/` recovery copies untouched. Each journal stores copies, modes and before/after hashes, and each write compares expected content/mode. If interrupted, stop and inspect the applicable journal: restore each exact target from its numbered backup only after verifying every current target matches its recorded before or after hash; never overwrite newer edits or delete the state directory. Successful migration is idempotent. Start a fresh Codex process and verify runtime behavior; the offline self-test alone is not runtime acceptance.
 
 ## Safety model
 

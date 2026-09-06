@@ -19,6 +19,7 @@ from . import luna_control
 from .native_primary_luna import (
     NativeStatus,
     native_install,
+    native_migrate_v2,
     native_self_test,
     native_status,
     native_uninstall,
@@ -185,6 +186,9 @@ def parser() -> argparse.ArgumentParser:
     ):
         native_parser = subcommands.add_parser(command, help=help_text)
         native_parser.add_argument("--codex-home", type=Path, required=True)
+    migration = subcommands.add_parser("native-migrate-v2", help="migrate recognized Native V1 or initial V2 policy without uninstall")
+    migration.add_argument("--codex-home", type=Path, required=True)
+    migration.add_argument("--reviewed-worker-sha256")
     return root
 
 
@@ -461,6 +465,9 @@ def main(argv=None) -> int:
                 luna_reasoning=args.luna_reasoning,
             )
             _print_json(_native_status_payload(native_result))
+            return 0
+        if args.command == "native-migrate-v2":
+            _print_json(_native_status_payload(native_migrate_v2(args.codex_home, reviewed_worker_sha256=args.reviewed_worker_sha256)))
             return 0
         if args.command == "native-status":
             _print_json(_native_status_payload(native_status(args.codex_home)))
